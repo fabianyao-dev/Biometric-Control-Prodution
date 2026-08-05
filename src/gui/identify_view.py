@@ -15,7 +15,8 @@ class IdentifyView(ctk.CTkFrame):
 
         self.cola_eventos = queue.Queue()
         self._crear_interfaz()
-        self._revisar_cola()
+        # COMENTADO TEMPORALMENTE (diagnóstico XCB/X11):
+        # self._revisar_cola()
 
     def _crear_interfaz(self):
         lbl_titulo = ctk.CTkLabel(
