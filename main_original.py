@@ -2,15 +2,11 @@ import sys
 import os
 import platform
 
-# 1. FORZAR XInitThreads ANTES DE CUALQUIER OTRO IMPORT DE GUI O HARDWARE
-if platform.system() != "Windows":
-    try:
-        import ctypes
-        x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
-        x11.XInitThreads()
-        print("✅ XInitThreads inicializado con éxito.")
-    except Exception as e:
-        print(f"⚠️ Error al inicializar XInitThreads: {e}")
+# NOTA: XInitThreads() fue ELIMINADO a propósito.
+# Causaba el abort de XCB "Unknown sequence number ... You called XInitThreads,
+# this is not your fault" al crear los primeros widgets de Tk.
+# Tkinter no lo requiere: los hilos secundarios jamás tocan Tk
+# (se comunican por colas thread-safe drenadas en el hilo principal).
 
 # 2. AHORA SÍ IMPORTAR CUSTOMTKINTER Y EL RESTO DEL PROYECTO
 import customtkinter as ctk

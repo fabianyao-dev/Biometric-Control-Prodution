@@ -16,14 +16,11 @@ logging.info("=== INICIANDO APLICACIÓN EN LINUX ===")
 os.environ["GDK_BACKEND"] = "x11"
 os.environ["TK_SILENCE_DEPRECATION"] = "1"
 
-if platform.system() != "Windows":
-    try:
-        import ctypes
-        x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
-        x11.XInitThreads()
-        logging.info("XInitThreads ejecutado correctamente en libX11.")
-    except Exception as e:
-        logging.error(f"Fallo al ejecutar XInitThreads: {e}")
+# NOTA: XInitThreads() fue ELIMINADO a propósito.
+# Causaba el abort de XCB "Unknown sequence number ... You called XInitThreads,
+# this is not your fault" al crear los primeros widgets de Tk.
+# Tkinter no lo requiere: nuestros hilos secundarios jamás tocan Tk
+# (se comunican por colas thread-safe drenadas en el hilo principal).
 
 logging.info("Importando CustomTkinter...")
 import customtkinter as ctk

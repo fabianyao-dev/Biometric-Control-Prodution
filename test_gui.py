@@ -1,8 +1,5 @@
-import platform
-if platform.system() != "Windows":
-    import ctypes
-    x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
-    x11.XInitThreads()
+import os
+os.environ["GDK_BACKEND"] = "x11"
 
 import customtkinter as ctk
 
