@@ -1,3 +1,14 @@
+import os
+import platform
+
+if platform.system() != "Windows":
+    try:
+        import ctypes
+        x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
+        x11.XInitThreads()
+    except Exception as e:
+        print(f"⚠️ Warning: No se pudo inicializar XInitThreads: {e}")
+
 import customtkinter as ctk
 
 from src.database import init_db
