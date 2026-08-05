@@ -77,8 +77,8 @@ class RegisterView(ttk.Frame):
             log.error("Error en captura: %s", e, exc_info=True)
             self.cola_eventos.put(("CAPTURA_ERROR", str(e)))
 
-    def _progreso_enroll(self, etapa, total):
-        self.cola_eventos.put(("ENROLL_PROGRESO", (etapa, total)))
+    def _progreso_enroll(self, mensaje):
+        self.cola_eventos.put(("ENROLL_PROGRESO", mensaje))
 
     def _revisar_cola(self):
         """Revisa la cola periódicamente desde el hilo principal."""
@@ -86,11 +86,8 @@ class RegisterView(ttk.Frame):
             while True:
                 evento, data = self.cola_eventos.get_nowait()
                 if evento == "ENROLL_PROGRESO":
-                    etapa, total = data
                     self._cambiar_estado(
-                        self.lbl_estado_huella,
-                        f"Coloca la huella (etapa {etapa}/{total})...",
-                        "procesando",
+                        self.lbl_estado_huella, data or "Procesando huella...", "procesando"
                     )
                 elif evento == "ENROLL_TERMINADO":
                     self._mostrar_captura(data)

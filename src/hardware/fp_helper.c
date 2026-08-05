@@ -2,6 +2,9 @@
  * fp_helper.c - Helper de libfprint 2 para captura, enrolamiento e
  * identificacion 1:N con plantillas serializables (almacenadas en SQLite).
  *
+ * API usada: libfprint 2.x (FpContext / FpDevice / FpPrint) con las
+ * variantes sincronas (*_sync). Debian trixie: libfprint-2-dev (1.94.x).
+ *
  * Compilar en Raspberry Pi (desde src/hardware):
  *   gcc -O2 -Wall -o bin/fp_helper fp_helper.c $(pkg-config --cflags --libs libfprint-2)
  *
@@ -12,10 +15,11 @@
  *                        (galeria) y la compara con una captura en vivo.
  *
  * Protocolo: una linea JSON por evento; la ultima es el resultado.
- *   enroll  -> {"status":"stage","stage":N,"n":T,"code":C}   (progreso)
+ *   enroll  -> {"status":"stage","stage":N,"n":T}            (progreso)
+ *              {"status":"progreso","mensaje":"..."}         (retry/estado)
  *              {"status":"complete","size":N,"data":"<hex>"} (exito)
  *              {"status":"error","message":"..."}
- *   identify-> {"status":"retry","attempt":N,"code":C}
+ *   identify-> {"status":"progreso","mensaje":"..."}
  *              {"status":"match","index":K}
  *              {"status":"nomatch"}
  *              {"status":"error","message":"..."}
@@ -29,7 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <libfprint/fprint.h>
+#include <fprint.h>
 
 #define MAX_GALLERY 512
 #define MAX_RETRIES 90
@@ -41,34 +45,34 @@ static void emit(const char *line)
     fflush(stdout);
 }
 
+static void print_escaped(const char *s)
+{
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p == '"' || *p == '\\') {
+            putchar('\\');
+            putchar(*p);
+        } else if (*p >= 32 && *p < 127) {
+            putchar(*p);
+        } else {
+            printf("\\u%04x", *p);
+        }
+    }
+}
+
 static void emit_error(const char *msg)
 {
-    char buf[256];
-    snprintf(buf, sizeof(buf), "{\"status\":\"error\",\"message\":\"%s\"}", msg);
-    emit(buf);
+    fputs("{\"status\":\"error\",\"message\":\"", stdout);
+    print_escaped(msg);
+    fputs("\"}\n", stdout);
+    fflush(stdout);
 }
 
-static struct fp_dev *abrir_dev(void)
+static void emit_progreso(const char *msg)
 {
-    struct fp_dscv_dev *ddev = fp_discover_devs();
-    if (!ddev) {
-        emit_error("no_se_detecto_ningun_lector");
-        return NULL;
-    }
-    struct fp_dev *dev = fp_dev_open(ddev);
-    fp_dscv_dev_free(ddev);
-    if (!dev) {
-        emit_error("no_se_pudo_abrir_el_lector_permisos_udev");
-        return NULL;
-    }
-    return dev;
-}
-
-static void limpiar_galeria(struct fp_print_data **galeria, size_t n)
-{
-    for (size_t i = 0; i < n; i++)
-        if (galeria[i])
-            fp_print_data_free(galeria[i]);
+    fputs("{\"status\":\"progreso\",\"mensaje\":\"", stdout);
+    print_escaped(msg);
+    fputs("\"}\n", stdout);
+    fflush(stdout);
 }
 
 static int hexval(char c)
@@ -103,94 +107,120 @@ static unsigned char *hex_a_bytes(const char *s, size_t *len)
     return buf;
 }
 
+static void enroll_progress_cb(FpDevice *device,
+                               gint completed_stages,
+                               FpPrint *print,
+                               gpointer user_data,
+                               GError *error)
+{
+    int total = GPOINTER_TO_INT(user_data);
+
+    if (error) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "Reintenta: %s", error->message);
+        emit_progreso(buf);
+        return;
+    }
+    if (completed_stages > 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "{\"status\":\"stage\",\"stage\":%d,\"n\":%d}",
+                 completed_stages, total);
+        emit(buf);
+    }
+}
+
+static FpDevice *abrir_primer_dispositivo(FpContext *ctx, GError **error)
+{
+    GPtrArray *devs = fp_context_get_devices(ctx);
+    if (!devs || devs->len == 0) {
+        emit_error("no_se_detecto_ningun_lector");
+        return NULL;
+    }
+    FpDevice *dev = g_ptr_array_index(devs, 0);
+    if (!fp_device_open_sync(dev, NULL, error)) {
+        emit_error("no_se_pudo_abrir_el_lector_permisos_udev");
+        return NULL;
+    }
+    return dev;
+}
+
 static int enroll(void)
 {
-    struct fp_dev *dev = abrir_dev();
-    if (!dev)
+    FpContext *ctx = fp_context_new();
+    if (!ctx) {
+        emit_error("no_se_pudo_inicializar_libfprint");
         return 1;
+    }
 
-    int stages = fp_dev_get_nr_enroll_stages(dev);
-    if (stages <= 0)
-        stages = 1;
+    GError *error = NULL;
+    FpDevice *dev = abrir_primer_dispositivo(ctx, &error);
+    if (!dev) {
+        g_object_unref(ctx);
+        return 1;
+    }
 
-    struct fp_print_data *data = NULL;
-    int etapa = 0;
-    int r = 0;
-    for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        struct fp_img *img = NULL;
-        data = NULL;
-        r = fp_enroll_finger_img(dev, &data, &img);
-        if (img)
-            fp_img_free(img);
+    int total = fp_device_get_nr_enroll_stages(dev);
+    if (total <= 0)
+        total = 1;
 
-        if (r == FP_ENROLL_COMPLETE)
-            break;
-        if (r < 0 || r == FP_ENROLL_FAIL) {
-            if (data)
-                fp_print_data_free(data);
-            emit_error("enrolamiento_fallido");
-            fp_dev_close(dev);
-            return 1;
-        }
-        if (attempt == MAX_RETRIES - 1) {
-            if (data)
-                fp_print_data_free(data);
-            emit_error("demasiados_reintentos");
-            fp_dev_close(dev);
-            return 1;
-        }
-        char buf[128];
-        if (r == FP_ENROLL_PASS) {
-            etapa++;
-            snprintf(buf, sizeof(buf),
-                     "{\"status\":\"stage\",\"stage\":%d,\"n\":%d,\"code\":%d}",
-                     etapa, stages, r);
+    FpPrint *tpl = fp_print_new(dev);
+    FpPrint *print = fp_device_enroll_sync(dev, tpl, NULL,
+                                           enroll_progress_cb,
+                                           GINT_TO_POINTER(total),
+                                           &error);
+    g_object_unref(tpl);
+
+    if (!print) {
+        if (error) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "Enrolamiento fallido: %s", error->message);
+            emit_error(buf);
+            g_error_free(error);
         } else {
-            snprintf(buf, sizeof(buf),
-                     "{\"status\":\"retry\",\"attempt\":%d,\"code\":%d}",
-                     attempt + 1, r);
+            emit_error("enrolamiento_fallido");
         }
-        emit(buf);
-        if (data)
-            fp_print_data_free(data);
-    }
-
-    if (!data) {
-        emit_error("sin_datos_de_huella");
-        fp_dev_close(dev);
+        fp_device_close_sync(dev, NULL, NULL);
+        g_object_unref(ctx);
         return 1;
     }
 
-    const unsigned char *raw = NULL;
-    size_t len = 0;
-    r = fp_print_data_get_data(data, &raw);
-    if (r < 0 || !raw) {
-        emit_error("serializacion_fallida");
-        fp_print_data_free(data);
-        fp_dev_close(dev);
+    guchar *data = NULL;
+    gsize len = 0;
+    if (!fp_print_serialize(print, &data, &len, &error)) {
+        if (error) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "Serializacion fallida: %s", error->message);
+            emit_error(buf);
+            g_error_free(error);
+        } else {
+            emit_error("serializacion_fallida");
+        }
+        g_object_unref(print);
+        fp_device_close_sync(dev, NULL, NULL);
+        g_object_unref(ctx);
         return 1;
     }
 
     printf("{\"status\":\"complete\",\"size\":%zu,\"data\":\"", len);
-    for (size_t i = 0; i < len; i++)
-        printf("%02x", raw[i]);
+    for (gsize i = 0; i < len; i++)
+        printf("%02x", data[i]);
     printf("\"}\n");
     fflush(stdout);
 
-    fp_print_data_free(data);
-    fp_dev_close(dev);
+    g_free(data);
+    g_object_unref(print);
+    fp_device_close_sync(dev, NULL, NULL);
+    g_object_unref(ctx);
     return 0;
 }
 
 static int identify(void)
 {
-    struct fp_print_data *galeria[MAX_GALLERY];
-    size_t gcount = 0;
-    memset(galeria, 0, sizeof(galeria));
+    GPtrArray *galeria = g_ptr_array_new_with_free_func(g_object_unref);
 
     char *line = NULL;
     size_t cap = 0;
-    while (gcount < MAX_GALLERY && getline(&line, &cap, stdin) > 0) {
+    while (galeria->len < MAX_GALLERY && getline(&line, &cap, stdin) > 0) {
         size_t n = strlen(line);
         while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
             line[--n] = 0;
@@ -202,73 +232,115 @@ static int identify(void)
         if (!raw) {
             emit_error("plantilla_invalida");
             free(line);
-            limpiar_galeria(galeria, gcount);
+            g_ptr_array_unref(galeria);
             return 1;
         }
-        struct fp_print_data *data = fp_print_data_from_data(raw, len);
+        GError *error = NULL;
+        FpPrint *p = fp_print_deserialize(raw, len, &error);
         free(raw);
-        if (!data) {
+        if (!p) {
+            if (error)
+                g_error_free(error);
             emit_error("plantilla_ilegible");
             free(line);
-            limpiar_galeria(galeria, gcount);
+            g_ptr_array_unref(galeria);
             return 1;
         }
-        galeria[gcount++] = data;
+        g_ptr_array_add(galeria, p);
     }
     free(line);
 
-    if (gcount == 0) {
+    if (galeria->len == 0) {
         emit_error("galeria_vacia");
+        g_ptr_array_unref(galeria);
         return 1;
     }
 
-    struct fp_dev *dev = abrir_dev();
+    FpContext *ctx = fp_context_new();
+    if (!ctx) {
+        emit_error("no_se_pudo_inicializar_libfprint");
+        g_ptr_array_unref(galeria);
+        return 1;
+    }
+
+    GError *error = NULL;
+    FpDevice *dev = abrir_primer_dispositivo(ctx, &error);
     if (!dev) {
-        limpiar_galeria(galeria, gcount);
+        g_object_unref(ctx);
+        g_ptr_array_unref(galeria);
         return 1;
     }
 
-    size_t match = 0;
-    for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        struct fp_img *img = NULL;
-        int r = fp_identify_finger_img(dev, galeria, &match, &img);
-        if (img)
-            fp_img_free(img);
-
-        if (r == FP_VERIFY_MATCH) {
-            char buf[64];
-            snprintf(buf, sizeof(buf), "{\"status\":\"match\",\"index\":%zu}", match);
-            emit(buf);
-            fp_dev_close(dev);
-            limpiar_galeria(galeria, gcount);
-            return 0;
-        }
-        if (r == FP_VERIFY_NOMATCH) {
-            emit("{\"status\":\"nomatch\"}");
-            fp_dev_close(dev);
-            limpiar_galeria(galeria, gcount);
-            return 0;
-        }
-        if (r < 0) {
-            emit_error("error_de_identificacion");
-            fp_dev_close(dev);
-            limpiar_galeria(galeria, gcount);
-            return 1;
-        }
-        if (attempt == MAX_RETRIES - 1) {
-            emit_error("demasiados_reintentos");
-            fp_dev_close(dev);
-            limpiar_galeria(galeria, gcount);
-            return 1;
-        }
-        char buf[96];
-        snprintf(buf, sizeof(buf),
-                 "{\"status\":\"retry\",\"attempt\":%d,\"code\":%d}", attempt + 1, r);
-        emit(buf);
+    if (!fp_device_has_feature(dev, FP_DEVICE_FEATURE_IDENTIFY)) {
+        emit_error("el_lector_no_soporta_identificacion");
+        fp_device_close_sync(dev, NULL, NULL);
+        g_object_unref(ctx);
+        g_ptr_array_unref(galeria);
+        return 1;
     }
 
-    fp_dev_close(dev);
-    limpiar_galeria(galeria, gcount);
+    for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        FpPrint *match = NULL;
+        FpPrint *scan = NULL;
+        error = NULL;
+
+        if (fp_device_identify_sync(dev, galeria, NULL, NULL, NULL,
+                                    &match, &scan, &error)) {
+            if (match) {
+                int idx = -1;
+                for (guint i = 0; i < galeria->len; i++) {
+                    if (g_ptr_array_index(galeria, i) == match) {
+                        idx = (int)i;
+                        break;
+                    }
+                }
+                if (idx < 0)
+                    idx = 0;
+                char buf[64];
+                snprintf(buf, sizeof(buf), "{\"status\":\"match\",\"index\":%d}", idx);
+                emit(buf);
+            } else {
+                emit("{\"status\":\"nomatch\"}");
+            }
+            if (scan)
+                g_object_unref(scan);
+            if (match)
+                g_object_unref(match);
+            fp_device_close_sync(dev, NULL, NULL);
+            g_object_unref(ctx);
+            g_ptr_array_unref(galeria);
+            return 0;
+        }
+
+        if (error) {
+            gboolean retry = g_error_matches(error, FP_DEVICE_RETRY, error->code);
+            g_clear_error(&error);
+            if (retry && attempt < MAX_RETRIES - 1) {
+                char buf[128];
+                snprintf(buf, sizeof(buf),
+                         "Escaneo incompleto, coloca la huella de nuevo (intento %d)",
+                         attempt + 2);
+                emit_progreso(buf);
+                continue;
+            }
+            emit_error("demasiados_reintentos");
+            fp_device_close_sync(dev, NULL, NULL);
+            g_object_unref(ctx);
+            g_ptr_array_unref(galeria);
+            return 1;
+        }
+
+        emit_error("error_de_identificacion");
+        fp_device_close_sync(dev, NULL, NULL);
+        g_object_unref(ctx);
+        g_ptr_array_unref(galeria);
+        return 1;
+    }
+
+    emit_error("demasiados_reintentos");
+    fp_device_close_sync(dev, NULL, NULL);
+    g_object_unref(ctx);
+    g_ptr_array_unref(galeria);
     return 1;
 }
 

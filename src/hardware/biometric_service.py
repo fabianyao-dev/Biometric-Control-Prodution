@@ -103,7 +103,12 @@ class BiometricService:
                 estado = ev.get("status")
                 if estado == "stage":
                     if on_progress:
-                        on_progress(ev.get("stage", 0), ev.get("n", 0))
+                        on_progress(
+                            f"Coloca la huella (etapa {ev.get('stage', 0)}/{ev.get('n', 0)})..."
+                        )
+                elif estado == "progreso":
+                    if on_progress:
+                        on_progress(ev.get("mensaje", ""))
                 elif estado in ("complete", "error"):
                     ultimo = ev
             proc.wait()
@@ -238,9 +243,9 @@ class BiometricService:
                 except ValueError:
                     continue
                 estado = ev.get("status")
-                if estado == "retry":
+                if estado == "progreso":
                     if on_progress:
-                        on_progress(ev.get("attempt", 0), None)
+                        on_progress(ev.get("mensaje", ""))
                 elif estado == "match":
                     resultado = (ev.get("index", 0), 0)
                 elif estado == "nomatch":

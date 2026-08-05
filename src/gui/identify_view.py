@@ -79,8 +79,8 @@ class IdentifyView(ttk.Frame):
             log.error("Error en identificación: %s", e, exc_info=True)
             self.cola_eventos.put(("CAPTURA_ERROR", str(e)))
 
-    def _progreso_identificar(self, intento, _total):
-        self.cola_eventos.put(("IDENT_PROGRESO", intento))
+    def _progreso_identificar(self, mensaje):
+        self.cola_eventos.put(("IDENT_PROGRESO", mensaje))
 
     def _revisar_cola(self):
         """Revisa la cola periódicamente desde el hilo principal."""
@@ -101,9 +101,7 @@ class IdentifyView(ttk.Frame):
                     self._cambiar_resultado("", "info")
                 elif evento == "IDENT_PROGRESO":
                     self._cambiar_estado(
-                        self.lbl_estado,
-                        f"Coloca la huella en el sensor... (intento {data})",
-                        "procesando",
+                        self.lbl_estado, data or "Coloca la huella en el sensor...", "procesando"
                     )
                 elif evento == "CAPTURA_ERROR":
                     self._mostrar_error(data)
