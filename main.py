@@ -1,87 +1,80 @@
 import sys
 import os
 import platform
+import logging
 
-# 1. FORZAR XInitThreads ANTES DE CUALQUIER OTRO IMPORT DE GUI O HARDWARE
+# Configurar logs con formato preciso y marcas de tiempo
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s.%(msecs)03d [%(levelname)s] (%(threadName)s) %(message)s',
+    datefmt='%H:%M:%S'
+)
+
+logging.info("=== INICIANDO APLICACIÓN EN LINUX ===")
+
+# 1. FORZAR X11 Y MODOS SÍNCRONOS A NIVEL DE ENTORNO
+os.environ["GDK_BACKEND"] = "x11"
+os.environ["TK_SILENCE_DEPRECATION"] = "1"
+
 if platform.system() != "Windows":
     try:
         import ctypes
         x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
         x11.XInitThreads()
-        print("✅ XInitThreads inicializado con éxito.")
+        logging.info("XInitThreads ejecutado correctamente en libX11.")
     except Exception as e:
-        print(f"⚠️ Error al inicializar XInitThreads: {e}")
+        logging.error(f"Fallo al ejecutar XInitThreads: {e}")
 
-# 2. AHORA SÍ IMPORTAR CUSTOMTKINTER Y EL RESTO DEL PROYECTO
+logging.info("Importando CustomTkinter...")
 import customtkinter as ctk
+logging.info("CustomTkinter importado con éxito.")
 
-from src.database import init_db
-from src.gui.identify_view import IdentifyView
-from src.gui.register_view import RegisterView
+logging.info("Importando dependencias del proyecto (Servicios / Hardware)...")
+
+# Agregar logs antes de cada import clave para detectar cuál dispara hilos C
+try:
+    logging.info("Importando BiometricService...")
+    from src.hardware.biometric_service import BiometricService
+    logging.info("BiometricService importado.")
+except Exception as e:
+    logging.error(f"Error al importar BiometricService: {e}")
+
+try:
+    logging.info("Importando vistas de la GUI...")
+    from src.gui.identify_view import IdentifyView
+    from src.gui.register_view import RegisterView
+    logging.info("Vistas importadas correctamente.")
+except Exception as e:
+    logging.error(f"Error al importar Vistas: {e}")
 
 
-class App(ctk.CTk):
+class MainApp(ctk.CTk):
     def __init__(self):
+        logging.info("Inicializando ctk.CTk() ventana principal...")
         super().__init__()
+        logging.info("Instancia de ctk.CTk() creada correctamente.")
 
-        self.title("Sistema de Control Biométrico - Planta de Corte")
-        self.geometry("800x600")
+        self.title("Sistema de Control Biométrico")
+        self.geometry("800x480")
 
-        ctk.set_appearance_mode("Dark")
-        ctk.set_default_color_theme("blue")
+        logging.info("Inicializando servicios de hardware...")
+        self.biometric_service = BiometricService()
+        logging.info("Servicios de hardware instanciados.")
 
-        init_db()
+        # Construcción de vistas
+        logging.info("Cargando vista de identificación...")
+        self.container = ctk.CTkFrame(self)
+        self.container.pack(fill="both", expand=True)
 
-        self.vistas = {}
-        self.vista_actual = None
-
-        self._crear_navegacion()
-        self._crear_contenido()
-        self.mostrar_vista("registro")
-
-    def _crear_navegacion(self):
-        header = ctk.CTkFrame(self, height=64, corner_radius=0)
-        header.pack(fill="x", side="top")
-        header.pack_propagate(False)
-
-        self.btn_registro = ctk.CTkButton(
-            header,
-            text="Registrar",
-            command=lambda: self.mostrar_vista("registro"),
-            width=140,
-            height=36,
-        )
-        self.btn_registro.pack(side="left", padx=(20, 8), pady=14)
-
-        self.btn_identificar = ctk.CTkButton(
-            header,
-            text="Identificar",
-            command=lambda: self.mostrar_vista("identificar"),
-            width=140,
-            height=36,
-        )
-        self.btn_identificar.pack(side="left", padx=8, pady=14)
-
-    def _crear_contenido(self):
-        self.content = ctk.CTkFrame(self, corner_radius=0)
-        self.content.pack(fill="both", expand=True)
-
-    def mostrar_vista(self, nombre):
-        if self.vista_actual is not None:
-            self.vista_actual.pack_forget()
-
-        vista = self.vistas.get(nombre)
-        if vista is None:
-            if nombre == "identificar":
-                vista = IdentifyView(self.content, self)
-            else:
-                vista = RegisterView(self.content, self)
-            self.vistas[nombre] = vista
-
-        vista.pack(fill="both", expand=True)
-        self.vista_actual = vista
-
+        self.identify_view = IdentifyView(self.container, self)
+        self.identify_view.pack(fill="both", expand=True)
+        logging.info("GUI lista para iniciar bucle de eventos.")
 
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+    try:
+        app = MainApp()
+        logging.info("Iniciando app.mainloop() [Hilo Principal]...")
+        app.mainloop()
+        logging.info("Aplicación cerrada normalmente.")
+    except Exception as e:
+        logging.critical(f"Excepción no controlada en mainloop: {e}", exc_info=True)
