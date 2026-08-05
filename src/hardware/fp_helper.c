@@ -163,12 +163,16 @@ static int enroll(void)
     if (total <= 0)
         total = 1;
 
-    FpPrint *tpl = fp_print_new(dev);
-    FpPrint *print = fp_device_enroll_sync(dev, tpl, NULL,
-                                           enroll_progress_cb,
-                                           GINT_TO_POINTER(total),
-                                           &error);
-    g_object_unref(tpl);
+    /* fp_print_new devuelve una referencia flotante que fp_device_enroll
+     * se apropia (ref_sink). NO hacer g_object_unref() de la plantilla:
+     * el mismo objeto se devuelve como resultado (transfer full) y ya lo
+     * poseemos en `print`. Un unref aqui liberaria el objeto antes de
+     * serializarlo (use-after-free). */
+    FpPrint *print = fp_print_new(dev);
+    print = fp_device_enroll_sync(dev, print, NULL,
+                                  enroll_progress_cb,
+                                  GINT_TO_POINTER(total),
+                                  &error);
 
     if (!print) {
         if (error) {
