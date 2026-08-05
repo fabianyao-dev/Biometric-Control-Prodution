@@ -1,10 +1,22 @@
+import os
 import sys
-import winsound
 
 from src import config
 from src.hardware.biometric_sdk import obtener_sdk
 
 sys.stdout.reconfigure(encoding="utf-8")
+
+if os.name == "nt":
+    import winsound
+
+    def emitir_beep(freq=2000, duration=200):
+        winsound.Beep(freq, duration)
+else:
+    def emitir_beep(freq=2000, duration=200):
+        try:
+            print("\a", end="", flush=True)
+        except Exception:
+            pass
 
 
 class BiometricService:
@@ -23,7 +35,7 @@ class BiometricService:
         """
         timeout_ms = timeout_ms or config.CAPTURE_TIMEOUT_MS
         try:
-            winsound.Beep(1200, 200)
+            emitir_beep(1200, 200)
         except Exception:
             pass
 
