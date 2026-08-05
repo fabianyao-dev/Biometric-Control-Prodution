@@ -1,14 +1,18 @@
+import sys
 import os
 import platform
 
+# 1. FORZAR XInitThreads ANTES DE CUALQUIER OTRO IMPORT DE GUI O HARDWARE
 if platform.system() != "Windows":
     try:
         import ctypes
         x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
         x11.XInitThreads()
+        print("✅ XInitThreads inicializado con éxito.")
     except Exception as e:
-        print(f"⚠️ Warning: No se pudo inicializar XInitThreads: {e}")
+        print(f"⚠️ Error al inicializar XInitThreads: {e}")
 
+# 2. AHORA SÍ IMPORTAR CUSTOMTKINTER Y EL RESTO DEL PROYECTO
 import customtkinter as ctk
 
 from src.database import init_db
