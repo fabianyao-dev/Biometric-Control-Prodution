@@ -1,3 +1,4 @@
+import queue
 import threading
 import customtkinter as ctk
 
@@ -12,7 +13,9 @@ class IdentifyView(ctk.CTkFrame):
         self.servicio = BiometricService()
         self._identificando = False
 
+        self.cola_eventos = queue.Queue()
         self._crear_interfaz()
+        self._revisar_cola()
 
     def _crear_interfaz(self):
         lbl_titulo = ctk.CTkLabel(
@@ -60,10 +63,27 @@ class IdentifyView(ctk.CTkFrame):
         threading.Thread(target=self._identificar_en_hilo, daemon=True).start()
 
     def _identificar_en_hilo(self):
-        captura = self.servicio.capturar_huella()
-        self.after(0, lambda: self._procesar(captura))
+        """Hilo secundario: solo trabajo pesado, sin tocar widgets."""
+        try:
+            captura = self.servicio.capturar_huella()
+            self.cola_eventos.put(("CAPTURA_EXITO", captura))
+        except Exception as e:
+            self.cola_eventos.put(("CAPTURA_ERROR", str(e)))
 
-    def _procesar(self, captura):
+    def _revisar_cola(self):
+        """Revisa la cola periódicamente desde el hilo principal."""
+        try:
+            while True:
+                evento, data = self.cola_eventos.get_nowait()
+                if evento == "CAPTURA_EXITO":
+                    self._procesar_resultado(data)
+                elif evento == "CAPTURA_ERROR":
+                    self._mostrar_error(data)
+        except queue.Empty:
+            pass
+        self.after(50, self._revisar_cola)
+
+    def _procesar_resultado(self, captura):
         self._identificando = False
         self.btn_identificar.configure(state="normal")
 
@@ -100,3 +120,9 @@ class IdentifyView(ctk.CTkFrame):
                 text="❌ Huella no reconocida", text_color="red"
             )
             self.lbl_resultado.configure(text="Operador no encontrado", text_color="red")
+
+    def _mostrar_error(self, mensaje):
+        self._identificando = False
+        self.btn_identificar.configure(state="normal")
+        self.lbl_estado.configure(text="❌ Error al capturar", text_color="red")
+        self.lbl_resultado.configure(text=mensaje, text_color="red")

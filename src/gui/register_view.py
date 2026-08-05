@@ -1,3 +1,4 @@
+import queue
 import threading
 import customtkinter as ctk
 from tkinter import messagebox
@@ -14,7 +15,9 @@ class RegisterView(ctk.CTkFrame):
         self.huella_cap_data = None
         self._capturando = False
 
+        self.cola_eventos = queue.Queue()
         self._crear_interfaz()
+        self._revisar_cola()
 
     def _crear_interfaz(self):
         lbl_titulo = ctk.CTkLabel(
@@ -74,8 +77,25 @@ class RegisterView(ctk.CTkFrame):
         threading.Thread(target=self._capturar_en_hilo, daemon=True).start()
 
     def _capturar_en_hilo(self):
-        data = self.servicio.capturar_huella()
-        self.after(0, lambda: self._mostrar_captura(data))
+        """Hilo secundario: solo trabajo pesado, sin tocar widgets."""
+        try:
+            data = self.servicio.capturar_huella()
+            self.cola_eventos.put(("HUELVA_REGISTRADA", data))
+        except Exception as e:
+            self.cola_eventos.put(("CAPTURA_ERROR", str(e)))
+
+    def _revisar_cola(self):
+        """Revisa la cola periódicamente desde el hilo principal."""
+        try:
+            while True:
+                evento, data = self.cola_eventos.get_nowait()
+                if evento == "HUELVA_REGISTRADA":
+                    self._mostrar_captura(data)
+                elif evento == "CAPTURA_ERROR":
+                    self._mostrar_error(data)
+        except queue.Empty:
+            pass
+        self.after(50, self._revisar_cola)
 
     def _mostrar_captura(self, data):
         self._capturando = False
@@ -90,6 +110,12 @@ class RegisterView(ctk.CTkFrame):
             self.lbl_estado_huella.configure(
                 text="❌ Error o tiempo agotado. Reintenta.", text_color="red"
             )
+
+    def _mostrar_error(self, mensaje):
+        self._capturando = False
+        self.btn_capturar.configure(state="normal")
+        self.huella_cap_data = None
+        self.lbl_estado_huella.configure(text=f"❌ Error al capturar: {mensaje}", text_color="red")
 
     def _guardar(self):
         nombre = self.entry_nombre.get().strip()
