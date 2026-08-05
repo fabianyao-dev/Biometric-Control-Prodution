@@ -1,14 +1,15 @@
 import queue
 import threading
-import customtkinter as ctk
+from tkinter import ttk
 
 from src.database import listar_fmds
+from src.gui.style import ESTILOS_ESTADO
 from src.hardware.biometric_service import BiometricService
 
 
-class IdentifyView(ctk.CTkFrame):
+class IdentifyView(ttk.Frame):
     def __init__(self, parent, controller):
-        super().__init__(parent)
+        super().__init__(parent, style="TFrame")
         self.controller = controller
         self.servicio = BiometricService()
         self._identificando = False
@@ -18,47 +19,41 @@ class IdentifyView(ctk.CTkFrame):
         self._revisar_cola()
 
     def _crear_interfaz(self):
-        lbl_titulo = ctk.CTkLabel(
-            self,
-            text="Identificación de Operador",
-            font=ctk.CTkFont(size=24, weight="bold"),
-        )
-        lbl_titulo.pack(pady=(30, 10))
+        ttk.Label(
+            self, text="Identificación de Operador", style="Title.TLabel"
+        ).pack(pady=(30, 10))
 
-        self.lbl_estado = ctk.CTkLabel(
-            self,
-            text="Coloca tu huella para identificarte",
-            text_color="lightgray",
-            font=ctk.CTkFont(size=16),
+        self.lbl_estado = ttk.Label(
+            self, text="Coloca tu huella para identificarte", style="Info.TLabel"
         )
         self.lbl_estado.pack(pady=20)
 
-        self.lbl_resultado = ctk.CTkLabel(
-            self,
-            text="",
-            font=ctk.CTkFont(size=22, weight="bold"),
+        self.lbl_resultado = ttk.Label(
+            self, text="", style="ResultadoInfo.TLabel"
         )
         self.lbl_resultado.pack(pady=20)
 
-        self.btn_identificar = ctk.CTkButton(
-            self,
-            text="Colocar Huella e Identificar",
-            command=self._identificar,
-            width=240,
-            height=46,
-            font=ctk.CTkFont(size=15),
-            fg_color="#1f538d",
+        self.btn_identificar = ttk.Button(
+            self, text="Colocar Huella e Identificar", command=self._identificar
         )
         self.btn_identificar.pack(pady=20)
+
+    def _cambiar_estado(self, etiqueta, texto, estado):
+        etiqueta.configure(text=texto, style=ESTILOS_ESTADO[estado])
+
+    def _cambiar_resultado(self, texto, estado):
+        self.lbl_resultado.configure(
+            text=texto, style=f"Resultado{estado.capitalize()}.TLabel"
+        )
 
     def _identificar(self):
         if self._identificando:
             return
         self._identificando = True
         self.btn_identificar.configure(state="disabled")
-        self.lbl_resultado.configure(text="")
-        self.lbl_estado.configure(
-            text="⏳ Coloca tu huella en el sensor...", text_color="yellow"
+        self._cambiar_resultado("", "info")
+        self._cambiar_estado(
+            self.lbl_estado, "⏳ Coloca tu huella en el sensor...", "procesando"
         )
         threading.Thread(target=self._identificar_en_hilo, daemon=True).start()
 
@@ -88,19 +83,20 @@ class IdentifyView(ctk.CTkFrame):
         self.btn_identificar.configure(state="normal")
 
         if not captura:
-            self.lbl_estado.configure(
-                text="❌ Error o tiempo agotado. Reintenta.", text_color="red"
+            self._cambiar_estado(
+                self.lbl_estado, "❌ Error o tiempo agotado. Reintenta.", "error"
             )
-            self.lbl_resultado.configure(text="")
+            self._cambiar_resultado("", "info")
             return
 
         filas = listar_fmds()
         if not filas:
-            self.lbl_estado.configure(
-                text="⚠️ No hay operadores registrados. Regístralo primero.",
-                text_color="orange",
+            self._cambiar_estado(
+                self.lbl_estado,
+                "⚠️ No hay operadores registrados. Regístralo primero.",
+                "pendiente",
             )
-            self.lbl_resultado.configure(text="")
+            self._cambiar_resultado("", "info")
             return
 
         fmds = [fila[2] for fila in filas]
@@ -109,20 +105,14 @@ class IdentifyView(ctk.CTkFrame):
         if resultado:
             idx, _score = resultado
             nombre = filas[idx][1]
-            self.lbl_estado.configure(
-                text="✅ Identificación exitosa", text_color="green"
-            )
-            self.lbl_resultado.configure(
-                text=f"Bienvenido, {nombre}", text_color="#2fa572"
-            )
+            self._cambiar_estado(self.lbl_estado, "✅ Identificación exitosa", "exito")
+            self._cambiar_resultado(f"Bienvenido, {nombre}", "exito")
         else:
-            self.lbl_estado.configure(
-                text="❌ Huella no reconocida", text_color="red"
-            )
-            self.lbl_resultado.configure(text="Operador no encontrado", text_color="red")
+            self._cambiar_estado(self.lbl_estado, "❌ Huella no reconocida", "error")
+            self._cambiar_resultado("Operador no encontrado", "error")
 
     def _mostrar_error(self, mensaje):
         self._identificando = False
         self.btn_identificar.configure(state="normal")
-        self.lbl_estado.configure(text="❌ Error al capturar", text_color="red")
-        self.lbl_resultado.configure(text=mensaje, text_color="red")
+        self._cambiar_estado(self.lbl_estado, "❌ Error al capturar", "error")
+        self._cambiar_resultado(mensaje, "error")

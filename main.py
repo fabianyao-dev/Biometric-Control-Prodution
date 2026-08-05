@@ -1,77 +1,72 @@
-import sys
 import os
-import platform
-import logging
+import tkinter as tk
+from tkinter import ttk
 
-# Configurar logs con formato preciso y marcas de tiempo
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s.%(msecs)03d [%(levelname)s] (%(threadName)s) %(message)s',
-    datefmt='%H:%M:%S'
-)
-
-logging.info("=== INICIANDO APLICACIÓN EN LINUX ===")
-
-# 1. FORZAR X11 Y MODOS SÍNCRONOS A NIVEL DE ENTORNO
-os.environ["GDK_BACKEND"] = "x11"
-os.environ["TK_SILENCE_DEPRECATION"] = "1"
-
-# NOTA: XInitThreads() fue ELIMINADO a propósito.
-# Causaba el abort de XCB "Unknown sequence number ... You called XInitThreads,
-# this is not your fault" al crear los primeros widgets de Tk.
-# Tkinter no lo requiere: nuestros hilos secundarios jamás tocan Tk
-# (se comunican por colas thread-safe drenadas en el hilo principal).
-
-logging.info("Importando CustomTkinter...")
-import customtkinter as ctk
-logging.info("CustomTkinter importado con éxito.")
-
-logging.info("Importando dependencias del proyecto (Servicios / Hardware)...")
-
-# Agregar logs antes de cada import clave para detectar cuál dispara hilos C
-try:
-    logging.info("Importando BiometricService...")
-    from src.hardware.biometric_service import BiometricService
-    logging.info("BiometricService importado.")
-except Exception as e:
-    logging.error(f"Error al importar BiometricService: {e}")
-
-try:
-    logging.info("Importando vistas de la GUI...")
-    from src.gui.identify_view import IdentifyView
-    from src.gui.register_view import RegisterView
-    logging.info("Vistas importadas correctamente.")
-except Exception as e:
-    logging.error(f"Error al importar Vistas: {e}")
+from src.database import init_db
+from src.gui.identify_view import IdentifyView
+from src.gui.register_view import RegisterView
+from src.gui.style import aplicar_estilo
 
 
-class MainApp(ctk.CTk):
+class App(tk.Tk):
     def __init__(self):
-        logging.info("Inicializando ctk.CTk() ventana principal...")
         super().__init__()
-        logging.info("Instancia de ctk.CTk() creada correctamente.")
-
-        self.title("Sistema de Control Biométrico")
+        self.title("Sistema de Control Biométrico - Planta de Corte")
         self.geometry("800x480")
 
-        logging.info("Inicializando servicios de hardware...")
-        self.biometric_service = BiometricService()
-        logging.info("Servicios de hardware instanciados.")
+        if os.environ.get("BIOMETRICO_KIOSKO") == "1":
+            self.attributes("-fullscreen", True)
 
-        # Construcción de vistas
-        logging.info("Cargando vista de identificación...")
-        self.container = ctk.CTkFrame(self)
-        self.container.pack(fill="both", expand=True)
+        aplicar_estilo(self)
+        init_db()
 
-        self.identify_view = IdentifyView(self.container, self)
-        self.identify_view.pack(fill="both", expand=True)
-        logging.info("GUI lista para iniciar bucle de eventos.")
+        self.vistas = {}
+        self.vista_actual = None
+
+        self._crear_navegacion()
+        self._crear_contenido()
+        self.mostrar_vista("registro")
+
+    def _crear_navegacion(self):
+        header = ttk.Frame(self, style="Header.TFrame")
+        header.pack(fill="x", side="top")
+
+        self.btn_registro = ttk.Button(
+            header,
+            text="Registrar",
+            style="Nav.TButton",
+            command=lambda: self.mostrar_vista("registro"),
+        )
+        self.btn_registro.pack(side="left", padx=(20, 8), pady=10)
+
+        self.btn_identificar = ttk.Button(
+            header,
+            text="Identificar",
+            style="Nav.TButton",
+            command=lambda: self.mostrar_vista("identificar"),
+        )
+        self.btn_identificar.pack(side="left", padx=8, pady=10)
+
+    def _crear_contenido(self):
+        self.content = ttk.Frame(self, style="TFrame")
+        self.content.pack(fill="both", expand=True)
+
+    def mostrar_vista(self, nombre):
+        if self.vista_actual is not None:
+            self.vista_actual.pack_forget()
+
+        vista = self.vistas.get(nombre)
+        if vista is None:
+            if nombre == "identificar":
+                vista = IdentifyView(self.content, self)
+            else:
+                vista = RegisterView(self.content, self)
+            self.vistas[nombre] = vista
+
+        vista.pack(fill="both", expand=True)
+        self.vista_actual = vista
+
 
 if __name__ == "__main__":
-    try:
-        app = MainApp()
-        logging.info("Iniciando app.mainloop() [Hilo Principal]...")
-        app.mainloop()
-        logging.info("Aplicación cerrada normalmente.")
-    except Exception as e:
-        logging.critical(f"Excepción no controlada en mainloop: {e}", exc_info=True)
+    app = App()
+    app.mainloop()

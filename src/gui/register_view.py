@@ -1,15 +1,16 @@
 import queue
 import threading
-import customtkinter as ctk
-from tkinter import messagebox
+import tkinter as tk
+from tkinter import ttk
 
 from src.database import guardar_operador
+from src.gui.style import ESTILOS_ESTADO
 from src.hardware.biometric_service import BiometricService
 
 
-class RegisterView(ctk.CTkFrame):
+class RegisterView(ttk.Frame):
     def __init__(self, parent, controller):
-        super().__init__(parent)
+        super().__init__(parent, style="TFrame")
         self.controller = controller
         self.servicio = BiometricService()
         self.huella_cap_data = None
@@ -20,60 +21,46 @@ class RegisterView(ctk.CTkFrame):
         self._revisar_cola()
 
     def _crear_interfaz(self):
-        lbl_titulo = ctk.CTkLabel(
-            self,
-            text="Registro de Operador",
-            font=ctk.CTkFont(size=24, weight="bold"),
-        )
-        lbl_titulo.pack(pady=(30, 10))
+        ttk.Label(
+            self, text="Registro de Operador", style="Title.TLabel"
+        ).pack(pady=(30, 10))
 
-        self.entry_nombre = ctk.CTkEntry(
-            self,
-            placeholder_text="Nombre Completo",
-            width=320,
-            height=44,
-            font=ctk.CTkFont(size=16),
+        self.var_nombre = tk.StringVar()
+        self.entry_nombre = ttk.Entry(
+            self, textvariable=self.var_nombre, width=32, justify="center"
         )
         self.entry_nombre.pack(pady=12)
 
-        self.lbl_estado_huella = ctk.CTkLabel(
-            self,
-            text="Huella: Pendiente de captura",
-            text_color="orange",
-            font=ctk.CTkFont(size=14),
+        self.lbl_estado_huella = ttk.Label(
+            self, text="Huella: Pendiente de captura", style="Pendiente.TLabel"
         )
         self.lbl_estado_huella.pack(pady=12)
 
-        self.btn_capturar = ctk.CTkButton(
-            self,
-            text="Colocar y Leer Huella",
-            command=self._capturar_huella,
-            width=220,
-            height=44,
-            font=ctk.CTkFont(size=15),
-            fg_color="#1f538d",
+        self.btn_capturar = ttk.Button(
+            self, text="Colocar y Leer Huella", command=self._capturar_huella
         )
         self.btn_capturar.pack(pady=8)
 
-        self.btn_guardar = ctk.CTkButton(
-            self,
-            text="Guardar Operador",
-            command=self._guardar,
-            width=220,
-            height=44,
-            font=ctk.CTkFont(size=15),
-            fg_color="#2fa572",
+        self.btn_guardar = ttk.Button(
+            self, text="Guardar Operador", command=self._guardar, style="Success.TButton"
         )
         self.btn_guardar.pack(pady=(8, 20))
+
+        self.lbl_mensaje = ttk.Label(self, text="", style="Info.TLabel")
+        self.lbl_mensaje.pack(pady=(0, 10))
+
+    def _cambiar_estado(self, etiqueta, texto, estado):
+        etiqueta.configure(text=texto, style=ESTILOS_ESTADO[estado])
 
     def _capturar_huella(self):
         if self._capturando:
             return
         self._capturando = True
         self.btn_capturar.configure(state="disabled")
-        self.lbl_estado_huella.configure(
-            text="⏳ Coloca tu huella en el sensor...", text_color="yellow"
+        self._cambiar_estado(
+            self.lbl_estado_huella, "⏳ Coloca tu huella en el sensor...", "procesando"
         )
+        self.lbl_mensaje.configure(text="")
         threading.Thread(target=self._capturar_en_hilo, daemon=True).start()
 
     def _capturar_en_hilo(self):
@@ -102,39 +89,39 @@ class RegisterView(ctk.CTkFrame):
         self.btn_capturar.configure(state="normal")
         if data:
             self.huella_cap_data = data
-            self.lbl_estado_huella.configure(
-                text="✅ Huella Capturada Correctamente", text_color="green"
+            self._cambiar_estado(
+                self.lbl_estado_huella, "✅ Huella Capturada Correctamente", "exito"
             )
         else:
             self.huella_cap_data = None
-            self.lbl_estado_huella.configure(
-                text="❌ Error o tiempo agotado. Reintenta.", text_color="red"
+            self._cambiar_estado(
+                self.lbl_estado_huella, "❌ Error o tiempo agotado. Reintenta.", "error"
             )
 
     def _mostrar_error(self, mensaje):
         self._capturando = False
         self.btn_capturar.configure(state="normal")
         self.huella_cap_data = None
-        self.lbl_estado_huella.configure(text=f"❌ Error al capturar: {mensaje}", text_color="red")
+        self._cambiar_estado(self.lbl_estado_huella, f"❌ Error al capturar: {mensaje}", "error")
 
     def _guardar(self):
-        nombre = self.entry_nombre.get().strip()
+        nombre = self.var_nombre.get().strip()
 
         if not nombre:
-            messagebox.showwarning("Campo Incompleto", "Por favor escribe el nombre del operador.")
+            self._cambiar_estado(self.lbl_mensaje, "Escribe el nombre del operador.", "error")
             return
 
         if not self.huella_cap_data:
-            messagebox.showwarning("Falta Huella", "Debes capturar la huella del operador antes de guardar.")
+            self._cambiar_estado(self.lbl_mensaje, "Debes capturar la huella antes de guardar.", "error")
             return
 
-        éxito, msg = guardar_operador(nombre, self.huella_cap_data["fmd"])
-        if éxito:
-            messagebox.showinfo("Éxito", msg)
-            self.entry_nombre.delete(0, "end")
-            self.lbl_estado_huella.configure(
-                text="Huella: Pendiente de captura", text_color="orange"
+        exito, msg = guardar_operador(nombre, self.huella_cap_data["fmd"])
+        if exito:
+            self._cambiar_estado(self.lbl_mensaje, msg, "exito")
+            self.var_nombre.set("")
+            self._cambiar_estado(
+                self.lbl_estado_huella, "Huella: Pendiente de captura", "pendiente"
             )
             self.huella_cap_data = None
         else:
-            messagebox.showerror("Error", msg)
+            self._cambiar_estado(self.lbl_mensaje, msg, "error")
