@@ -1,3 +1,4 @@
+import logging
 import queue
 import threading
 import tkinter as tk
@@ -6,6 +7,8 @@ from tkinter import ttk
 from src.database import guardar_operador
 from src.gui.style import ESTILOS_ESTADO
 from src.hardware.biometric_service import BiometricService
+
+log = logging.getLogger(__name__)
 
 
 class RegisterView(ttk.Frame):
@@ -61,22 +64,35 @@ class RegisterView(ttk.Frame):
             self.lbl_estado_huella, "⏳ Coloca tu huella en el sensor...", "procesando"
         )
         self.lbl_mensaje.configure(text="")
+        log.info("Solicitando captura de huella")
         threading.Thread(target=self._capturar_en_hilo, daemon=True).start()
 
     def _capturar_en_hilo(self):
         """Hilo secundario: solo trabajo pesado, sin tocar widgets."""
         try:
-            data = self.servicio.capturar_huella()
-            self.cola_eventos.put(("HUELVA_REGISTRADA", data))
+            data = self.servicio.enrollar(on_progress=self._progreso_enroll)
+            log.info("Enrolamiento finalizado: %s", data)
+            self.cola_eventos.put(("ENROLL_TERMINADO", data))
         except Exception as e:
+            log.error("Error en captura: %s", e, exc_info=True)
             self.cola_eventos.put(("CAPTURA_ERROR", str(e)))
+
+    def _progreso_enroll(self, etapa, total):
+        self.cola_eventos.put(("ENROLL_PROGRESO", (etapa, total)))
 
     def _revisar_cola(self):
         """Revisa la cola periódicamente desde el hilo principal."""
         try:
             while True:
                 evento, data = self.cola_eventos.get_nowait()
-                if evento == "HUELVA_REGISTRADA":
+                if evento == "ENROLL_PROGRESO":
+                    etapa, total = data
+                    self._cambiar_estado(
+                        self.lbl_estado_huella,
+                        f"Coloca la huella (etapa {etapa}/{total})...",
+                        "procesando",
+                    )
+                elif evento == "ENROLL_TERMINADO":
                     self._mostrar_captura(data)
                 elif evento == "CAPTURA_ERROR":
                     self._mostrar_error(data)
@@ -87,21 +103,49 @@ class RegisterView(ttk.Frame):
     def _mostrar_captura(self, data):
         self._capturando = False
         self.btn_capturar.configure(state="normal")
-        if data:
+
+        if data and data.get("fmd"):
             self.huella_cap_data = data
             self._cambiar_estado(
                 self.lbl_estado_huella, "✅ Huella Capturada Correctamente", "exito"
             )
-        else:
-            self.huella_cap_data = None
+            log.info(
+                "Huella capturada: %sx%s @ %s dpi",
+                data.get("width", "?"),
+                data.get("height", "?"),
+                data.get("dpi", "?"),
+            )
+            return
+
+        self.huella_cap_data = None
+
+        if data is None:
             self._cambiar_estado(
                 self.lbl_estado_huella, "❌ Error o tiempo agotado. Reintenta.", "error"
             )
+            return
+
+        status = data.get("status", "?")
+        mensaje = data.get("message", "")
+        log.warning("Captura sin plantilla: status=%s mensaje=%s", status, mensaje)
+
+        if status == "SUCCESS":
+            texto = "✅ Huella verificada, pero sin plantilla (fprintd no la expone)."
+        elif status == "NO_MATCH":
+            texto = "❌ Huella no coincide o no hay huellas enroladas."
+        elif status == "TIMEOUT":
+            texto = "❌ Tiempo agotado. Reintenta."
+        elif mensaje:
+            texto = f"❌ Error de captura: {mensaje}"
+        else:
+            texto = "❌ Error de captura."
+        self._cambiar_estado(self.lbl_estado_huella, texto, "error")
 
     def _mostrar_error(self, mensaje):
         self._capturando = False
         self.btn_capturar.configure(state="normal")
         self.huella_cap_data = None
+        log.error("Error al capturar: %s", mensaje)
         self._cambiar_estado(self.lbl_estado_huella, f"❌ Error al capturar: {mensaje}", "error")
 
     def _guardar(self):
@@ -115,7 +159,16 @@ class RegisterView(ttk.Frame):
             self._cambiar_estado(self.lbl_mensaje, "Debes capturar la huella antes de guardar.", "error")
             return
 
+        if "fmd" not in self.huella_cap_data:
+            self._cambiar_estado(
+                self.lbl_mensaje,
+                "La captura no devolvió plantilla; el registro requiere el lector en Windows.",
+                "error",
+            )
+            return
+
         exito, msg = guardar_operador(nombre, self.huella_cap_data["fmd"])
+        log.info("Guardado de operador '%s': exito=%s mensaje=%s", nombre, exito, msg)
         if exito:
             self._cambiar_estado(self.lbl_mensaje, msg, "exito")
             self.var_nombre.set("")

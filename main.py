@@ -1,21 +1,32 @@
+import logging
 import os
 import tkinter as tk
 from tkinter import ttk
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s.%(msecs)03d [%(levelname)s] (%(threadName)s) %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 from src.database import init_db
 from src.gui.identify_view import IdentifyView
 from src.gui.register_view import RegisterView
 from src.gui.style import aplicar_estilo
 
+log = logging.getLogger(__name__)
+
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        log.info("Iniciando aplicación biométrica")
         self.title("Sistema de Control Biométrico - Planta de Corte")
         self.geometry("800x480")
 
         if os.environ.get("BIOMETRICO_KIOSKO") == "1":
             self.attributes("-fullscreen", True)
+            log.info("Modo kiosco activado")
 
         aplicar_estilo(self)
         init_db()
@@ -65,6 +76,7 @@ class App(tk.Tk):
 
         vista.pack(fill="both", expand=True)
         self.vista_actual = vista
+        log.info("Vista activa: %s", nombre)
 
 
 if __name__ == "__main__":

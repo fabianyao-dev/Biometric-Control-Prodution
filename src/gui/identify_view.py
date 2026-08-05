@@ -1,3 +1,4 @@
+import logging
 import queue
 import threading
 from tkinter import ttk
@@ -5,6 +6,8 @@ from tkinter import ttk
 from src.database import listar_fmds
 from src.gui.style import ESTILOS_ESTADO
 from src.hardware.biometric_service import BiometricService
+
+log = logging.getLogger(__name__)
 
 
 class IdentifyView(ttk.Frame):
@@ -55,64 +58,77 @@ class IdentifyView(ttk.Frame):
         self._cambiar_estado(
             self.lbl_estado, "⏳ Coloca tu huella en el sensor...", "procesando"
         )
+        log.info("Solicitando identificación")
         threading.Thread(target=self._identificar_en_hilo, daemon=True).start()
 
     def _identificar_en_hilo(self):
         """Hilo secundario: solo trabajo pesado, sin tocar widgets."""
         try:
-            captura = self.servicio.capturar_huella()
-            self.cola_eventos.put(("CAPTURA_EXITO", captura))
+            filas = listar_fmds()
+            if not filas:
+                self.cola_eventos.put(("SIN_OPERADORES", None))
+                return
+
+            plantillas = [fila[2] for fila in filas]
+            resultado = self.servicio.identificar_en_lector(
+                plantillas, on_progress=self._progreso_identificar
+            )
+            log.info("Resultado de identificación: %s", resultado)
+            self.cola_eventos.put(("IDENTIFICACION", (filas, resultado)))
         except Exception as e:
+            log.error("Error en identificación: %s", e, exc_info=True)
             self.cola_eventos.put(("CAPTURA_ERROR", str(e)))
+
+    def _progreso_identificar(self, intento, _total):
+        self.cola_eventos.put(("IDENT_PROGRESO", intento))
 
     def _revisar_cola(self):
         """Revisa la cola periódicamente desde el hilo principal."""
         try:
             while True:
                 evento, data = self.cola_eventos.get_nowait()
-                if evento == "CAPTURA_EXITO":
-                    self._procesar_resultado(data)
+                if evento == "IDENTIFICACION":
+                    filas, resultado = data
+                    self._procesar_resultado(filas, resultado)
+                elif evento == "SIN_OPERADORES":
+                    self._identificando = False
+                    self.btn_identificar.configure(state="normal")
+                    self._cambiar_estado(
+                        self.lbl_estado,
+                        "⚠️ No hay operadores registrados. Regístralo primero.",
+                        "pendiente",
+                    )
+                    self._cambiar_resultado("", "info")
+                elif evento == "IDENT_PROGRESO":
+                    self._cambiar_estado(
+                        self.lbl_estado,
+                        f"Coloca la huella en el sensor... (intento {data})",
+                        "procesando",
+                    )
                 elif evento == "CAPTURA_ERROR":
                     self._mostrar_error(data)
         except queue.Empty:
             pass
         self.after(50, self._revisar_cola)
 
-    def _procesar_resultado(self, captura):
+    def _procesar_resultado(self, filas, resultado):
         self._identificando = False
         self.btn_identificar.configure(state="normal")
 
-        if not captura:
-            self._cambiar_estado(
-                self.lbl_estado, "❌ Error o tiempo agotado. Reintenta.", "error"
-            )
-            self._cambiar_resultado("", "info")
-            return
-
-        filas = listar_fmds()
-        if not filas:
-            self._cambiar_estado(
-                self.lbl_estado,
-                "⚠️ No hay operadores registrados. Regístralo primero.",
-                "pendiente",
-            )
-            self._cambiar_resultado("", "info")
-            return
-
-        fmds = [fila[2] for fila in filas]
-        resultado = self.servicio.identificar(captura["fmd"], fmds)
-
         if resultado:
             idx, _score = resultado
-            nombre = filas[idx][1]
-            self._cambiar_estado(self.lbl_estado, "✅ Identificación exitosa", "exito")
-            self._cambiar_resultado(f"Bienvenido, {nombre}", "exito")
-        else:
-            self._cambiar_estado(self.lbl_estado, "❌ Huella no reconocida", "error")
-            self._cambiar_resultado("Operador no encontrado", "error")
+            if 0 <= idx < len(filas):
+                nombre = filas[idx][1]
+                self._cambiar_estado(self.lbl_estado, "✅ Identificación exitosa", "exito")
+                self._cambiar_resultado(f"Bienvenido, {nombre}", "exito")
+                return
+
+        self._cambiar_estado(self.lbl_estado, "❌ Huella no reconocida", "error")
+        self._cambiar_resultado("Operador no encontrado", "error")
 
     def _mostrar_error(self, mensaje):
         self._identificando = False
         self.btn_identificar.configure(state="normal")
+        log.error("Error al identificar: %s", mensaje)
         self._cambiar_estado(self.lbl_estado, "❌ Error al capturar", "error")
         self._cambiar_resultado(mensaje, "error")

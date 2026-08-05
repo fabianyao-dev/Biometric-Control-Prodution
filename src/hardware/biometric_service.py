@@ -1,3 +1,4 @@
+import json
 import os
 import platform
 import subprocess
@@ -21,20 +22,37 @@ else:
             pass
 
 
+RUTA_HELPER = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "bin", "fp_helper"
+)
+
+
+def _helper_disponible():
+    return os.path.isfile(RUTA_HELPER) and os.access(RUTA_HELPER, os.X_OK)
+
+
 class BiometricService:
     """Capa de alto nivel de captura/comparación biométrica.
 
-    Multiplataforma:
-    - Windows: usa el SDK DigitalPersona (dpfpdd.dll + dpfj.dll) vía ctypes.
-    - Linux / Raspberry Pi: usa el servicio nativo fprintd (fprintd-verify).
+    Modos:
+    - windows: SDK DigitalPersona (dpfpdd.dll + dpfj.dll) vía ctypes.
+    - libfprint: helper C (fp_helper) sobre libfprint 2 en la Raspberry Pi.
+      Enrola plantillas serializables y hace identificación 1:N en el lector.
+    - fprintd: fallback con fprintd-verify (solo verifica el usuario del
+      sistema, sin plantillas; no sirve para identificar operadores).
     """
 
     def __init__(self):
         self.is_windows = platform.system() == "Windows"
         if self.is_windows:
             self.sdk = obtener_sdk()
+            self.modo = "windows"
+        elif _helper_disponible():
+            self.sdk = None
+            self.modo = "libfprint"
         else:
             self.sdk = None
+            self.modo = "fprintd"
 
     def abrir(self):
         """Prepara el lector. Devuelve True si está listo."""
@@ -51,6 +69,58 @@ class BiometricService:
         if self.is_windows:
             return self._capturar_windows(timeout_ms)
         return self._capturar_linux()
+
+    def enrollar(self, timeout_ms=None, on_progress=None):
+        """Enrola una huella y devuelve dict con 'fmd' (bytes de la plantilla).
+
+        - Windows: captura única (misma API que capturar_huella).
+        - libfprint: enrolamiento multipasada vía helper C con progreso.
+        - fprintd: verificación sin plantilla (status SUCCESS/NO_MATCH/ERROR).
+        """
+        if self.is_windows:
+            return self.capturar_huella(timeout_ms)
+        if self.modo == "libfprint":
+            return self._enrollar_libfprint(on_progress)
+        return self._capturar_linux()
+
+    def _enrollar_libfprint(self, on_progress=None):
+        try:
+            proc = subprocess.Popen(
+                [RUTA_HELPER, "enroll"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            ultimo = None
+            for linea in proc.stdout:
+                linea = linea.strip()
+                if not linea:
+                    continue
+                try:
+                    ev = json.loads(linea)
+                except ValueError:
+                    continue
+                estado = ev.get("status")
+                if estado == "stage":
+                    if on_progress:
+                        on_progress(ev.get("stage", 0), ev.get("n", 0))
+                elif estado in ("complete", "error"):
+                    ultimo = ev
+            proc.wait()
+
+            if ultimo is None:
+                return {"status": "ERROR", "message": "Respuesta vacía del helper."}
+            if ultimo.get("status") == "complete":
+                data = bytes.fromhex(ultimo["data"])
+                return {"fmd": data, "size": len(data)}
+            return {
+                "status": "ERROR",
+                "message": ultimo.get("message", "Error de enrolamiento."),
+            }
+        except FileNotFoundError:
+            return {"status": "ERROR", "message": "Helper libfprint no está compilado."}
+        except Exception as e:
+            return {"status": "ERROR", "message": str(e)}
 
     def _capturar_windows(self, timeout_ms=None):
         timeout_ms = timeout_ms or config.CAPTURE_TIMEOUT_MS
@@ -124,6 +194,67 @@ class BiometricService:
         if score > umbral:
             return None
         return (idx, score)
+
+    def identificar_en_lector(self, lista_plantillas, timeout_ms=None, on_progress=None):
+        """Captura una huella y la identifica contra las plantillas dadas.
+
+        - Windows: captura única y compara FMDs -> (indice, score) o None.
+        - libfprint: captura + coincidencia 1:N en el lector -> (indice, 0) o None.
+        - fprintd: no puede identificar operadores; lanza RuntimeError.
+        """
+        if self.is_windows:
+            captura = self.capturar_huella(timeout_ms)
+            if not captura or not captura.get("fmd"):
+                raise RuntimeError("Captura sin plantilla.")
+            return self.identificar(captura["fmd"], lista_plantillas)
+        if self.modo == "libfprint":
+            return self._identificar_libfprint(lista_plantillas, on_progress)
+        raise RuntimeError(
+            "fprintd no puede identificar operadores; compila el helper libfprint."
+        )
+
+    def _identificar_libfprint(self, lista_plantillas, on_progress=None):
+        if not lista_plantillas:
+            return None
+        try:
+            hex_galeria = "".join(p.hex() + "\n" for p in lista_plantillas)
+            proc = subprocess.Popen(
+                [RUTA_HELPER, "identify"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            proc.stdin.write(hex_galeria)
+            proc.stdin.close()
+
+            resultado = None
+            for linea in proc.stdout:
+                linea = linea.strip()
+                if not linea:
+                    continue
+                try:
+                    ev = json.loads(linea)
+                except ValueError:
+                    continue
+                estado = ev.get("status")
+                if estado == "retry":
+                    if on_progress:
+                        on_progress(ev.get("attempt", 0), None)
+                elif estado == "match":
+                    resultado = (ev.get("index", 0), 0)
+                elif estado == "nomatch":
+                    resultado = None
+                elif estado == "error":
+                    raise RuntimeError(ev.get("message", "Error de identificación."))
+            proc.wait()
+            return resultado
+        except FileNotFoundError:
+            raise RuntimeError("Helper libfprint no está compilado.")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(str(e))
 
     def cerrar(self):
         if self.is_windows:
