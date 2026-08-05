@@ -1,0 +1,15 @@
+import os
+
+RUTA_BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.join(RUTA_BASE, "planta_corte.db")
+
+CAPTURE_TIMEOUT_MS = 60000
+CAPTURE_BUFFER_SIZE = 512 * 1024
+IMAGE_FMT_PIXEL_BUFFER = 0
+IMAGE_PROC_DEFAULT = 0
+
+FMD_FORMAT = 0x001B0001
+CBEFF_ID = 0x00000000
+FINGER_POSITION = 0
+
+UMBRAL_DISIMILARIDAD = 0x04000000

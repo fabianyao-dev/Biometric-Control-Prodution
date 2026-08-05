@@ -6,6 +6,13 @@ __pycache__/
 # C extensions
 *.so
 
+# Base de datos SQLite y archivos temporales/WAL
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
 # Distribution / packaging
 .Python
 build/
@@ -216,3 +223,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+**/AGENTS.md
