@@ -138,7 +138,17 @@ static FpDevice *abrir_primer_dispositivo(FpContext *ctx, GError **error)
     }
     FpDevice *dev = g_ptr_array_index(devs, 0);
     if (!fp_device_open_sync(dev, NULL, error)) {
-        emit_error("no_se_pudo_abrir_el_lector_permisos_udev");
+        char buf[256];
+        if (error && *error) {
+            snprintf(buf, sizeof(buf), "no_se_pudo_abrir_el_lector: %s",
+                     (*error)->message);
+            g_error_free(*error);
+            *error = NULL;
+        } else {
+            snprintf(buf, sizeof(buf),
+                     "no_se_pudo_abrir_el_lector_permisos_udev");
+        }
+        emit_error(buf);
         return NULL;
     }
     return dev;

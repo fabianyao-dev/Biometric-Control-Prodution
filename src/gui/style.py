@@ -15,6 +15,9 @@ COLOR_ADVERTENCIA = "#d98e04"
 COLOR_ERROR = "#e74c3c"
 COLOR_DESACTIVADO = "#555555"
 
+# Superficie interior de modales/contenedores (mismo fondo que la tarjeta).
+COLOR_FONDO_INTERIOR = COLOR_SUPERFICIE
+
 ESTILOS_ESTADO = {
     "pendiente": "Pendiente.TLabel",
     "procesando": "Procesando.TLabel",
@@ -44,6 +47,10 @@ def aplicar_estilo(root):
     estilo.configure("Exito.TLabel", foreground=COLOR_EXITO)
     estilo.configure("Error.TLabel", foreground=COLOR_ERROR)
     estilo.configure("Info.TLabel", foreground=COLOR_TEXTO_SECUNDARIO)
+
+    estilo.configure(
+        "Big.TLabel", font=(FAMILIA_FUENTE, 34, "bold"), foreground=COLOR_TEXTO
+    )
 
     estilo.configure(
         "ResultadoInfo.TLabel", font=(FAMILIA_FUENTE, 22, "bold"), foreground=COLOR_TEXTO
@@ -80,6 +87,27 @@ def aplicar_estilo(root):
     )
 
     estilo.configure(
+        "Sidebar.TFrame", background=COLOR_SUPERFICIE,
+    )
+    estilo.configure(
+        "Sidebar.TButton",
+        font=(FAMILIA_FUENTE, 14, "bold"),
+        padding=(14, 10),
+        background=COLOR_SUPERFICIE,
+        foreground=COLOR_TEXTO,
+        bordercolor=COLOR_SUPERFICIE,
+        lightcolor=COLOR_SUPERFICIE,
+        darkcolor=COLOR_SUPERFICIE,
+    )
+    estilo.map(
+        "Sidebar.TButton",
+        background=[
+            ("active", COLOR_ACCENTE),
+            ("pressed", COLOR_ACCENTE_CLARO),
+        ],
+    )
+
+    estilo.configure(
         "Success.TButton",
         background=COLOR_EXITO,
         bordercolor=COLOR_EXITO_CLARO,
@@ -89,6 +117,45 @@ def aplicar_estilo(root):
     estilo.map(
         "Success.TButton",
         background=[("active", COLOR_EXITO_CLARO), ("disabled", COLOR_DESACTIVADO)],
+        foreground=[("disabled", "#999999")],
+    )
+
+    # Boton principal: solo el icono, grande. Verde PLAY cuando la maquina
+    # esta EN ESPERA (sin sesion, esperando arranque), rojo STOP cuando esta
+    # LISTA (con sesion activa) o EN PARO. Ambos comparten el mismo tamaño
+    # (PowerOn NO hereda de Power: ttk solo hereda el estilo base por su
+    # nombre), por eso se definen por separado.
+    poder_base = dict(
+        font=(FAMILIA_FUENTE, 52, "bold"),
+        padding=(34, 22),
+        foreground="white",
+    )
+    estilo.configure(
+        "Power.TButton",
+        **poder_base,
+        background=COLOR_ERROR,
+        bordercolor="#c0392b",
+        lightcolor="#c0392b",
+        darkcolor=COLOR_ERROR,
+    )
+    estilo.map(
+        "Power.TButton",
+        background=[("active", "#d63b2f"), ("pressed", "#b93226"),
+                    ("disabled", COLOR_DESACTIVADO)],
+        foreground=[("disabled", "#999999")],
+    )
+    estilo.configure(
+        "PowerOn.TButton",
+        **poder_base,
+        background=COLOR_EXITO,
+        bordercolor=COLOR_EXITO_CLARO,
+        lightcolor=COLOR_EXITO_CLARO,
+        darkcolor=COLOR_EXITO,
+    )
+    estilo.map(
+        "PowerOn.TButton",
+        background=[("active", COLOR_EXITO_CLARO), ("pressed", "#27885f"),
+                    ("disabled", COLOR_DESACTIVADO)],
         foreground=[("disabled", "#999999")],
     )
 

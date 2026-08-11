@@ -1,60 +1,526 @@
-import sqlite3
+"""
+database.py - Capa de persistencia (SQLite) del sistema de control biométrico.
 
-from src.config import DB_PATH
+Esquema relacional:
+    roles                  Catalogo de roles (admin, operador, ...) soft-delete.
+    operadores             Operadores registrados (soft-delete via `activo`).
+    causas_paro            Motivos configurables de paro (soft-delete).
+    sesiones_produccion    Entrada/salida del operador por turno.
+    paros_produccion       Paros vinculados a una sesion (FK a sesion_id).
+
+Politicas:
+    - Soft-delete: roles, operadores y causas_paro marcan `activo=0`.
+    - La hora de todos los timestamps es America/Monterrey (ver `ahora_local`),
+      no UTC como el `CURRENT_TIMESTAMP` nativo de SQLite.
+    - Las FK se respetan con PRAGMA foreign_keys=ON.
+    - Las conexiones se abren por operacion (simples) o con
+      check_same_thread=False para los hilos de la GUI.
+"""
+
+import sqlite3
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from src.config import DB_PATH, ZONA_HORARIA
+
+ZONA = ZoneInfo(ZONA_HORARIA)
+
+
+def ahora_local() -> str:
+    """Timestamp actual en la zona horaria de la planta (America/Monterrey)."""
+    return datetime.now(ZONA).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def obtener_conexion():
+    """Conexion utilizable desde cualquier hilo (SQLite + WAL)."""
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    # Funcion SQL con la hora local de la planta (para DEFAULTs del esquema).
+    conn.create_function("ahora_monterrey", 0, ahora_local)
+    return conn
 
 
 def init_db():
-    """Inicializa la base de datos con la tabla de operadores."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    """Crea el esquema si no existe y migra versiones antiguas de la BD."""
+    conn = obtener_conexion()
+    cur = conn.cursor()
 
-    cursor.execute("PRAGMA journal_mode=WAL;")
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(operadores)").fetchall()]
+    if cols and "activo" not in cols:
+        cur.execute("DROP TABLE operadores")
 
-    cols = [r[1] for r in cursor.execute("PRAGMA table_info(operadores)").fetchall()]
-    if cols and "numero_empleado" in cols:
-        cursor.execute("DROP TABLE operadores")
+    cur.executescript("""
+        CREATE TABLE IF NOT EXISTS roles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL UNIQUE,
+            activo INTEGER NOT NULL DEFAULT 1
+        );
 
-    cursor.execute('''
         CREATE TABLE IF NOT EXISTS operadores (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre TEXT NOT NULL,
             huella_template BLOB NOT NULL,
-            fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            fecha_registro TIMESTAMP DEFAULT (ahora_monterrey()),
+            activo INTEGER NOT NULL DEFAULT 1,
+            rol_id INTEGER REFERENCES roles(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS causas_paro (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            descripcion TEXT NOT NULL,
+            activo INTEGER NOT NULL DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS sesiones_produccion (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operador_id INTEGER NOT NULL REFERENCES operadores(id),
+            fecha_inicio TIMESTAMP DEFAULT (ahora_monterrey()),
+            fecha_fin TIMESTAMP,
+            total_cortes INTEGER NOT NULL DEFAULT 0,
+            estado TEXT NOT NULL DEFAULT 'Activa'
+        );
+
+        CREATE TABLE IF NOT EXISTS paros_produccion (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sesion_id INTEGER NOT NULL REFERENCES sesiones_produccion(id),
+            causa_id INTEGER REFERENCES causas_paro(id),
+            inicio_paro TIMESTAMP DEFAULT (ahora_monterrey()),
+            fin_paro TIMESTAMP,
+            autorizado_por_operador_id INTEGER REFERENCES operadores(id)
+        );
+    """)
+
+    # Migracion: agregar la columna de rol a operadores existentes.
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(operadores)").fetchall()]
+    if "rol_id" not in cols:
+        cur.execute(
+            "ALTER TABLE operadores ADD COLUMN rol_id INTEGER REFERENCES roles(id)"
         )
-    ''')
+
+    # Roles por defecto: los operadores ya existentes quedan como admin.
+    for nombre in ("admin", "operador"):
+        cur.execute("INSERT OR IGNORE INTO roles (nombre) VALUES (?)", (nombre,))
+    admin = cur.execute(
+        "SELECT id FROM roles WHERE nombre='admin' AND activo=1"
+    ).fetchone()
+    if admin is not None:
+        cur.execute(
+            "UPDATE operadores SET rol_id=? WHERE rol_id IS NULL", (admin["id"],)
+        )
 
     conn.commit()
     conn.close()
 
 
-def guardar_operador(nombre: str, huella_template: bytes):
-    """Guarda un nuevo operador en SQLite."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO operadores (nombre, huella_template)
-            VALUES (?, ?)
-        ''', (nombre, huella_template))
-        conn.commit()
-        conn.close()
-        return True, "Operador registrado correctamente."
-    except Exception as e:
-        return False, f"Error en base de datos: {str(e)}"
+# ---------------------------------------------------------------------------
+# Roles
+# ---------------------------------------------------------------------------
 
-
-def listar_fmds():
-    """Devuelve lista de (id, nombre, huella_template) de todos los operadores."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, nombre, huella_template FROM operadores ORDER BY id"
-    )
-    rows = cursor.fetchall()
+def listar_roles(activas_solo=True):
+    """Devuelve los roles (id, nombre[, activo])."""
+    conn = obtener_conexion()
+    if activas_solo:
+        rows = conn.execute(
+            "SELECT id, nombre FROM roles WHERE activo=1 ORDER BY id"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, nombre, activo FROM roles ORDER BY id"
+        ).fetchall()
     conn.close()
     return rows
 
 
+def agregar_rol(nombre: str) -> bool:
+    """Agrega un rol. Si existe pero esta desactivado, lo reactiva."""
+    nombre = nombre.strip()
+    if not nombre:
+        return False
+    conn = obtener_conexion()
+    existe = conn.execute(
+        "SELECT id, activo FROM roles WHERE nombre=?", (nombre,)
+    ).fetchone()
+    if existe:
+        if not existe["activo"]:
+            conn.execute("UPDATE roles SET activo=1 WHERE id=?", (existe["id"],))
+            conn.commit()
+        conn.close()
+        return True
+    conn.execute("INSERT INTO roles (nombre) VALUES (?)", (nombre,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def renombrar_rol(rol_id: int, nombre: str) -> bool:
+    """Renombra un rol. Falla si el nuevo nombre ya existe o esta vacio."""
+    nombre = nombre.strip()
+    if not nombre:
+        return False
+    conn = obtener_conexion()
+    duplicado = conn.execute(
+        "SELECT id FROM roles WHERE nombre=? AND id<>?", (nombre, rol_id)
+    ).fetchone()
+    if duplicado:
+        conn.close()
+        return False
+    conn.execute("UPDATE roles SET nombre=? WHERE id=?", (nombre, rol_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def eliminar_rol(rol_id: int):
+    """Soft-delete de un rol."""
+    conn = obtener_conexion()
+    conn.execute("UPDATE roles SET activo=0 WHERE id=?", (rol_id,))
+    conn.commit()
+    conn.close()
+
+
+def rol_id_por_defecto() -> int | None:
+    """Id del rol 'operador' si existe; si no, del primer rol activo."""
+    conn = obtener_conexion()
+    fila = conn.execute(
+        "SELECT id FROM roles WHERE nombre='operador' AND activo=1"
+    ).fetchone()
+    if fila is None:
+        fila = conn.execute(
+            "SELECT id FROM roles WHERE activo=1 ORDER BY id LIMIT 1"
+        ).fetchone()
+    conn.close()
+    return fila["id"] if fila else None
+
+
+# ---------------------------------------------------------------------------
+# Operadores
+# ---------------------------------------------------------------------------
+
+def guardar_operador(nombre: str, huella_template: bytes, rol_id: int | None = None):
+    """Registra un operador activo. Devuelve (ok, mensaje|id)."""
+    try:
+        conn = obtener_conexion()
+        cur = conn.cursor()
+        if rol_id is None:
+            rol_id = rol_id_por_defecto()
+        cur.execute(
+            "INSERT INTO operadores (nombre, huella_template, fecha_registro, rol_id) "
+            "VALUES (?, ?, ?, ?)",
+            (nombre, huella_template, ahora_local(), rol_id),
+        )
+        conn.commit()
+        nuevo_id = cur.lastrowid
+        conn.close()
+        return True, nuevo_id
+    except Exception as e:
+        return False, f"Error en base de datos: {str(e)}"
+
+
+def listar_fmds(activos_solo=True):
+    """Devuelve lista de (id, nombre, huella_template)."""
+    conn = obtener_conexion()
+    where = "WHERE activo=1" if activos_solo else ""
+    rows = conn.execute(
+        f"SELECT id, nombre, huella_template FROM operadores {where} ORDER BY id"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def eliminar_operador(operador_id: int):
+    """Soft-delete: marca activo=0."""
+    conn = obtener_conexion()
+    conn.execute("UPDATE operadores SET activo=0 WHERE id=?", (operador_id,))
+    conn.commit()
+    conn.close()
+
+
+def listar_operadores_admin():
+    """Todos los operadores (id, nombre, fecha_registro, activo, rol)."""
+    conn = obtener_conexion()
+    rows = conn.execute(
+        "SELECT o.id, o.nombre, o.fecha_registro, o.activo, r.nombre AS rol "
+        "FROM operadores o LEFT JOIN roles r ON r.id=o.rol_id "
+        "ORDER BY o.id"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def actualizar_rol_operador(operador_id: int, rol_id: int):
+    """Asigna un rol a un operador."""
+    conn = obtener_conexion()
+    conn.execute("UPDATE operadores SET rol_id=? WHERE id=?", (rol_id, operador_id))
+    conn.commit()
+    conn.close()
+
+
+def obtener_rol_operador(operador_id: int):
+    """Nombre del rol de un operador (o None si no tiene rol asignado)."""
+    conn = obtener_conexion()
+    row = conn.execute(
+        "SELECT r.nombre FROM operadores o "
+        "LEFT JOIN roles r ON r.id=o.rol_id WHERE o.id=?",
+        (operador_id,),
+    ).fetchone()
+    conn.close()
+    return row["nombre"] if row else None
+
+
+# ---------------------------------------------------------------------------
+# Causas de paro
+# ---------------------------------------------------------------------------
+
+def listar_causas_paro(activas_solo=True):
+    """Devuelve lista de filas (id, descripcion[, activo])."""
+    conn = obtener_conexion()
+    if activas_solo:
+        rows = conn.execute(
+            "SELECT id, descripcion FROM causas_paro WHERE activo=1 ORDER BY id"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, descripcion, activo FROM causas_paro ORDER BY id"
+        ).fetchall()
+    conn.close()
+    return rows
+
+
+def agregar_causa_paro(descripcion: str) -> bool:
+    """Agrega una causa. Si ya existe (inactiva), solo la reactiva."""
+    descripcion = descripcion.strip()
+    if not descripcion:
+        return False
+    conn = obtener_conexion()
+    existe = conn.execute(
+        "SELECT id, activo FROM causas_paro WHERE descripcion=?", (descripcion,)
+    ).fetchone()
+    if existe:
+        if not existe["activo"]:
+            conn.execute(
+                "UPDATE causas_paro SET activo=1 WHERE id=?", (existe["id"],)
+            )
+            conn.commit()
+        conn.close()
+        return True
+    conn.execute(
+        "INSERT INTO causas_paro (descripcion) VALUES (?)", (descripcion,)
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def eliminar_causa_paro(causa_id: int):
+    conn = obtener_conexion()
+    conn.execute("UPDATE causas_paro SET activo=0 WHERE id=?", (causa_id,))
+    conn.commit()
+    conn.close()
+
+
+def listar_causas_frecuentes(limite: int = 6):
+    """Causas activas mas usadas (por numero de paros registrados)."""
+    conn = obtener_conexion()
+    rows = conn.execute(
+        "SELECT c.id, c.descripcion, COUNT(p.id) AS usos "
+        "FROM causas_paro c "
+        "LEFT JOIN paros_produccion p ON p.causa_id=c.id "
+        "WHERE c.activo=1 "
+        "GROUP BY c.id "
+        "ORDER BY usos DESC, c.descripcion "
+        "LIMIT ?",
+        (limite,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Sesiones de produccion
+# ---------------------------------------------------------------------------
+
+def abrir_sesion(operador_id: int) -> int:
+    """Crea una sesion 'Activa' y devuelve su id."""
+    conn = obtener_conexion()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO sesiones_produccion (operador_id, fecha_inicio, estado) "
+        "VALUES (?, ?, 'Activa')",
+        (operador_id, ahora_local()),
+    )
+    conn.commit()
+    nueva_id = cur.lastrowid
+    conn.close()
+    return nueva_id
+
+
+def cerrar_sesion(sesion_id: int, total_cortes: int):
+    conn = obtener_conexion()
+    conn.execute(
+        "UPDATE sesiones_produccion SET estado='Finalizada', "
+        "fecha_fin=?, total_cortes=? WHERE id=?",
+        (ahora_local(), total_cortes, sesion_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def actualizar_cortes_sesion(sesion_id: int, total_cortes: int):
+    """Guarda el total de cortes actual de una sesion (checkpoint periodico).
+
+    Se llama en intervalos regulares para que, ante un corte de luz o un
+    cierre abrupto, la sesion conserve el ultimo conteo en la base de datos.
+    """
+    conn = obtener_conexion()
+    conn.execute(
+        "UPDATE sesiones_produccion SET total_cortes=? WHERE id=?",
+        (total_cortes, sesion_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def sesion_activa_actual():
+    """Devuelve el id de la sesion Activa vigente o None."""
+    conn = obtener_conexion()
+    row = conn.execute(
+        "SELECT id FROM sesiones_produccion "
+        "WHERE estado='Activa' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return row["id"] if row else None
+
+
+def obtener_sesion_interrumpida():
+    """Sesion 'Activa' heredada de un cierre abrupto (recuperable) o None.
+
+    El cierre normal siempre finaliza la sesion (estado != 'Activa'), asi que
+    una sesion 'Activa' al arrancar significa que la app se cerro sin pasar
+    por `cerrar_sesion`. Devuelve id, operador_id, nombre y el total de
+    cortes del ultimo checkpoint para poder retomarla.
+    """
+    conn = obtener_conexion()
+    row = conn.execute(
+        "SELECT s.id, s.operador_id, o.nombre, s.total_cortes "
+        "FROM sesiones_produccion s "
+        "JOIN operadores o ON o.id=s.operador_id "
+        "WHERE s.estado='Activa' ORDER BY s.id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def obtener_operador_de_sesion(sesion_id: int) -> str:
+    conn = obtener_conexion()
+    row = conn.execute(
+        "SELECT o.nombre FROM sesiones_produccion s "
+        "JOIN operadores o ON o.id=s.operador_id WHERE s.id=?",
+        (sesion_id,),
+    ).fetchone()
+    conn.close()
+    return row["nombre"] if row else "Desconocido"
+
+
+# ---------------------------------------------------------------------------
+# Paros de produccion
+# ---------------------------------------------------------------------------
+
+def iniciar_paro(sesion_id: int) -> int:
+    """Crea un paro 'en curso' (sin causa ni fin). Devuelve id."""
+    conn = obtener_conexion()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO paros_produccion (sesion_id, inicio_paro) VALUES (?, ?)",
+        (sesion_id, ahora_local()),
+    )
+    conn.commit()
+    nuevo_id = cur.lastrowid
+    conn.close()
+    return nuevo_id
+
+
+def finalizar_paro(paro_id: int, causa_id: int, operador_id: int):
+    conn = obtener_conexion()
+    conn.execute(
+        "UPDATE paros_produccion SET causa_id=?, fin_paro=?, "
+        "autorizado_por_operador_id=? WHERE id=?",
+        (causa_id, ahora_local(), operador_id, paro_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def paro_en_curso(sesion_id: int):
+    """Paro sin fin de la sesion (None si no hay)."""
+    conn = obtener_conexion()
+    row = conn.execute(
+        "SELECT id FROM paros_produccion WHERE sesion_id=? AND fin_paro IS NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (sesion_id,),
+    ).fetchone()
+    conn.close()
+    return row["id"] if row else None
+
+
+def obtener_paros_de_sesion(sesion_id: int):
+    """Paros de la sesion con causa, para reportes."""
+    conn = obtener_conexion()
+    rows = conn.execute(
+        "SELECT p.id, c.descripcion, p.inicio_paro, p.fin_paro "
+        "FROM paros_produccion p LEFT JOIN causas_paro c ON c.id=p.causa_id "
+        "WHERE p.sesion_id=? ORDER BY p.id",
+        (sesion_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def listar_sesiones():
+    """Todas las sesiones con nombre de operador y duracion en minutos."""
+    conn = obtener_conexion()
+    ahora = ahora_local()
+    rows = conn.execute(
+        "SELECT s.id, o.nombre, s.fecha_inicio, s.fecha_fin, s.total_cortes, "
+        "       s.estado, "
+        "       ROUND(COALESCE((julianday(s.fecha_fin)-julianday(s.fecha_inicio))*1440, "
+        "                      (julianday(?)-julianday(s.fecha_inicio))*1440), 1) "
+        "       AS minutos, "
+        "       (SELECT COUNT(*) FROM paros_produccion p WHERE p.sesion_id=s.id) "
+        "       AS num_paros "
+        "FROM sesiones_produccion s "
+        "JOIN operadores o ON o.id=s.operador_id "
+        "ORDER BY s.id DESC",
+        (ahora,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Reportes
+# ---------------------------------------------------------------------------
+
+def resumen_dia(fecha: str):
+    """Resumen (sesiones, cortes, paros) para una fecha 'YYYY-MM-DD'."""
+    conn = obtener_conexion()
+    filas = conn.execute(
+        "SELECT s.id, o.nombre, s.fecha_inicio, s.fecha_fin, s.total_cortes, "
+        "       COALESCE(SUM(CASE WHEN p.fin_paro IS NOT NULL "
+        "            THEN (julianday(p.fin_paro)-julianday(p.inicio_paro))*1440 "
+        "            ELSE 0 END),0) AS minutos_paro, "
+        "       COUNT(p.id) AS num_paros "
+        "FROM sesiones_produccion s "
+        "JOIN operadores o ON o.id=s.operador_id "
+        "LEFT JOIN paros_produccion p ON p.sesion_id=s.id "
+        "WHERE date(s.fecha_inicio)=? "
+        "GROUP BY s.id ORDER BY s.fecha_inicio",
+        (fecha,),
+    ).fetchall()
+    conn.close()
+    return filas
+
+
 if __name__ == "__main__":
     init_db()
-    print("✅ Base de datos inicializada correctamente.")
+    print("Base de datos inicializada con esquema relacional.")

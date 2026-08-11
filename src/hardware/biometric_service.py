@@ -1,11 +1,15 @@
 import json
+import logging
 import os
 import platform
 import subprocess
 import sys
+import threading
 
 from src import config
 from src.hardware.biometric_sdk import obtener_sdk
+
+log = logging.getLogger(__name__)
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -44,6 +48,7 @@ class BiometricService:
 
     def __init__(self):
         self.is_windows = platform.system() == "Windows"
+        self._lock_lector = threading.Lock()
         if self.is_windows:
             self.sdk = obtener_sdk()
             self.modo = "windows"
@@ -218,6 +223,36 @@ class BiometricService:
             "fprintd no puede identificar operadores; compila el helper libfprint."
         )
 
+    def autenticar_operador(self, on_progress=None):
+        """Captura una huella y devuelve (id_operador, nombre) o None.
+
+        Consulta los operadores activos y usa identificar_en_lector(). Util
+        para el login y para autorizar la reanudacion de un paro. El
+        threading.Lock garantiza que solo haya una captura a la vez, ya que
+        el lector es un recurso compartido; al arrancar cada captura avisa
+        al lector con un beep para que el operador sepa que debe apoyar
+        el dedo.
+        """
+        from src.database import listar_fmds
+
+        filas = listar_fmds(activos_solo=True)
+        if not filas:
+            if on_progress:
+                on_progress("No hay operadores registrados.")
+            return None
+        plantillas = [fila[2] for fila in filas]
+        with self._lock_lector:
+            if on_progress:
+                on_progress("Coloca el dedo en el lector...")
+            emitir_beep()
+            resultado = self.identificar_en_lector(plantillas, on_progress=on_progress)
+        if not resultado:
+            return None
+        idx = resultado[0]
+        if not (0 <= idx < len(filas)):
+            return None
+        return filas[idx][0], filas[idx][1]
+
     def _identificar_libfprint(self, lista_plantillas, on_progress=None):
         if not lista_plantillas:
             return None
@@ -248,11 +283,15 @@ class BiometricService:
                         on_progress(ev.get("mensaje", ""))
                 elif estado == "match":
                     resultado = (ev.get("index", 0), 0)
+                    log.info("Huella MATCH contra plantilla %s", ev.get("index", 0))
                 elif estado == "nomatch":
                     resultado = None
+                    log.info("Huella NO reconocida (nomatch)")
                 elif estado == "error":
                     raise RuntimeError(ev.get("message", "Error de identificación."))
             proc.wait()
+            if resultado is None:
+                log.info("Identificacion sin coincidencia (resultado None)")
             return resultado
         except FileNotFoundError:
             raise RuntimeError("Helper libfprint no está compilado.")
