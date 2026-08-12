@@ -2,10 +2,7 @@ import sys
 import os
 import platform
 
-# NOTA: XInitThreads() fue ELIMINADO a propósito.
-# Causaba el abort de XCB "Unknown sequence number ... You called XInitThreads,
-# this is not your fault" al crear los primeros widgets de Tk.
-# Tkinter no lo requiere: los hilos secundarios jamás tocan Tk
+# Los hilos secundarios jamás tocan Tk
 # (se comunican por colas thread-safe drenadas en el hilo principal).
 
 # 2. AHORA SÍ IMPORTAR CUSTOMTKINTER Y EL RESTO DEL PROYECTO

@@ -2,14 +2,15 @@
 main.py - Punto de entrada del sistema de control biometrico.
 
 Orquesta:
-    - Instancias compartidas: BiometricService, GpioController y la BD.
+    - Instancias compartidas: BiometricService, controlador HAL (Modbus TCP
+      o SimulacionController) y la BD.
     - Header con boton hamburguesa que despliega un panel lateral con la
       navegacion: Inicio, Sesiones y Administracion.
-    - Shutdown seguro: siempre llama gpio.cleanup() al salir (manual o error).
+    - Shutdown seguro: siempre llama controlador.cleanup() al salir (manual o
+      error).
 
-NO se llama XInitThreads(): en esta RPi causaba abort de XCB (ver
-main_original.py). Los hilos secundarios nunca tocan los widgets; se
-comunican por queue.Queue() drenada en el hilo principal.
+Los hilos secundarios nunca tocan los widgets; se comunican por
+queue.Queue() drenada en el hilo principal.
 """
 
 import logging
@@ -17,11 +18,9 @@ import os
 import tkinter as tk
 from tkinter import ttk
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s.%(msecs)03d [%(levelname)s] (%(threadName)s) %(message)s",
-    datefmt="%H:%M:%S",
-)
+from src.logging_config import configurar_logging
+
+configurar_logging()
 
 from src import config
 from src.database import init_db, obtener_rol_operador
@@ -31,9 +30,23 @@ from src.gui.inicio_view import InicioView
 from src.gui.sessions_view import SessionsView
 from src.gui.style import aplicar_estilo
 from src.hardware.biometric_service import BiometricService
-from src.hardware.gpio_controller import GpioController
+from src.hardware.modbus_controller import ModbusController
+from src.hardware.simulacion_controller import SimulacionController
 
 log = logging.getLogger(__name__)
+
+
+def crear_controlador():
+    """Fabrica del HAL: Modbus TCP si hay MODBUS_HOST, si no SimulacionController.
+
+    En la PC Fanless Windows se configura MODBUS_HOST en .env y la planta
+    maneja reles y contador via el modulo Advantech. Sin MODBUS_HOST (o en
+    simulacion) se usa SimulacionController, que corre en simulacion (sin
+    hardware).
+    """
+    if config.MODBUS_CONFIG["host"]:
+        return ModbusController()
+    return SimulacionController()
 
 
 class App(tk.Tk):
@@ -55,7 +68,7 @@ class App(tk.Tk):
 
         # Inyeccion de dependencias (HAL + biometria)
         self.biometrico = BiometricService()
-        self.gpio = GpioController()
+        self.controlador = crear_controlador()
 
         self.vistas = {}
         self.vista_actual = None
@@ -193,7 +206,7 @@ class App(tk.Tk):
         vista = self.vistas.get(nombre)
         if vista is None:
             if nombre == "inicio":
-                vista = InicioView(self.content, self, self.biometrico, self.gpio)
+                vista = InicioView(self.content, self, self.biometrico, self.controlador)
             elif nombre == "sesiones":
                 vista = SessionsView(self.content, self)
             elif nombre == "admin":
@@ -212,7 +225,7 @@ class App(tk.Tk):
 
     def _salir(self):
         log.info("Cerrando aplicacion ...")
-        self.gpio.cleanup()
+        self.controlador.cleanup()
         self.destroy()
 
 
@@ -221,5 +234,5 @@ if __name__ == "__main__":
     try:
         app.mainloop()
     finally:
-        app.gpio.cleanup()
-        log.info("GPIO desenergizado y liberado.")
+        app.controlador.cleanup()
+        log.info("Controlador HAL liberado.")

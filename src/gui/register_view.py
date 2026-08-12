@@ -127,7 +127,7 @@ class RegisterView(ttk.Frame):
         log.warning("Captura sin plantilla: status=%s mensaje=%s", status, mensaje)
 
         if status == "SUCCESS":
-            texto = "✅ Huella verificada, pero sin plantilla (fprintd no la expone)."
+            texto = "✅ Huella verificada, pero sin plantilla."
         elif status == "NO_MATCH":
             texto = "❌ Huella no coincide o no hay huellas enroladas."
         elif status == "TIMEOUT":

@@ -1,7 +1,6 @@
-import platform
 from tkinter import ttk
 
-FAMILIA_FUENTE = "Segoe UI" if platform.system() == "Windows" else "DejaVu Sans"
+FAMILIA_FUENTE = "Segoe UI"
 
 COLOR_FONDO = "#1a1a1a"
 COLOR_SUPERFICIE = "#2a2a2a"

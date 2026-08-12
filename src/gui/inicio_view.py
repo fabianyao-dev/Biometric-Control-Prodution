@@ -44,11 +44,11 @@ log = logging.getLogger(__name__)
 
 
 class InicioView(ttk.Frame):
-    def __init__(self, parent, controller, biometrico, gpio):
+    def __init__(self, parent, controller, biometrico, controlador):
         super().__init__(parent, style="TFrame")
         self.controller = controller
         self.biometrico = biometrico
-        self.gpio = gpio
+        self.controlador = controlador
 
         self.sesion_id = None
         self.operador_id = None
@@ -120,12 +120,12 @@ class InicioView(ttk.Frame):
         self._abrir_huella_encendido()
 
     def _apagar_maquina(self):
-        if not self.gpio.maquina_detenida():
-            self.gpio.maquina_pausada()
-        total = self.gpio.cortes_totales()
+        if not self.controlador.maquina_detenida():
+            self.controlador.maquina_pausada()
+        total = self.controlador.cortes_totales()
         if self.sesion_id is not None:
             cerrar_sesion(self.sesion_id, total)
-        self.gpio.reset_conteo()
+        self.controlador.reset_conteo()
         self.sesion_id = None
         self.operador_id = None
         self.operador_nombre = None
@@ -161,8 +161,8 @@ class InicioView(ttk.Frame):
         self.sesion_id = abrir_sesion(id_operador)
         self.operador_id = id_operador
         self.operador_nombre = nombre
-        self.gpio.reset_conteo()
-        self.gpio.maquina_lista()
+        self.controlador.reset_conteo()
+        self.controlador.maquina_lista()
         self._en_paro = False
         self._paro_idle_triggado = False
         self._refrescar_operador()
@@ -190,7 +190,7 @@ class InicioView(ttk.Frame):
         self.sesion_id = sesion["id"]
         self.operador_id = sesion["operador_id"]
         self.operador_nombre = sesion["nombre"]
-        self.gpio.establecer_conteo(sesion["total_cortes"] or 0)
+        self.controlador.establecer_conteo(sesion["total_cortes"] or 0)
         self._en_paro = True
         self._paro_idle_triggado = True
         # Paro en curso de la sesion; si no existia, se formaliza la detencion.
@@ -258,7 +258,7 @@ class InicioView(ttk.Frame):
             if self._en_paro:
                 self._abrir_paro_autorizacion()
     def _pausar_maquina(self, motivo="manual"):
-        self.gpio.maquina_pausada()
+        self.controlador.maquina_pausada()
         self._en_paro = True
         self.paro_id = iniciar_paro(self.sesion_id)
         self._refrescar_estado_maquina()
@@ -333,7 +333,7 @@ class InicioView(ttk.Frame):
 
     def _autorizado_autenticado(self, id_operador, nombre, causa_id=None):
         finalizar_paro(self.paro_id, causa_id, id_operador)
-        self.gpio.reprisar_maquina()
+        self.controlador.reprisar_maquina()
         self._en_paro = False
         self._paro_idle_triggado = False
         self._recuperando = False
@@ -345,10 +345,30 @@ class InicioView(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _refrescar_contador(self):
-        self.lbl_cortes.configure(text=f"Cortes: {self.gpio.cortes_totales()}")
+        self.lbl_cortes.configure(text=f"Cortes: {self.controlador.cortes_totales()}")
         self._refrescar_estado_maquina()
+        self._refrescar_enlace_modbus()
         self._verificar_inactividad()
-        self.after(config.GPIO_REFRESH_MS, self._refrescar_contador)
+        self.after(config.REFRESCO_CONTADOR_MS, self._refrescar_contador)
+
+    def _refrescar_enlace_modbus(self):
+        """Alerta visual si el enlace Modbus se cae (sin crashear la UI).
+
+        Solo aplica al controlador Modbus (configurado con MODBUS_HOST); en
+        modo simulacion o con SimulacionController no hay alerta.
+        """
+        en_simulacion = getattr(self.controlador, "en_simulacion", lambda: True)()
+        conectado = getattr(self.controlador, "conectado", None)
+        if en_simulacion or conectado is None:
+            self.lbl_detalle.configure(text="", style="Info.TLabel")
+        elif not conectado():
+            self.lbl_detalle.configure(
+                text="Error de comunicacion con el modulo Modbus. "
+                     "Reintentando...",
+                style="Error.TLabel",
+            )
+        else:
+            self.lbl_detalle.configure(text="", style="Info.TLabel")
 
     def _checkpoint_cortes(self):
         """Guarda periodicamente el total de cortes de la sesion activa.
@@ -357,7 +377,7 @@ class InicioView(ttk.Frame):
         ultimo conteo en la base de datos (ver config.CORTES_GUARDAR_INTERVALO_MS).
         """
         if self.sesion_id is not None:
-            actualizar_cortes_sesion(self.sesion_id, self.gpio.cortes_totales())
+            actualizar_cortes_sesion(self.sesion_id, self.controlador.cortes_totales())
         self.after(config.CORTES_GUARDAR_INTERVALO_MS, self._checkpoint_cortes)
 
     def _verificar_inactividad(self):
@@ -369,13 +389,13 @@ class InicioView(ttk.Frame):
             return
         if not self._maquina_en_marcha():
             return
-        if self.gpio.segundos_sin_corte() >= timeout:
+        if self.controlador.segundos_sin_corte() >= timeout:
             self._paro_idle_triggado = True
             log.info("Sin cortes por %s s; abriendo paro automatico", timeout)
             self._pausar_maquina(motivo="automatico")
 
     def _maquina_en_marcha(self):
-        return not self.gpio.maquina_detenida()
+        return not self.controlador.maquina_detenida()
 
     def _refrescar_estado_maquina(self):
         if self.sesion_id is None:
