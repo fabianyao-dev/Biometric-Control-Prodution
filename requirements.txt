@@ -1,7 +1,4 @@
-﻿customtkinter==6.0.0
-darkdetect==0.8.0
-packaging==26.2
-pillow==12.3.0
+﻿PySide6==6.11.1
 pyModbusTCP==0.3.0
 python-dotenv==1.2.2
 tzdata==2026.3

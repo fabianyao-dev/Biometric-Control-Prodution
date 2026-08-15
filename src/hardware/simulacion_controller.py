@@ -14,7 +14,8 @@ ModbusController para que la GUI no cambie:
     - cortes_totales()   -> int (contador de cortes)
     - reset_conteo()     -> pone el contador en 0
     - establecer_conteo(total) -> restaura desde el checkpoint de la BD
-    - segundos_sin_corte() -> float
+    - segundos_sin_corte() -> float (alimenta SEGURO_PARO_SEGUNDOS)
+    - segundos_desde_arranque() -> float (alimenta PARO_IDLE_TIMEOUT_S)
     - simular_corte()    -> suma un corte
     - maquina_detenida() -> bool
     - en_simulacion()    -> siempre True
@@ -47,7 +48,11 @@ class SimulacionController:
 
         self._lock = threading.Lock()
         self._cortes = 0
+        # `_ultimo_corte` SOLO se actualiza con cortes reales (simular_corte);
+        # `_ultimo_arranque` es la ultima vez que la maquina arranco/reanudo
+        # (gracia del auto-paro). Ver modbus_controller.py.
         self._ultimo_corte = time.time()
+        self._ultimo_arranque = time.time()
         self._maquina_en_marcha = False
         log.info("SimulacionController en modo SIMULACION (sin hardware)")
 
@@ -64,9 +69,16 @@ class SimulacionController:
             self._ultimo_corte = time.time()
 
     def segundos_sin_corte(self) -> float:
-        """Segundos transcurridos desde el ultimo corte."""
+        """Segundos transcurridos desde el ultimo corte real."""
         with self._lock:
             return time.time() - self._ultimo_corte
+
+    def segundos_desde_arranque(self) -> float:
+        """Tiempo desde que la maquina arranco o reanudo (o inf si detenida)."""
+        with self._lock:
+            if not self._maquina_en_marcha:
+                return float("inf")
+            return time.time() - self._ultimo_arranque
 
     def simular_corte(self):
         """Suma un corte (usado por la GUI en modo simulacion / pruebas)."""
@@ -79,7 +91,6 @@ class SimulacionController:
     def reset_conteo(self):
         with self._lock:
             self._cortes = 0
-            self._ultimo_corte = time.time()
 
     def establecer_conteo(self, total: int):
         """Restaura el contador desde el ultimo checkpoint de la BD.
@@ -89,7 +100,6 @@ class SimulacionController:
         """
         with self._lock:
             self._cortes = int(total)
-            self._ultimo_corte = time.time()
 
     # ------------------------------------------------------------------
     # Relevadores (simulacion)
@@ -114,7 +124,7 @@ class SimulacionController:
         log.info("-> MARCHA: pulso RELE_ENCENDIDO (start_pin=%s) [simulacion]",
                  self._pin_start)
         self._maquina_en_marcha = True
-        self._ultimo_corte = time.time()
+        self._ultimo_arranque = time.time()
         log.info("Maquina INICIADA (pulso enviado)")
 
     def maquina_pausada(self):

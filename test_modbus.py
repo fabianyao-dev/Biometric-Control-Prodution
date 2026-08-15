@@ -9,6 +9,7 @@ Uso:
     python test_modbus.py                 # lee contador usando el .env
     python test_modbus.py --ip 192.168.0.10 --port 502
     python test_modbus.py --coil 0 --pulso # pulso 300ms en el coil (tipo boton)
+    python test_modbus.py --coil 0 --pulso-invertido # pulso invertido (activo=False)
     python test_modbus.py --coil 1 --on    # deja el coil en True (OJO: energiza)
     python test_modbus.py --coil 1 --off   # pone el coil en False (seguro)
     python test_modbus.py --reg 4 --words 2  # lee un registro cualquiera
@@ -39,6 +40,8 @@ def main():
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--pulso", action="store_true",
                        help="Pulso momentaneo (tipo boton)")
+    group.add_argument("--pulso-invertido", action="store_true",
+                       help="Pulso invertido (activo=False, reposo=True)")
     group.add_argument("--on", action="store_true",
                        help="Dejar el coil en True (energizado!)")
     group.add_argument("--off", action="store_true",
@@ -64,19 +67,23 @@ def main():
         cliente.close()
         return 1
     valor = 0
-    for r in regs:
+    for r in reversed(regs):
         valor = (valor << 16) | (r & 0xFFFF)
-    print(f"Registro {args.reg}: {regs} -> valor {valor}")
+    print(f"Registro {args.reg}: {regs} -> valor {valor} (little-endian)")
 
     # 2) Operar un coil si se pidio.
     if args.coil is not None:
-        if args.pulso:
-            pulso_ms = config.MODBUS_CONFIG["pulso_duracion_ms"]
-            ok = cliente.write_single_coil(args.coil, True)
-            print(f"Coil {args.coil} ON ({ok}). Esperando {pulso_ms} ms...")
+        pulso_ms = config.MODBUS_CONFIG["pulso_duracion_ms"]
+        if args.pulso or args.pulso_invertido:
+            activo = not args.pulso_invertido  # True normal, False invertido
+            reposo = args.pulso_invertido
+            ok = cliente.write_single_coil(args.coil, activo)
+            print(f"Coil {args.coil} activo={activo} ({ok}). "
+                  f"Esperando {pulso_ms} ms...")
             time.sleep(pulso_ms / 1000.0)
-            ok2 = cliente.write_single_coil(args.coil, False)
-            print(f"Coil {args.coil} OFF ({ok2}). Pulso terminado.")
+            ok2 = cliente.write_single_coil(args.coil, reposo)
+            print(f"Coil {args.coil} reposo={reposo} ({ok2}). "
+                  "Pulso terminado.")
         else:
             valor_coil = args.on
             ok = cliente.write_single_coil(args.coil, valor_coil)

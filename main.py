@@ -10,20 +10,37 @@ Orquesta:
       error).
 
 Los hilos secundarios nunca tocan los widgets; se comunican por
-queue.Queue() drenada en el hilo principal.
+queue.Queue() drenada en el hilo principal (QTimer).
 """
 
 import logging
 import os
-import tkinter as tk
-from tkinter import ttk
+import sys
+
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from src.logging_config import configurar_logging
 
 configurar_logging()
 
 from src import config
-from src.database import init_db, obtener_rol_operador
+from src.database import (
+    init_db,
+    obtener_rol_operador,
+    roles_con_permiso,
+    rol_tiene_permiso_operador,
+)
 from src.gui.admin_view import AdminView
 from src.gui.huella_modal import HuellaModal
 from src.gui.inicio_view import InicioView
@@ -34,6 +51,18 @@ from src.hardware.modbus_controller import ModbusController
 from src.hardware.simulacion_controller import SimulacionController
 
 log = logging.getLogger(__name__)
+
+def _ruta_recurso(nombre):
+    """Ruta a un recurso empaquetado. Con PyInstaller los assets viven en
+    el dir temporal (`_MEIPASS`) o junto al exe (onedir); en dev, en la raiz.
+    """
+    if getattr(sys, "frozen", False):
+        # _MEIPASS es el directorio temporal donde PyInstaller descomprime todo
+        base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    else:
+        # En desarrollo, la ruta es relativa a este script (main.py)
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "assets", nombre)
 
 
 def crear_controlador():
@@ -49,24 +78,23 @@ def crear_controlador():
     return SimulacionController()
 
 
-class App(tk.Tk):
+class App(QMainWindow):
     def __init__(self):
         super().__init__()
         log.info("Iniciando aplicacion biometria")
-        self.title("Sistema de Control Biometrico - Planta de Corte")
+        self.setWindowTitle("Sistema de Control Biometrico - Planta de Corte")
+        try:
+            # Intenta cargar el ícono de la aplicación desde los assets.
+            # Si falla (ej: no existe el archivo), usa el ícono por defecto de Qt.
+            ruta_ico = _ruta_recurso("logo.ico")
+            self.setWindowIcon(QIcon(ruta_ico))
+            # Tambien establecerlo en la QApplication para el icono de la barra de tareas
+            # y otros contextos del sistema.
+            app.setWindowIcon(QIcon(ruta_ico))
+        except Exception as e:
+            log.warning("No se pudo cargar el ícono %s: %s", ruta_ico, e)
+        self.resize(1152, 648)
 
-        # Siempre en pantalla completa; desactivar con BIOMETRICO_KIOSKO=0
-        if os.environ.get("BIOMETRICO_KIOSKO") != "0":
-            self.attributes("-fullscreen", True)
-            self.geometry("800x480")
-            log.info("Modo kiosco activado")
-
-        aplicar_estilo(self)
-        init_db()
-        # La sesion 'Activa' que quede tras un apagon se recupera en la vista
-        # de Inicio (InicioView._revisar_sesion_interrumpida), no se borra.
-
-        # Inyeccion de dependencias (HAL + biometria)
         self.biometrico = BiometricService()
         self.controlador = crear_controlador()
 
@@ -74,8 +102,8 @@ class App(tk.Tk):
         self.vista_actual = None
         self.btn_sidebar = {}
 
-        self._crear_header()
         self._crear_contenido()
+        self._crear_header()
         self._crear_sidebar(opciones=[
             ("inicio", "Inicio"),
             ("sesiones", "Sesiones"),
@@ -83,47 +111,57 @@ class App(tk.Tk):
         ])
         self.mostrar_vista("inicio")
 
-        # Shutdown seguro
-        self.protocol("WM_DELETE_WINDOW", self._salir)
+        # Siempre en pantalla completa; desactivar con BIOMETRICO_KIOSKO=0.
+        self.kiosko = os.environ.get("BIOMETRICO_KIOSKO") != "0"
+        if self.kiosko:
+            log.info("Modo kiosco activado")
 
     # ------------------------------------------------------------------
     # Header + hamburguesa
     # ------------------------------------------------------------------
 
     def _crear_header(self):
-        self.header = ttk.Frame(self, style="Header.TFrame")
-        self.header.pack(fill="x", side="top")
+        lay = QHBoxLayout(self.header)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(8)
 
-        self.btn_hamburguesa = ttk.Button(
-            self.header, text="\u2630", width=3, style="Nav.TButton",
-            command=self._toggle_sidebar,
-        )
-        self.btn_hamburguesa.pack(side="left", padx=(16, 8), pady=10)
+        self.btn_hamburguesa = QPushButton("\u2630", self.header)
+        self.btn_hamburguesa.setObjectName("Nav")
+        self.btn_hamburguesa.setFixedWidth(44)
+        self.btn_hamburguesa.clicked.connect(self._toggle_sidebar)
+        lay.addWidget(self.btn_hamburguesa)
 
-        ttk.Label(
-            self.header, text="Control Biometrico de Produccion",
-            style="Header.TLabel",
-        ).pack(side="left", padx=8, pady=10)
+        titulo = QLabel("Control Biometrico de Produccion", self.header)
+        titulo.setObjectName("HeaderLabel")
+        lay.addWidget(titulo)
+        lay.addStretch(1)
 
-        ttk.Button(
-            self.header, text="Salir", style="Nav.TButton", command=self._salir,
-        ).pack(side="right", padx=16, pady=10)
+        btn_salir = QPushButton("Salir", self.header)
+        btn_salir.setObjectName("Nav")
+        btn_salir.clicked.connect(self._salir)
+        lay.addWidget(btn_salir)
 
     # ------------------------------------------------------------------
     # Sidebar lateral (ocultable con la hamburguesa)
     # ------------------------------------------------------------------
 
     def _crear_sidebar(self, opciones):
-        # Se crea despues del contenido para que quede a la izquierda
-        self.sidebar = ttk.Frame(self, style="Sidebar.TFrame")
+        self.sidebar = QFrame(self._cuerpo)
+        self.sidebar.setObjectName("Sidebar")
+        self.sidebar.setFixedWidth(200)
+        sv = QVBoxLayout(self.sidebar)
+        sv.setContentsMargins(8, 12, 8, 12)
+        sv.setSpacing(4)
         for nombre, texto in opciones:
-            btn = ttk.Button(
-                self.sidebar, text=texto, style="Sidebar.TButton",
-                command=lambda n=nombre: self._ir_a(n),
-            )
-            btn.pack(fill="x", padx=8, pady=6)
+            btn = QPushButton(texto, self.sidebar)
+            btn.setObjectName("Nav")
+            btn.clicked.connect(lambda checked=False, n=nombre: self._ir_a(n))
+            sv.addWidget(btn)
             self.btn_sidebar[nombre] = btn
+        sv.addStretch(1)
 
+        # Se inserta antes del contenido para quedar a la izquierda.
+        self._cuerpo_layout.insertWidget(0, self.sidebar)
         self._sidebar_visible = True
         self._actualizar_sidebar()
 
@@ -132,38 +170,38 @@ class App(tk.Tk):
         self._actualizar_sidebar()
 
     def _actualizar_sidebar(self):
-        if self._sidebar_visible:
-            self.sidebar.pack(in_=self, before=self.content, side="left", fill="y")
-        else:
-            self.sidebar.pack_forget()
+        self.sidebar.setVisible(self._sidebar_visible)
 
     def _ir_a(self, nombre):
-        # Vistas protegidas por rol: se valida la huella antes de entrar.
+        # Vistas protegidas por permiso de rol: se valida la huella antes de
+        # entrar. Los permisos se gestionan en Administracion, no en codigo.
         if nombre == "sesiones":
-            self._navegar_con_huella(nombre, config.ROLES_ACCESO_SESIONES)
+            self._navegar_con_huella(nombre, "acceso_sesiones")
             return
         if nombre == "admin":
-            self._navegar_con_huella(nombre, config.ROLES_ACCESO_ADMIN)
+            self._navegar_con_huella(nombre, "acceso_admin")
             return
         self.mostrar_vista(nombre)
         self._sidebar_visible = False
         self._actualizar_sidebar()
 
-    def _navegar_con_huella(self, nombre, roles_permitidos):
-        """Pide la huella y solo navega si el rol del operador esta permitido.
+    def _navegar_con_huella(self, nombre, permiso):
+        """Pide la huella y solo navega si el rol del operador tiene el
+        permiso solicitado.
 
-        Si la persona no tiene el rol, el modal muestra el rechazo y sigue
-        pidiendo huella hasta que ingrese alguien autorizado o se cancele.
+        Si la persona no tiene el permiso, el modal muestra el rechazo y
+        sigue pidiendo huella hasta que ingrese alguien autorizado o se
+        cancele.
         """
         etiqueta = {"sesiones": "SESIONES", "admin": "ADMINISTRACION"}.get(
             nombre, nombre
         )
-        permitidos = " o ".join(roles_permitidos)
+        permitidos = " o ".join(roles_con_permiso(permiso)) or "ningun rol"
 
         def validador(op_id, nombre_op, causa_id):
-            rol = obtener_rol_operador(op_id)
-            if rol and rol in roles_permitidos:
+            if rol_tiene_permiso_operador(op_id, permiso):
                 return True, None
+            rol = obtener_rol_operador(op_id)
             return False, (
                 f"Acceso denegado para {nombre_op} (rol: {rol or 'sin rol'}). "
                 f"Solo {permitidos} puede entrar a {etiqueta}."
@@ -184,25 +222,40 @@ class App(tk.Tk):
             validador=validador,
             on_autenticado=navegar,
         )
-        modal.grab_set()
-        modal.wait_window()
+        modal.exec()
 
     # ------------------------------------------------------------------
     # Contenido
     # ------------------------------------------------------------------
 
     def _crear_contenido(self):
-        self.content = ttk.Frame(self, style="TFrame")
-        self.content.pack(side="left", fill="both", expand=True)
+        self._central = QWidget(self)
+        self.setCentralWidget(self._central)
+
+        # Layout vertical: header arriba, cuerpo (sidebar + contenido) abajo.
+        self._body = QVBoxLayout(self._central)
+        self._body.setContentsMargins(0, 0, 0, 0)
+        self._body.setSpacing(0)
+
+        self.header = QFrame(self._central)
+        self.header.setObjectName("Header")
+        self.header.setFixedHeight(56)
+        self._body.addWidget(self.header)
+
+        self._cuerpo = QWidget(self._central)
+        self._cuerpo_layout = QHBoxLayout(self._cuerpo)
+        self._cuerpo_layout.setContentsMargins(0, 0, 0, 0)
+        self._cuerpo_layout.setSpacing(0)
+        self._body.addWidget(self._cuerpo, stretch=1)
+
+        self.content = QStackedWidget(self._cuerpo)
+        self._cuerpo_layout.addWidget(self.content, stretch=1)
 
     # ------------------------------------------------------------------
     # Vistas
     # ------------------------------------------------------------------
 
     def mostrar_vista(self, nombre):
-        if self.vista_actual is not None:
-            self.vista_actual.pack_forget()
-
         vista = self.vistas.get(nombre)
         if vista is None:
             if nombre == "inicio":
@@ -214,8 +267,9 @@ class App(tk.Tk):
             else:
                 return
             self.vistas[nombre] = vista
+            self.content.addWidget(vista)
 
-        vista.pack(fill="both", expand=True)
+        self.content.setCurrentWidget(vista)
         self.vista_actual = vista
         log.info("Vista activa: %s", nombre)
 
@@ -226,13 +280,27 @@ class App(tk.Tk):
     def _salir(self):
         log.info("Cerrando aplicacion ...")
         self.controlador.cleanup()
-        self.destroy()
+        self.close()
+
+    def closeEvent(self, evento):
+        # Shutdown seguro: al cerrar la ventana tambien se libera el HAL.
+        self.controlador.cleanup()
+        log.info("Aplicacion cerrada.")
+        evento.accept()
 
 
 if __name__ == "__main__":
-    app = App()
+    app = QApplication(sys.argv)
+    aplicar_estilo(app)
+    init_db()
+    # La sesion 'Activa' que quede tras un apagon se recupera en la vista
+    # de Inicio (InicioView._revisar_sesion_interrumpida), no se borra.
+    ventana = App()
+    ventana.show()
+    if ventana.kiosko:
+        ventana.showFullScreen()
     try:
-        app.mainloop()
+        app.exec()
     finally:
-        app.controlador.cleanup()
+        ventana.controlador.cleanup()
         log.info("Controlador HAL liberado.")

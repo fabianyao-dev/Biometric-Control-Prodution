@@ -4,6 +4,8 @@ database.py - Capa de persistencia (SQLite) del sistema de control biométrico.
 Esquema relacional:
     roles                  Catalogo de roles (admin, operador, ...) soft-delete.
     operadores             Operadores registrados (soft-delete via `activo`).
+    huellas_operador       Una fila por huella/plantilla del operador (un
+                           operador puede tener varias).
     causas_paro            Motivos configurables de paro (soft-delete).
     sesiones_produccion    Entrada/salida del operador por turno.
     paros_produccion       Paros vinculados a una sesion (FK a sesion_id).
@@ -24,6 +26,30 @@ from zoneinfo import ZoneInfo
 from src.config import DB_PATH, ZONA_HORARIA
 
 ZONA = ZoneInfo(ZONA_HORARIA)
+
+# Operador que el sistema crea en solitario cuando NO hay usuarios reales
+# registrados (modo desarrollo/pruebas): permite entrar sin huella. Nunca
+# tiene huellas en `huellas_operador`, por lo que no aparece en `listar_fmds`.
+OPERADOR_TEMPORAL_NOMBRE = "Operador Temporal (dev)"
+
+# Permisos del sistema (se siembran en la BD). Los roles se asignan desde
+# Administracion; aqui solo vive el catalogo y los defaults de primer arranque.
+PERMISOS_SISTEMA = [
+    ("autorizar_paro", "Autorizar la reanudacion de un paro (ademas del operador de la sesion).", 1),
+    ("acceso_sesiones", "Ver la vista de Sesiones.", 2),
+    ("acceso_admin", "Acceder a Administracion (incluye la gestion de permisos).", 3),
+]
+
+# Permisos por defecto de los roles clasicos, solo en el primer arranque
+# (cuando la tabla permisos_roles esta vacia).
+PERMISOS_POR_DEFECTO = {
+    "admin": ["autorizar_paro", "acceso_sesiones", "acceso_admin"],
+    "supervisor": ["autorizar_paro", "acceso_sesiones"],
+}
+
+# Permiso que protege el acceso a Administracion; nunca puede quedarse sin
+# ningun rol activo con el (evita quedarse fuera del sistema).
+PERMISO_ACCESO_ADMIN = "acceso_admin"
 
 
 def ahora_local() -> str:
@@ -57,6 +83,18 @@ def init_db():
             activo INTEGER NOT NULL DEFAULT 1
         );
 
+        CREATE TABLE IF NOT EXISTS permisos (
+            nombre TEXT PRIMARY KEY,
+            descripcion TEXT NOT NULL,
+            orden INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS permisos_roles (
+            rol_id INTEGER NOT NULL REFERENCES roles(id),
+            permiso TEXT NOT NULL REFERENCES permisos(nombre),
+            PRIMARY KEY (rol_id, permiso)
+        );
+
         CREATE TABLE IF NOT EXISTS operadores (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre TEXT NOT NULL,
@@ -64,6 +102,13 @@ def init_db():
             fecha_registro TIMESTAMP DEFAULT (ahora_monterrey()),
             activo INTEGER NOT NULL DEFAULT 1,
             rol_id INTEGER REFERENCES roles(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS huellas_operador (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operador_id INTEGER NOT NULL REFERENCES operadores(id),
+            huella_template BLOB NOT NULL,
+            fecha_captura TIMESTAMP DEFAULT (ahora_monterrey())
         );
 
         CREATE TABLE IF NOT EXISTS causas_paro (
@@ -98,6 +143,21 @@ def init_db():
             "ALTER TABLE operadores ADD COLUMN rol_id INTEGER REFERENCES roles(id)"
         )
 
+    # Migracion multi-huella: mover las plantillas a su propia tabla (una fila
+    # por huella) y quitar la columna `huella_template` de operadores.
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(operadores)").fetchall()]
+    if "huella_template" in cols:
+        for op in cur.execute(
+            "SELECT id, huella_template FROM operadores "
+            "WHERE huella_template IS NOT NULL AND length(huella_template) > 0"
+        ).fetchall():
+            cur.execute(
+                "INSERT INTO huellas_operador (operador_id, huella_template, "
+                "fecha_captura) VALUES (?, ?, ?)",
+                (op["id"], op["huella_template"], ahora_local()),
+            )
+        cur.execute("ALTER TABLE operadores DROP COLUMN huella_template")
+
     # Roles por defecto: los operadores ya existentes quedan como admin.
     for nombre in ("admin", "operador"):
         cur.execute("INSERT OR IGNORE INTO roles (nombre) VALUES (?)", (nombre,))
@@ -108,6 +168,30 @@ def init_db():
         cur.execute(
             "UPDATE operadores SET rol_id=? WHERE rol_id IS NULL", (admin["id"],)
         )
+
+    # Permisos: catalogo + defaults del primer arranque (solo si la tabla
+    # permisos_roles esta vacia, para no pisar cambios hechos por el admin).
+    for nombre, descripcion, orden in PERMISOS_SISTEMA:
+        cur.execute(
+            "INSERT OR IGNORE INTO permisos (nombre, descripcion, orden) "
+            "VALUES (?, ?, ?)",
+            (nombre, descripcion, orden),
+        )
+    sin_permisos = cur.execute(
+        "SELECT COUNT(*) AS n FROM permisos_roles"
+    ).fetchone()["n"] == 0
+    if sin_permisos:
+        for rol_nombre, permisos in PERMISOS_POR_DEFECTO.items():
+            rol = cur.execute(
+                "SELECT id FROM roles WHERE nombre=?", (rol_nombre,)
+            ).fetchone()
+            if rol is not None:
+                for permiso in permisos:
+                    cur.execute(
+                        "INSERT OR IGNORE INTO permisos_roles (rol_id, permiso) "
+                        "VALUES (?, ?)",
+                        (rol["id"], permiso),
+                    )
 
     conn.commit()
     conn.close()
@@ -194,38 +278,260 @@ def rol_id_por_defecto() -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# Permisos por rol
+# ---------------------------------------------------------------------------
+
+def listar_permisos():
+    """Catalogo de permisos (nombre, descripcion, orden)."""
+    conn = obtener_conexion()
+    rows = conn.execute(
+        "SELECT nombre, descripcion, orden FROM permisos "
+        "ORDER BY orden, nombre"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def permisos_de_rol(rol_id: int):
+    """Nombres de permisos asignados a un rol."""
+    conn = obtener_conexion()
+    rows = conn.execute(
+        "SELECT permiso FROM permisos_roles WHERE rol_id=? ORDER BY permiso",
+        (rol_id,),
+    ).fetchall()
+    conn.close()
+    return [r["permiso"] for r in rows]
+
+
+def rol_tiene_permiso_operador(operador_id: int, permiso: str) -> bool:
+    """¿El operador (via su rol) tiene el permiso?."""
+    conn = obtener_conexion()
+    row = conn.execute(
+        "SELECT 1 FROM operadores o "
+        "JOIN permisos_roles pr ON pr.rol_id=o.rol_id "
+        "WHERE o.id=? AND pr.permiso=?",
+        (operador_id, permiso),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def roles_con_permiso(permiso: str):
+    """Roles ACTIVOS que tienen el permiso (para mensajes al usuario)."""
+    conn = obtener_conexion()
+    rows = conn.execute(
+        "SELECT r.nombre FROM roles r "
+        "JOIN permisos_roles pr ON pr.rol_id=r.id "
+        "WHERE r.activo=1 AND pr.permiso=? ORDER BY r.nombre",
+        (permiso,),
+    ).fetchall()
+    conn.close()
+    return [r["nombre"] for r in rows]
+
+
+def actualizar_permisos_rol(rol_id: int, nombres_permisos):
+    """Reemplaza los permisos de un rol. Devuelve (ok, mensaje).
+
+    Nunca permite dejar a ningun rol activo con `acceso_admin`: si el rol
+    seria el ultimo en conservarlo, se rechaza (evita quedarse fuera de
+    Administracion).
+    """
+    nombres_permisos = [p for p in (nombres_permisos or []) if p]
+    try:
+        conn = obtener_conexion()
+        if PERMISO_ACCESO_ADMIN not in nombres_permisos:
+            otros = conn.execute(
+                "SELECT COUNT(*) AS n FROM permisos_roles pr "
+                "JOIN roles r ON r.id=pr.rol_id "
+                "WHERE r.activo=1 AND pr.permiso=? AND pr.rol_id<>?",
+                (PERMISO_ACCESO_ADMIN, rol_id),
+            ).fetchone()["n"]
+            if otros == 0:
+                conn.close()
+                return False, (
+                    "Al menos un rol activo debe conservar el acceso a "
+                    "Administracion."
+                )
+        validos = {
+            r["nombre"]
+            for r in conn.execute("SELECT nombre FROM permisos").fetchall()
+        }
+        nombres_permisos = [p for p in nombres_permisos if p in validos]
+        conn.execute("DELETE FROM permisos_roles WHERE rol_id=?", (rol_id,))
+        for permiso in nombres_permisos:
+            conn.execute(
+                "INSERT INTO permisos_roles (rol_id, permiso) VALUES (?, ?)",
+                (rol_id, permiso),
+            )
+        conn.commit()
+        conn.close()
+        return True, ""
+    except Exception as e:
+        return False, f"Error en base de datos: {str(e)}"
+
+
+# ---------------------------------------------------------------------------
 # Operadores
 # ---------------------------------------------------------------------------
 
-def guardar_operador(nombre: str, huella_template: bytes, rol_id: int | None = None):
-    """Registra un operador activo. Devuelve (ok, mensaje|id)."""
+def guardar_operador(nombre: str, huellas, rol_id: int | None = None):
+    """Registra un operador activo con una o varias huellas.
+
+    `huellas` acepta una plantilla (bytes) o una lista de plantillas. Devuelve
+    (ok, mensaje|id).
+
+    Si ya existe un operador con ese nombre pero inactivo (soft-delete), lo
+    reactiva y agrega las huellas nuevas (conserva las existentes). Si existe
+    activo, rechaza el duplicado.
+    """
+    nombre = (nombre or "").strip()
+    if not nombre:
+        return False, "El nombre no puede ir vacio."
+    if isinstance(huellas, bytes):
+        huellas = [huellas]
+    huellas = [h for h in (huellas or []) if h]
+    if not huellas:
+        return False, "Se necesita al menos una huella para registrar."
     try:
         conn = obtener_conexion()
-        cur = conn.cursor()
         if rol_id is None:
             rol_id = rol_id_por_defecto()
-        cur.execute(
-            "INSERT INTO operadores (nombre, huella_template, fecha_registro, rol_id) "
-            "VALUES (?, ?, ?, ?)",
-            (nombre, huella_template, ahora_local(), rol_id),
-        )
+        existe = conn.execute(
+            "SELECT id, activo FROM operadores WHERE nombre=?", (nombre,)
+        ).fetchone()
+        if existe:
+            if existe["activo"]:
+                conn.close()
+                return False, f"Ya existe un operador activo con el nombre '{nombre}'."
+            conn.execute(
+                "UPDATE operadores SET activo=1, rol_id=?, fecha_registro=? "
+                "WHERE id=?",
+                (rol_id, ahora_local(), existe["id"]),
+            )
+            operador_id = existe["id"]
+        else:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO operadores (nombre, fecha_registro, rol_id) "
+                "VALUES (?, ?, ?)",
+                (nombre, ahora_local(), rol_id),
+            )
+            operador_id = cur.lastrowid
+        for h in huellas:
+            conn.execute(
+                "INSERT INTO huellas_operador (operador_id, huella_template, "
+                "fecha_captura) VALUES (?, ?, ?)",
+                (operador_id, h, ahora_local()),
+            )
         conn.commit()
-        nuevo_id = cur.lastrowid
         conn.close()
-        return True, nuevo_id
+        return True, operador_id
     except Exception as e:
         return False, f"Error en base de datos: {str(e)}"
 
 
 def listar_fmds(activos_solo=True):
-    """Devuelve lista de (id, nombre, huella_template)."""
+    """Devuelve una fila por huella: (operador_id, nombre, huella_template)."""
     conn = obtener_conexion()
-    where = "WHERE activo=1" if activos_solo else ""
+    where = "WHERE o.activo=1" if activos_solo else ""
     rows = conn.execute(
-        f"SELECT id, nombre, huella_template FROM operadores {where} ORDER BY id"
+        f"SELECT o.id, o.nombre, h.huella_template "
+        "FROM huellas_operador h "
+        "JOIN operadores o ON o.id=h.operador_id "
+        f"{where} ORDER BY o.id, h.id"
     ).fetchall()
     conn.close()
     return rows
+
+
+def agregar_huella(operador_id: int, huella_template: bytes) -> bool:
+    """Registra una huella adicional para un operador."""
+    if not huella_template:
+        return False
+    conn = obtener_conexion()
+    conn.execute(
+        "INSERT INTO huellas_operador (operador_id, huella_template, "
+        "fecha_captura) VALUES (?, ?, ?)",
+        (operador_id, huella_template, ahora_local()),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def listar_huellas_operador(operador_id: int, con_template: bool = False):
+    """Huellas de un operador (id, fecha_captura[, huella_template]).
+
+    Con `con_template=True` agrega la plantilla, util para detectar
+    duplicados al comparar capturas nuevas.
+    """
+    conn = obtener_conexion()
+    columnas = "id, fecha_captura" + (", huella_template" if con_template else "")
+    rows = conn.execute(
+        f"SELECT {columnas} FROM huellas_operador "
+        "WHERE operador_id=? ORDER BY id",
+        (operador_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def reemplazar_huella(huella_id: int, huella_template: bytes) -> bool:
+    """Sustituye la plantilla de una huella existente (re-captura)."""
+    if not huella_template:
+        return False
+    conn = obtener_conexion()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE huellas_operador SET huella_template=?, fecha_captura=? "
+        "WHERE id=?",
+        (huella_template, ahora_local(), huella_id),
+    )
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def eliminar_huella(huella_id: int) -> bool:
+    """Elimina definitivamente una huella (no es un catalogo: se borra)."""
+    conn = obtener_conexion()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM huellas_operador WHERE id=?", (huella_id,))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def obtener_operador_temporal():
+    """Devuelve (id, nombre) del operador temporal de desarrollo.
+
+    Sin operadores reales registrados, el sistema deja entrar por si solo
+    (modo desarrollo). Crea el operador la primera vez y lo reutiliza.
+    """
+    conn = obtener_conexion()
+    fila = conn.execute(
+        "SELECT id, nombre FROM operadores "
+        "WHERE nombre=? AND activo=1 LIMIT 1",
+        (OPERADOR_TEMPORAL_NOMBRE,),
+    ).fetchone()
+    if fila is None:
+        admin = conn.execute(
+            "SELECT id FROM roles WHERE nombre='admin' AND activo=1 LIMIT 1"
+        ).fetchone()
+        rol_id = admin["id"] if admin else rol_id_por_defecto()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO operadores (nombre, fecha_registro, rol_id) "
+            "VALUES (?, ?, ?)",
+            (OPERADOR_TEMPORAL_NOMBRE, ahora_local(), rol_id),
+        )
+        conn.commit()
+        fila = conn.execute(
+            "SELECT id, nombre FROM operadores WHERE id=?",
+            (cur.lastrowid,),
+        ).fetchone()
+    conn.close()
+    return fila["id"], fila["nombre"]
 
 
 def eliminar_operador(operador_id: int):

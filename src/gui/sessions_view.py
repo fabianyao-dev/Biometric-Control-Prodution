@@ -6,16 +6,25 @@ de esa sesion (motivo, inicio, fin) para el historial del turno.
 """
 
 import logging
-from tkinter import ttk
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QLabel,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from src.database import listar_sesiones, obtener_paros_de_sesion
 
 log = logging.getLogger(__name__)
 
 
-class SessionsView(ttk.Frame):
+class SessionsView(QWidget):
     def __init__(self, parent, controller):
-        super().__init__(parent, style="TFrame")
+        super().__init__(parent)
         self.controller = controller
         self._crear_interfaz()
         self._recargar_sesiones()
@@ -25,84 +34,86 @@ class SessionsView(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _crear_interfaz(self):
-        ttk.Label(self, text="Historial de Sesiones", style="Title.TLabel").pack(
-            pady=(24, 8)
-        )
-        ttk.Label(
-            self, text="Selecciona una sesion para ver sus paros:", style="Info.TLabel"
-        ).pack()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
 
-        self.tree_sesiones = ttk.Treeview(
-            self,
-            columns=("id", "operador", "inicio", "cortes", "estado", "minutos", "paros"),
-            show="headings", height=8,
-        )
-        columnas = {
-            "id": ("ID", 50),
-            "operador": ("Operador", 140),
-            "inicio": ("Inicio", 130),
-            "cortes": ("Cortes", 70),
-            "estado": ("Estado", 90),
-            "minutos": ("Min", 60),
-            "paros": ("Paros", 60),
-        }
-        for col, (titulo, ancho) in columnas.items():
-            self.tree_sesiones.heading(col, text=titulo)
-            self.tree_sesiones.column(col, width=ancho)
-        self.tree_sesiones.pack(fill="both", expand=True, padx=16, pady=10)
-        self.tree_sesiones.bind("<<TreeviewSelect>>", self._on_select_sesion)
+        titulo = QLabel("Historial de Sesiones", self)
+        titulo.setObjectName("Title")
+        layout.addWidget(titulo, alignment=Qt.AlignHCenter)
 
-        ttk.Label(self, text="Paros de la sesion:", style="Header.TLabel").pack(
-            anchor="w", padx=16
-        )
+        subtitulo = QLabel("Selecciona una sesion para ver sus paros:", self)
+        subtitulo.setObjectName("EstadoInfo")
+        layout.addWidget(subtitulo, alignment=Qt.AlignHCenter)
 
-        self.tree_paros = ttk.Treeview(
-            self, columns=("causa", "inicio", "fin"), show="headings", height=4,
+        self.tree_sesiones = QTableWidget(0, 7, self)
+        self.tree_sesiones.setHorizontalHeaderLabels(
+            ["ID", "Operador", "Inicio", "Cortes", "Estado", "Min", "Paros"]
         )
-        self.tree_paros.heading("causa", text="Causa")
-        self.tree_paros.heading("inicio", text="Inicio")
-        self.tree_paros.heading("fin", text="Fin")
-        self.tree_paros.column("causa", width=220)
-        self.tree_paros.column("inicio", width=130)
-        self.tree_paros.column("fin", width=130)
-        self.tree_paros.pack(fill="both", padx=16, pady=6)
+        self._config_tabla(self.tree_sesiones)
+        for i, ancho in enumerate((50, 140, 130, 70, 90, 60, 60)):
+            self.tree_sesiones.setColumnWidth(i, ancho)
+        self.tree_sesiones.itemSelectionChanged.connect(self._on_select_sesion)
+        layout.addWidget(self.tree_sesiones, stretch=3)
 
-        ttk.Button(self, text="Actualizar", command=self._recargar_sesiones).pack(pady=8)
+        lbl_paros = QLabel("Paros de la sesion:", self)
+        lbl_paros.setObjectName("HeaderLabel")
+        layout.addWidget(lbl_paros, alignment=Qt.AlignHCenter)
+
+        self.tree_paros = QTableWidget(0, 3, self)
+        self.tree_paros.setHorizontalHeaderLabels(["Causa", "Inicio", "Fin"])
+        self._config_tabla(self.tree_paros)
+        for i, ancho in enumerate((220, 130, 130)):
+            self.tree_paros.setColumnWidth(i, ancho)
+        layout.addWidget(self.tree_paros, stretch=2)
+
+        btn_actualizar = QPushButton("Actualizar", self)
+        btn_actualizar.clicked.connect(self._recargar_sesiones)
+        layout.addWidget(btn_actualizar, alignment=Qt.AlignHCenter)
+
+    @staticmethod
+    def _config_tabla(tabla):
+        tabla.setSelectionBehavior(QAbstractItemView.SelectRows)
+        tabla.setSelectionMode(QAbstractItemView.SingleSelection)
+        tabla.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        tabla.verticalHeader().setVisible(False)
+        tabla.setAlternatingRowColors(True)
+        tabla.setShowGrid(False)
+        tabla.horizontalHeader().setStretchLastSection(True)
 
     # ------------------------------------------------------------------
     # Datos
     # ------------------------------------------------------------------
 
     def _recargar_sesiones(self):
-        for row in self.tree_sesiones.get_children():
-            self.tree_sesiones.delete(row)
+        self.tree_sesiones.setRowCount(0)
         for s in listar_sesiones():
-            self.tree_sesiones.insert(
-                "", "end",
-                values=(
-                    s["id"], s["nombre"], s["fecha_inicio"], s["total_cortes"],
-                    s["estado"], s["minutos"], s["num_paros"],
-                ),
+            fila = self.tree_sesiones.rowCount()
+            self.tree_sesiones.insertRow(fila)
+            valores = (
+                s["id"], s["nombre"], s["fecha_inicio"], s["total_cortes"],
+                s["estado"], s["minutos"], s["num_paros"],
             )
+            for col, valor in enumerate(valores):
+                self.tree_sesiones.setItem(fila, col, QTableWidgetItem(str(valor)))
         self._limpiar_paros()
 
-    def _on_select_sesion(self, _event=None):
-        sel = self.tree_sesiones.selection()
-        if not sel:
+    def _on_select_sesion(self):
+        fila = self.tree_sesiones.currentRow()
+        if fila < 0:
             return
-        sesion_id = int(self.tree_sesiones.item(sel[0])["values"][0])
+        sesion_id = int(self.tree_sesiones.item(fila, 0).text())
         self._recargar_paros(sesion_id)
 
     def _recargar_paros(self, sesion_id):
-        for row in self.tree_paros.get_children():
-            self.tree_paros.delete(row)
+        self.tree_paros.setRowCount(0)
         for p in obtener_paros_de_sesion(sesion_id):
+            fila = self.tree_paros.rowCount()
+            self.tree_paros.insertRow(fila)
             causa = p["descripcion"] if p["descripcion"] else "(sin causa registrada)"
-            self.tree_paros.insert(
-                "", "end",
-                values=(causa, p["inicio_paro"], p["fin_paro"] or "En curso"),
-            )
+            self.tree_paros.setItem(fila, 0, QTableWidgetItem(causa))
+            self.tree_paros.setItem(fila, 1, QTableWidgetItem(p["inicio_paro"]))
+            self.tree_paros.setItem(fila, 2, QTableWidgetItem(p["fin_paro"] or "En curso"))
 
     def _limpiar_paros(self):
-        for row in self.tree_paros.get_children():
-            self.tree_paros.delete(row)
+        self.tree_paros.setRowCount(0)

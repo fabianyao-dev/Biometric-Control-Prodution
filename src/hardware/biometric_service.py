@@ -32,6 +32,13 @@ class BiometricService:
         self.sdk = obtener_sdk()
         self._lock_lector = threading.Lock()
 
+    @property
+    def disponible(self):
+        """True si los DLLs de DigitalPersona se cargaron y la biometria puede
+        usarse. En una maquina sin el driver (o en dev sin lector) es False y
+        la app sigue corriendo, pero las capturas devuelven None/mensaje."""
+        return self.sdk.disponible
+
     def abrir(self):
         """Prepara el lector. Devuelve True si está listo."""
         return self.sdk.abrir_lector()
@@ -114,13 +121,20 @@ class BiometricService:
         al lector con un beep para que el operador sepa que debe apoyar
         el dedo.
         """
-        from src.database import listar_fmds
+        from src.database import listar_fmds, obtener_operador_temporal
 
         filas = listar_fmds(activos_solo=True)
         if not filas:
+            # Sin usuarios reales: acceso automatico (modo desarrollo).
             if on_progress:
-                on_progress("No hay operadores registrados.")
-            return None
+                on_progress("Sin operadores registrados; acceso automatico.")
+            return obtener_operador_temporal()
+        if not self.disponible:
+            # Driver DigitalPersona ausente (maquina sin el SDK instalado).
+            raise RuntimeError(
+                "Driver de DigitalPersona no instalado. La biometria no esta "
+                "disponible en este equipo."
+            )
         plantillas = [fila[2] for fila in filas]
         with self._lock_lector:
             if on_progress:

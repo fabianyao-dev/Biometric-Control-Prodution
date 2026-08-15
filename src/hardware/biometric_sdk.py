@@ -125,8 +125,19 @@ class BiometricSDK:
         self._cargar_dpfpdd()
         self._cargar_dpfj()
 
+    @property
+    def disponible(self):
+        """True si los DLLs de DigitalPersona se cargaron correctamente."""
+        return self.dpfpdd is not None and self.dpfj is not None
+
     def _cargar_dpfpdd(self):
-        self.dpfpdd = ctypes.WinDLL("dpfpdd.dll")
+        try:
+            self.dpfpdd = ctypes.WinDLL("dpfpdd.dll")
+        except OSError as e:
+            print(f"Advertencia: no se pudo cargar dpfpdd.dll: {e}")
+            print("Driver de DigitalPersona no instalado; biometria deshabilitada.")
+            self.dpfpdd = None
+            return
 
         self.dpfpdd.dpfpdd_init.restype = ctypes.c_int
         self.dpfpdd.dpfpdd_init.argtypes = []
@@ -168,7 +179,13 @@ class BiometricSDK:
         self.dpfpdd.dpfpdd_init()
 
     def _cargar_dpfj(self):
-        self.dpfj = ctypes.WinDLL("dpfj.dll")
+        try:
+            self.dpfj = ctypes.WinDLL("dpfj.dll")
+        except OSError as e:
+            print(f"Advertencia: no se pudo cargar dpfj.dll: {e}")
+            print("Driver de DigitalPersona no instalado; biometria deshabilitada.")
+            self.dpfj = None
+            return
 
         self.dpfj.dpfj_create_fmd_from_raw.restype = ctypes.c_int
         self.dpfj.dpfj_create_fmd_from_raw.argtypes = [
@@ -215,7 +232,7 @@ class BiometricSDK:
     def abrir_lector(self):
         """Abre el primer lector DigitalPersona detectado. Devuelve True/False."""
         if not self.dpfpdd:
-            print("❌ dpfpdd.dll no cargada.")
+            print("dpfpdd.dll no cargada.")
             return False
 
         dev_cnt = ctypes.c_uint(1)
@@ -223,18 +240,31 @@ class BiometricSDK:
         dev_info.size = ctypes.sizeof(DPFPDD_DEV_INFO)
 
         res = self.dpfpdd.dpfpdd_query_devices(ctypes.byref(dev_cnt), ctypes.byref(dev_info))
-        if res != 0 or dev_cnt.value == 0:
-            print(f"❌ No se encontraron lectores (res={hex(res)}, count={dev_cnt.value}).")
+        if res == DPFPDD_E_MORE_DATA and dev_cnt.value > 1:
+            # Hay mas lectores de los que caben en el buffer (p. ej. lector
+            # externo + sensor integrado); re-consultar con el tamaño real.
+            n = int(dev_cnt.value)
+            lista = (DPFPDD_DEV_INFO * n)()
+            for i in range(n):
+                lista[i].size = ctypes.sizeof(DPFPDD_DEV_INFO)
+            cnt2 = ctypes.c_uint(n)
+            res = self.dpfpdd.dpfpdd_query_devices(ctypes.byref(cnt2), lista)
+            if res != 0 or cnt2.value == 0:
+                print(f"No se encontraron lectores (res={hex(res)}, count={cnt2.value}).")
+                return False
+            dev_info = lista[0]
+        elif res != 0 or dev_cnt.value == 0:
+            print(f"No se encontraron lectores (res={hex(res)}, count={dev_cnt.value}).")
             return False
 
         self.h_reader = ctypes.c_void_p()
         res = self.dpfpdd.dpfpdd_open(dev_info.name, ctypes.byref(self.h_reader))
         if res != 0:
             self.h_reader = None
-            print(f"❌ Error al abrir lector (código {hex(res)}).")
+            print(f"Error al abrir lector (código {hex(res)}).")
             return False
         nombre = dev_info.descr.product_name.decode("utf-8", errors="ignore")
-        print(f"✅ Lector abierto: {nombre}")
+        print(f"Lector abierto: {nombre}")
         return True
 
     def _obtener_resolucion(self):
@@ -269,10 +299,10 @@ class BiometricSDK:
         params.image_proc = DPFPDD_IMG_PROC_DEFAULT
         params.image_res = self._obtener_resolucion()
         if params.image_res == 0:
-            print("❌ No se pudo obtener la resolución del lector.")
+            print("No se pudo obtener la resolución del lector.")
             return None
 
-        print("🖐️ Coloca tu huella sobre el sensor...")
+        print("Coloca tu huella sobre el sensor...")
 
         image_buffer = (ctypes.c_ubyte * buffer_size)()
         c_image_size = ctypes.c_uint(buffer_size)
@@ -291,7 +321,7 @@ class BiometricSDK:
         )
 
         if res == 0 and capture_result.success == 1 and capture_result.quality == 0:
-            print(f"✅ Imagen capturada ({capture_result.info.width}x{capture_result.info.height} "
+            print(f"Imagen capturada ({capture_result.info.width}x{capture_result.info.height} "
                   f"@ {capture_result.info.res}dpi, {c_image_size.value} bytes).")
             return {
                 "image": bytes(image_buffer[:c_image_size.value]),
@@ -300,12 +330,14 @@ class BiometricSDK:
                 "dpi": capture_result.info.res,
                 "quality": capture_result.info.bpp,
             }
-        print(f"⚠️ Captura sin éxito: res={hex(res)}, success={capture_result.success}, "
+        print(f"Captura sin éxito: res={hex(res)}, success={capture_result.success}, "
               f"quality={capture_result.quality}, score={capture_result.score}")
         return None
 
     def extraer_fmd(self, image_data, width, height, dpi, fmd_type=DPFJ_FMD_ANSI_378_2004):
         """Extrae minucias (FMD) de una imagen raw. Devuelve bytes del FMD."""
+        if not self.dpfj:
+            return None
         image_arr = (ctypes.c_ubyte * len(image_data)).from_buffer_copy(image_data)
         fmd = (ctypes.c_ubyte * MAX_FMD_SIZE)()
         fmd_size = ctypes.c_uint(MAX_FMD_SIZE)
@@ -323,13 +355,15 @@ class BiometricSDK:
             ctypes.byref(fmd_size),
         )
         if res != DPFJ_SUCCESS:
-            print(f"❌ dpfj_create_fmd_from_raw falló: {hex(res)}")
+            print(f"dpfj_create_fmd_from_raw falló: {hex(res)}")
             return None
-        print(f"🔑 FMD extraído: {fmd_size.value} bytes")
+        print(f"FMD extraído: {fmd_size.value} bytes")
         return bytes(fmd[:fmd_size.value])
 
     def comparar(self, fmd1, fmd2, fmd_type=DPFJ_FMD_ANSI_378_2004):
         """Compara dos FMD. Devuelve score de disimilitud (0 = match)."""
+        if not self.dpfj:
+            return None
         buf1 = (ctypes.c_ubyte * len(fmd1)).from_buffer_copy(fmd1)
         buf2 = (ctypes.c_ubyte * len(fmd2)).from_buffer_copy(fmd2)
         score = ctypes.c_uint(0)
@@ -352,6 +386,8 @@ class BiometricSDK:
     def identificar(self, fmd, lista_fmds, fmd_type=DPFJ_FMD_ANSI_378_2004):
         """Busca 'fmd' en 'lista_fmds' (1:N). Devuelve (indice, score) del mejor
         candidato o None si la lista está vacía o falla."""
+        if not self.dpfj:
+            return None
         if not lista_fmds:
             return None
 
@@ -391,7 +427,7 @@ class BiometricSDK:
         score = self.comparar(fmd, lista_fmds[idx], fmd_type)
         if score is None:
             return None
-        print(f"🎯 Identificación: {candidate_cnt.value} candidato(s), mejor = #{idx} (score {score})")
+        print(f"Identificación: {candidate_cnt.value} candidato(s), mejor = #{idx} (score {score})")
         return (idx, score)
 
     def cerrar(self):

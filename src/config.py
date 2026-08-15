@@ -1,9 +1,19 @@
 import os
+import sys
 
 from dotenv import load_dotenv
 
 RUTA_BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(RUTA_BASE, ".env"))
+
+# Si corre como .exe empaquetado (PyInstaller), el .env vive junto al .exe;
+# en desarrollo, en la raiz del proyecto.
+if getattr(sys, "frozen", False):
+    dir_exe = os.path.dirname(sys.executable)
+    ruta_env = os.path.join(dir_exe, ".env")
+else:
+    ruta_env = os.path.join(RUTA_BASE, ".env")
+
+load_dotenv(ruta_env)
 
 # Ruta de la BD configurable (.env) para que sobreviva al empaquetado con
 # PyInstaller, donde `__file__` cae dentro del directorio temporal.
@@ -68,10 +78,17 @@ MODBUS_CONFIG = {
     "pause_coil": _env_int("MODBUS_PAUSE_COIL", 1),
     "counter_register": _env_int("MODBUS_COUNTER_REGISTER", 0),
     "counter_words": _env_int("MODBUS_COUNTER_WORDS", 2),
+    "counter_little_endian": _env_bool("MODBUS_COUNTER_LITTLE_ENDIAN", True),
     "poll_ms": _env_int("MODBUS_POLL_MS", 500),
     "pulso_duracion_ms": _env_int("PULSO_DURACION_MS", 300),
     "max_delta": _env_int("MODBUS_COUNTER_MAX_DELTA", 10000),
     "modo_simulacion": _env_bool("MODBUS_SIMULACION", not bool(os.environ.get("MODBUS_HOST", "").strip())),
+    # Polaridad del pulso por coil. Por defecto el pulso activo es True
+    # (rele energizado/contacto cerrado durante PULSO_DURACION_MS). Si el
+    # cableado de la maquina es al reves (la maquina actua cuando el circuito
+    # se ABRE), poner 1 invierte el pulso: activo = False, reposo = True.
+    "start_coil_invertido": _env_bool("MODBUS_START_COIL_INVERTIDO", False),
+    "pause_coil_invertido": _env_bool("MODBUS_PAUSE_COIL_INVERTIDO", False),
 }
 
 
@@ -83,15 +100,11 @@ CORTES_GUARDAR_INTERVALO_MS = 30000
 # dispara automaticamente el modal de seleccion de paro. 0 = desactivado.
 PARO_IDLE_TIMEOUT_S = 60
 
+# Seguro anti-paro / anti-apagado: bloquea el boton PARO y el apagado (cierre
+# de sesion) mientras la maquina este en marcha y se haya recibido un corte
+# dentro de estos ultimos segundos (la maquina sigue cortando).
+SEGURO_PARO_SEGUNDOS = _env_int("SEGURO_PARO_SEGUNDOS", 3)
+
 # Selector de causa de paro: cuadricula con las causas mas usadas.
 CAUSAS_FRECUENTES_LIMITE = 6
 CAUSAS_GRID_COLUMNAS = 3
-
-# Roles con autoridad para autorizar la reanudacion de un paro (ademas del
-# operador dueno de la sesion, que siempre puede).
-ROLES_AUTORIZAN_PARO = ("admin", "supervisor")
-
-# Roles con acceso a cada vista protegida de la navegacion (se valida con
-# huella al pulsar el boton del panel lateral).
-ROLES_ACCESO_SESIONES = ("admin", "supervisor")
-ROLES_ACCESO_ADMIN = ("admin",)

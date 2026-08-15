@@ -15,7 +15,12 @@ Diseno (decisiones de planta):
     - Los relevadores se siguen manejando como PULSO MOMENTANEO (circuito
       tipo boton, ver simulacion_controller.py): escribir el coil en True
       durante PULSO_DURACION_MS y volver a False. Nunca dejar un rele
-      energizado.
+      energizado. La polaridad de cada coil es configurable desde .env
+      (MODBUS_START_COIL_INVERTIDO / MODBUS_PAUSE_COIL_INVERTIDO): por
+      defecto el pulso activo es True (contacto cerrado = boton presionado,
+      para botones NA en paralelo); con invertido=1 el pulso activo es False
+      (contacto abierto) para cableados donde la maquina actua al abrir
+      (boton NA en serie o logica NC).
     - La conexion es defensiva: si la red se cae (cable por vibracion), la UI
       no crashea; el controlador marca `desconectado`, reintenta en segundo
       plano y expone `conectado()` para que la GUI muestre una alerta.
@@ -31,7 +36,8 @@ Contrato (identico a SimulacionController):
     - cortes_totales()    -> int (acumulado local)
     - reset_conteo()      -> pone el contador local en 0
     - establecer_conteo(n)-> base desde el ultimo checkpoint de la BD
-    - segundos_sin_corte()-> float (alimenta PARO_IDLE_TIMEOUT_S)
+    - segundos_sin_corte()-> float (alimenta SEGURO_PARO_SEGUNDOS)
+    - segundos_desde_arranque()-> float (alimenta PARO_IDLE_TIMEOUT_S)
     - simular_corte()     -> suma un corte (modo simulacion / pruebas)
     - maquina_detenida()  -> bool
     - conectado()         -> bool (estado del enlace Modbus, para la UI)
@@ -66,10 +72,13 @@ class ModbusController:
         self._pause_coil = int(cfg.get("pause_coil", 1))
         self._counter_register = int(cfg.get("counter_register", 0))
         self._counter_words = int(cfg.get("counter_words", 2))
+        self._counter_little_endian = bool(cfg.get("counter_little_endian", True))
         self._poll_ms = int(cfg.get("poll_ms", 500))
         self._pulso_ms = int(cfg.get("pulso_duracion_ms", 300))
         self._max_delta = int(cfg.get("max_delta", 10000))
         self._simulacion = bool(cfg.get("modo_simulacion"))
+        self._start_invertido = bool(cfg.get("start_coil_invertido", False))
+        self._pause_invertido = bool(cfg.get("pause_coil_invertido", False))
 
         self._bits = 16 * self._counter_words
         self._max_valor = (1 << self._bits) - 1
@@ -82,7 +91,13 @@ class ModbusController:
         self._conectado = False
         self._cortes = 0
         self._ultimo_contador = 0
+        # `_ultimo_corte` SOLO se actualiza con cortes reales (deltas del
+        # contador). `_ultimo_arranque` es la ultima vez que la maquina
+        # arranco/reanudo (gracia del auto-paro). Mezclarlos hacia que el
+        # seguro anti-corte creyera que habia un corte justo despues de
+        # arrancar o reanudar.
         self._ultimo_corte = time.time()
+        self._ultimo_arranque = time.time()
         self._maquina_en_marcha = False
         self._cleaned = False
 
@@ -132,9 +147,18 @@ class ModbusController:
                 return False
 
     def _combinar_regs(self, regs):
-        """Junta los registros de 16 bits en un valor (big-endian)."""
+        """Junta los registros de 16 bits en un valor.
+
+        El WISE-4060LAN guarda el valor de 32 bits con la palabra MENOS
+        significativa en el primer registro (little-endian: 40001=low,
+        40002=high). Configurable con MODBUS_COUNTER_LITTLE_ENDIAN por si un
+        modelo distinto usa big-endian (alta primero).
+        """
+        registros = regs[: self._counter_words]
+        if self._counter_little_endian:
+            registros = list(reversed(registros))
         valor = 0
-        for r in regs[: self._counter_words]:
+        for r in registros:
             valor = (valor << 16) | (r & 0xFFFF)
         return valor
 
@@ -223,6 +247,18 @@ class ModbusController:
         with self._lock:
             return time.time() - self._ultimo_corte
 
+    def segundos_desde_arranque(self) -> float:
+        """Tiempo desde que la maquina arranco o reanudo (o inf si detenida).
+
+        Alimenta el auto-paro por inactividad: la maquina arranca/reanuda con
+        una gracia de `PARO_IDLE_TIMEOUT_S`, independiente de cuando fue el
+        ultimo corte real.
+        """
+        with self._lock:
+            if not self._maquina_en_marcha:
+                return float("inf")
+            return time.time() - self._ultimo_arranque
+
     def cortes_totales(self) -> int:
         with self._lock:
             return self._cortes
@@ -230,13 +266,11 @@ class ModbusController:
     def reset_conteo(self):
         with self._lock:
             self._cortes = 0
-            self._ultimo_corte = time.time()
 
     def establecer_conteo(self, total: int):
         """Restaura el contador desde el ultimo checkpoint de la BD."""
         with self._lock:
             self._cortes = int(total)
-            self._ultimo_corte = time.time()
 
     # ------------------------------------------------------------------
     # Relees (pulso momentaneo tipo boton)
@@ -247,13 +281,13 @@ class ModbusController:
             return
         log.info("-> MARCHA: pulso coil START (%s).", self._start_coil)
         self._maquina_en_marcha = True
-        self._ultimo_corte = time.time()
-        self._pulso_coil(self._start_coil)
+        self._ultimo_arranque = time.time()
+        self._pulso_coil(self._start_coil, invertido=self._start_invertido)
 
     def maquina_pausada(self):
         log.info("-> PARO: pulso coil PAUSE (%s).", self._pause_coil)
         self._maquina_en_marcha = False
-        self._pulso_coil(self._pause_coil)
+        self._pulso_coil(self._pause_coil, invertido=self._pause_invertido)
 
     def reprisar_maquina(self):
         """Reanuda la produccion tras un paro autorizado."""
@@ -262,16 +296,23 @@ class ModbusController:
     def maquina_detenida(self) -> bool:
         return not self._maquina_en_marcha
 
-    def _pulso_coil(self, coil):
+    def _pulso_coil(self, coil, invertido=False):
         """Pulso momentaneo del coil en un hilo de fondo.
 
-        True durante PULSO_DURACION_MS (rele energizado, simula el boton) y
-        luego False (rele desenergizado). El lock del socket serializa los
-        pulsos y el polling para no solapar dos relevadores. En modo
-        simulacion no hay socket: los pulsos son un no-op silencioso.
+        Por defecto (invertido=False): True durante PULSO_DURACION_MS (rele
+        energizado, contacto cerrado, simula presionar el boton) y luego False
+        (rele desenergizado). Con invertido=True se invierte la polaridad:
+        el pulso activo es False y el reposo es True (para cableados donde la
+        maquina actua cuando el circuito se ABRE; p. ej. boton NA en serie o
+        logica NC). El lock del socket serializa los pulsos y el polling para
+        no solapar dos relevadores. En modo simulacion no hay socket: los
+        pulsos son un no-op silencioso.
         """
         if self._simulacion:
             return
+
+        nivel_activo = not invertido
+        nivel_reposo = invertido
 
         def _pulso():
             with self._lock_modbus:
@@ -281,15 +322,16 @@ class ModbusController:
                                 "el coil %s.", coil)
                     return
                 try:
-                    cliente.write_single_coil(coil, True)
-                    log.info("Coil %s ENCENDIDO (%s ms).", coil, self._pulso_ms)
+                    cliente.write_single_coil(coil, nivel_activo)
+                    log.info("Coil %s PULSO (%s ms, activo=%s).", coil,
+                             self._pulso_ms, nivel_activo)
                     time.sleep(self._pulso_ms / 1000.0)
-                    cliente.write_single_coil(coil, False)
-                    log.info("Coil %s APAGADO.", coil)
+                    cliente.write_single_coil(coil, nivel_reposo)
+                    log.info("Coil %s a reposo (%s).", coil, nivel_reposo)
                 except Exception as e:  # noqa: BLE001
                     log.warning("Fallo el pulso del coil %s: %s", coil, e)
                     try:
-                        cliente.write_single_coil(coil, False)
+                        cliente.write_single_coil(coil, nivel_reposo)
                     except Exception:  # noqa: BLE001
                         pass
                     self._desconectar()

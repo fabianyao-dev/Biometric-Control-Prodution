@@ -25,7 +25,7 @@
 
 ### 1.2 Plantillas biometricas en claro — MEDIA
 
-- **Donde:** `src/database.py` (tabla `operadores`, columna `fmd`).
+- **Donde:** `src/database.py` (tabla `huellas_operador`, columna `huella_template`).
 - **Problema:** las plantillas FMD de huellas se almacenan sin cifrado en un SQLite plano
   (`planta_corte.db`). Si se roba o copia el archivo, se obtienen las plantillas biometricas
   de todos los operadores.
@@ -151,16 +151,19 @@
 
 - [ ] Resuelto (fecha: ______)
 
-### 2.4 Vistas muertas: `register_view.py` e `identify_view.py`
+### 2.4 Vistas muertas: `register_view.py` e `identify_view.py` ~~Eliminadas~~
 
-- **Donde:** `src/gui/register_view.py`, `src/gui/identify_view.py`.
-- **Problema:** no se importan desde `main.py` (navegacion real: inicio, sesiones,
+- **Donde:** ~~`src/gui/register_view.py`, `src/gui/identify_view.py` (junto con
+  `main_original.py`, el backup que las usaba).~~
+- **Problema:** ~~no se importan desde `main.py` (navegacion real: inicio, sesiones,
   admin, huella_modal). Cada una crea su propio `BiometricService`, lo que sugiere un
-  uso incorrecto del singleton del SDK.
-- **Accion:** eliminar, o conservar solo como referencia documentada y quitar la
-  creacion de servicios propios.
+  uso incorrecto del singleton del SDK.~~
+- **Accion:** ~~eliminar, o conservar solo como referencia documentada y quitar la
+  creacion de servicios propios.~~
 
-- [ ] Resuelto (fecha: ______)
+- [x] Resuelto (fecha: 2026-08-13): eliminados `register_view.py`, `identify_view.py`
+  y `main_original.py`. Quedo pendiente purgar las dependencias que solo usaba el
+  backup (ver 3).
 
 ### 2.5 Sin validacion del directorio de `DB_PATH` al arrancar
 
@@ -178,10 +181,9 @@
 - [ ] **Documentar el pin de version de los DLLs de DigitalPersona** (los que se cargan
       son "cualquiera que este en el sistema"; documentar versiones probadas en
       `requirements.txt`/README).
-- [ ] **Purgar dependencias no usadas por la app real**: `customtkinter`, `darkdetect`,
-      `pillow`, `packaging` solo los usa `main_original.py` (backup viejo); quitarlos
-      reduce el tamano del `.exe` (mantener pinneado en un requirements de test si hace
-      falta).
+- [x] **Purgar dependencias no usadas por la app real**: ~~`customtkinter`, `darkdetect`,
+      `pillow`, `packaging` solo los usa `main_original.py` (backup viejo)~~. Eliminadas
+      de `requirements.txt` junto con el backup (2026-08-13).
 - [ ] **Nota de red en README**: abrir el puerto 502 saliente en el firewall para el
       modulo Advantech, y recomendar VLAN dedicada (refuerza 1.3).
 - [ ] **Estrategia de respaldo de la BD**: el checkpoint del turno no respalda; definir

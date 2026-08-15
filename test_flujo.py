@@ -9,7 +9,7 @@ def registrar(archivo_fmd, nombre):
     with open(archivo_fmd, "rb") as f:
         fmd = f.read()
     ok, msg = guardar_operador(nombre, fmd)
-    print(f"{'✅' if ok else '❌'} {msg}")
+    print(f"{'OK' if ok else 'ERROR'}: {msg}")
     return 0 if ok else 1
 
 def identificar(archivo_fmd):
@@ -17,15 +17,15 @@ def identificar(archivo_fmd):
         fmd = f.read()
     filas = listar_fmds()
     if not filas:
-        print("⚠️ No hay operadores registrados.")
+        print("No hay operadores registrados.")
         return 1
     s = BiometricService()
     resultado = s.identificar(fmd, [fila[2] for fila in filas])
     if resultado:
         idx, score = resultado
-        print(f"✅ IDENTIFICADO: {filas[idx][1]} (score {score})")
+        print(f"IDENTIFICADO: {filas[idx][1]} (score {score})")
     else:
-        print("❌ Huella no reconocida.")
+        print("Huella no reconocida.")
     s.cerrar()
     return 0
 
