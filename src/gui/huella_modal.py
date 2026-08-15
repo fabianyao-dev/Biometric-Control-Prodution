@@ -220,6 +220,10 @@ class HuellaModal(QDialog):
 
     def _escanea(self):
         if not getattr(self.biometrico, "disponible", True):
+            log.error(
+                "Biometria NO disponible al intentar autenticar "
+                "(BiometricService.disponible=False). Ver biometric_sdk.py."
+            )
             self.cola.put(
                 ("ERROR", "Biometria no disponible en este equipo (driver de DigitalPersona no instalado).")
             )
