@@ -1,4 +1,6 @@
 import ctypes
+import os
+import sys
 
 MAX_DEVICE_NAME_LENGTH = 1024
 MAX_STR_LENGTH = 128
@@ -125,6 +127,27 @@ class BiometricSDK:
         self._cargar_dpfpdd()
         self._cargar_dpfj()
 
+    def _ruta_dll(self, nombre):
+        """Ruta completa a un DLL de DigitalPersona.
+
+        En desarrollo se carga por nombre (System32 / PATH, SDK instalado en
+        el sistema). Empaquetado con PyInstaller onedir, los DLLs viven en
+        `_internal` (`sys._MEIPASS`) y NO estan en el buscador por defecto,
+        asi que se carga la ruta absoluta y se registra su carpeta para que
+        las dependencias entre DLLs (dpfpdd -> dpfpdd5000, dpdevctlx64, ...)
+        tambien se resuelvan.
+        """
+        if getattr(sys, "frozen", False):
+            base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+            ruta = os.path.join(base, nombre)
+            if os.path.exists(ruta):
+                try:
+                    os.add_dll_directory(base)
+                except (OSError, AttributeError):
+                    pass
+                return ruta
+        return nombre
+
     @property
     def disponible(self):
         """True si los DLLs de DigitalPersona se cargaron correctamente."""
@@ -132,7 +155,7 @@ class BiometricSDK:
 
     def _cargar_dpfpdd(self):
         try:
-            self.dpfpdd = ctypes.WinDLL("dpfpdd.dll")
+            self.dpfpdd = ctypes.WinDLL(self._ruta_dll("dpfpdd.dll"))
         except OSError as e:
             print(f"Advertencia: no se pudo cargar dpfpdd.dll: {e}")
             print("Driver de DigitalPersona no instalado; biometria deshabilitada.")
@@ -180,7 +203,7 @@ class BiometricSDK:
 
     def _cargar_dpfj(self):
         try:
-            self.dpfj = ctypes.WinDLL("dpfj.dll")
+            self.dpfj = ctypes.WinDLL(self._ruta_dll("dpfj.dll"))
         except OSError as e:
             print(f"Advertencia: no se pudo cargar dpfj.dll: {e}")
             print("Driver de DigitalPersona no instalado; biometria deshabilitada.")
