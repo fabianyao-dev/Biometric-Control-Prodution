@@ -228,11 +228,11 @@ Copiar la **carpeta completa** a la PC de producción.
 Notas:
 
 - **Los DLLs de DigitalPersona se empaquetan**: `WTSControl.spec` toma los DLLs
-  de `vendor/dpf/` (copiados del System32 de una máquina con el SDK 3.2.0.89) y
-  los agrega con `binaries`, de modo que el `.exe` ya **no** depende de tener el
-  SDK instalado en el sistema (la app los carga por nombre, y el bootloader de
-  PyInstaller busca en `_internal`). Si se reinstala el paquete, los DLLs
-  sobreviven porque viven en el repo (`vendor/`), no en `dist/`.
+  de `sdk/vendor/dpf/` (copiados del System32 de una máquina con el SDK 3.2.0.89)
+  y los agrega con `binaries`, de modo que el `.exe` ya **no** depende de tener
+  el SDK instalado en el sistema (la app los carga por nombre, y el bootloader
+  de PyInstaller busca en `_internal`). Si se reinstala el paquete, los DLLs
+  sobreviven porque viven en el repo (`sdk/vendor/`), no en `dist/`.
 - **Driver USB del lector aparte**: empaquetar los DLLs no instala el driver
   del lector (el que hace que encienda al conectarlo). En la PC de producción
   se instala una vez con el MSI autocontenido `assets/SDK/x64/setup-x64.msi`
@@ -267,7 +267,7 @@ Notas:
 ```
 main.py                       Orquesta app Qt, servicios compartidos y HAL
 WTSControl.spec               Build PyInstaller onedir (empaqueta assets y DLLs)
-vendor/dpf/                   DLLs de DigitalPersona empaquetados (SDK 3.2.0.89)
+sdk/vendor/dpf/               DLLs de DigitalPersona empaquetados (SDK 3.2.0.89)
 assets/                       Logo, ícono y MSI del driver USB del lector
 src/
 ├── config.py                 Config central (.env, simulación, Modbus)
