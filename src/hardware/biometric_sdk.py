@@ -1,9 +1,21 @@
 import ctypes
 import logging
 import os
+import struct
 import sys
 
 log = logging.getLogger(__name__)
+
+# Device drivers del DDK: dpfpdd.dll los carga POR NOMBRE al enumerar. Si en
+# el sistema hay versiones distintas (driver MSI instalado, SDK, Windows
+# Update) o no las encuentra, query_devices devuelve 0 aunque el lector este
+# visible en Administrador de dispositivos. Se precargan desde _internal.
+DDK_DEVICE_DRIVERS = (
+    "dpfpdd5000.dll",
+    "dpfpdd_4k.dll",
+    "dpfpdd7k.dll",
+    "dpfpdd_ptapi.dll",
+)
 
 MAX_DEVICE_NAME_LENGTH = 1024
 MAX_STR_LENGTH = 128
@@ -120,6 +132,36 @@ class DPFJ_CANDIDATE(ctypes.Structure):
     ]
 
 
+def _version_dll(ruta):
+    """Devuelve la version del archivo (major.minor.build.rev) o None."""
+    try:
+        size = ctypes.windll.version.GetFileVersionInfoSizeW(ruta, None)
+        if size <= 0:
+            return None
+        buf = ctypes.create_string_buffer(size)
+        if not ctypes.windll.version.GetFileVersionInfoW(ruta, 0, size, buf):
+            return None
+        ptr = ctypes.c_void_p()
+        n = ctypes.c_uint()
+        if not ctypes.windll.version.VerQueryValueW(
+            buf, "\\", ctypes.byref(ptr), ctypes.byref(n)
+        ):
+            return None
+        # VS_FIXEDFILEINFO: dwFileVersionMS en offset 8, dwFileVersionLS en 12.
+        datos = ctypes.string_at(ptr, n.value)
+        ms = struct.unpack_from("<I", datos, 8)[0]
+        ls = struct.unpack_from("<I", datos, 12)[0]
+        return "%d.%d.%d.%d" % (
+            (ms >> 16) & 0xFFFF,
+            ms & 0xFFFF,
+            (ls >> 16) & 0xFFFF,
+            ls & 0xFFFF,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("No se pudo leer version de %s: %s", ruta, e)
+        return None
+
+
 class BiometricSDK:
     """Wrapper de bajo nivel (ctypes) de dpfpdd.dll y dpfj.dll."""
 
@@ -168,7 +210,8 @@ class BiometricSDK:
         ruta = self._ruta_dll("dpfpdd.dll")
         try:
             self.dpfpdd = ctypes.WinDLL(ruta)
-            log.info("dpfpdd.dll cargada desde %s", ruta)
+            log.info("dpfpdd.dll cargada desde %s (version=%s)",
+                     ruta, _version_dll(ruta))
         except OSError as e:
             log.error("No se pudo cargar dpfpdd.dll (%s): %s", ruta, e, exc_info=True)
             self.dpfpdd = None
@@ -211,7 +254,35 @@ class BiometricSDK:
             ctypes.POINTER(DPFPDD_DEV_CAPS),
         ]
 
-        self.dpfpdd.dpfpdd_init()
+        res_init = self.dpfpdd.dpfpdd_init()
+        log.info("dpfpdd_init -> res=%s", hex(res_init) if res_init else "0x0")
+
+        # Precargar los device drivers del DDK desde _internal para que
+        # dpfpdd.dll NO tome versiones del sistema (System32/registro) que
+        # pueden no coincidir con las empaquetadas (SDK 3.2.0.89).
+        self._precargar_drivers_ddk()
+
+    def _precargar_drivers_ddk(self):
+        """Carga por ruta absoluta los device drivers del DDK (dpfpdd*.dll).
+
+        dpfpdd.dll los carga por nombre al enumerar lectores; si ya estan
+        cargados en el proceso usa estos, evitando conflictos de version.
+        """
+        base = None
+        if getattr(sys, "frozen", False):
+            base = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
+        for nombre in DDK_DEVICE_DRIVERS:
+            ruta = os.path.join(base, nombre) if base else nombre
+            if base and not os.path.exists(ruta):
+                log.warning("Device driver %s NO existe en %s", nombre, base)
+                continue
+            try:
+                ctypes.WinDLL(ruta)
+                log.info("Device driver %s cargado desde %s (version=%s)",
+                         nombre, ruta, _version_dll(ruta))
+            except OSError as e:
+                log.error("No se pudo cargar device driver %s (%s): %s",
+                          nombre, ruta, e, exc_info=True)
 
     def _cargar_dpfj(self):
         ruta = self._ruta_dll("dpfj.dll")
