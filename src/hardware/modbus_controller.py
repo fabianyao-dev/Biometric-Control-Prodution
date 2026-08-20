@@ -21,6 +21,11 @@ Diseno (decisiones de planta):
       maquina queda detenida mientras el rele este activo). Nunca se
       auto-libera: si la app se cierra con la maquina en paro, el rele queda
       energizado y la maquina sigue detenida (estado seguro).
+    - Al INICIAR el programa, el controlador deja PAUSE en su nivel activo
+      (maquina detenida, "como si estuviera en paro") la primera vez que se
+      establece el enlace Modbus; la maquina no arranca hasta que el operador
+      la inicia. No se repite en reconexiones posteriores para no parar una
+      maquina que ya este en marcha.
     - La polaridad de cada coil es configurable desde .env
       (MODBUS_START_COIL_INVERTIDO / MODBUS_PAUSE_COIL_INVERTIDO): por
       defecto el nivel activo es True (contacto cerrado = boton presionado,
@@ -105,6 +110,7 @@ class ModbusController:
         self._ultimo_corte = time.time()
         self._ultimo_arranque = time.time()
         self._maquina_en_marcha = False
+        self._pausa_inicial_aplicada = False
         self._cleaned = False
 
         if self._simulacion or not self._host:
@@ -143,6 +149,7 @@ class ModbusController:
                 self._modbus = cliente
                 self._conectado = True
                 self._ultimo_contador = lectura
+                self._aplicar_paro_inicial(cliente)
                 log.info("Modbus conectado a %s:%s (contador=%s).",
                          self._host, self._port, lectura)
                 return True
@@ -167,6 +174,26 @@ class ModbusController:
         for r in registros:
             valor = (valor << 16) | (r & 0xFFFF)
         return valor
+
+    def _aplicar_paro_inicial(self, cliente):
+        """Latch PAUSE en su nivel activo la primera vez que se establece el
+        enlace, dejando la maquina detenida (como si estuviera en paro) hasta
+        que el operador la inicie.
+
+        Solo se aplica una vez por ejecucion: en reconexiones posteriores la
+        maquina podria estar en marcha y no debe pararse por una caida de red.
+        """
+        if self._pausa_inicial_aplicada:
+            return
+        try:
+            cliente.write_single_coil(
+                self._pause_coil, self._nivel_activo(self._pause_invertido)
+            )
+            self._pausa_inicial_aplicada = True
+            log.info("Inicio en PARO: coil PAUSE (%s) latch activo.",
+                     self._pause_coil)
+        except Exception as e:  # noqa: BLE001
+            log.warning("No se pudo latchear PAUSE al iniciar: %s", e)
 
     def _bucle_polling(self):
         """Ciclo de polling: leer contador, sumar delta, reconectar si cae."""
