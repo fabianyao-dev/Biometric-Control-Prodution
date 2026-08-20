@@ -18,24 +18,27 @@ Comportamiento emulado:
       externo del contador).
 
 Uso:
-    venv\\Scripts\\python simulador_modbus.py                    # 127.0.0.1:502, +2 cortes/seg
-    venv\\Scripts\\python simulador_modbus.py --velocidad 0      # arranca en pausa (solo manual)
-    venv\\Scripts\\python simulador_modbus.py --port 5020 --inicial 100
+    venv\\Scripts\\python test\\simulador_modbus.py              # 127.0.0.1:502, +2 cortes/seg
+    venv\\Scripts\\python test\\simulador_modbus.py --velocidad 0   # arranca en pausa (solo manual)
+    venv\\Scripts\\python test\\simulador_modbus.py --port 5020 --inicial 100
 
 En la terminal del simulador (ademas del log de relevadores/contador):
     Enter o +   +1 corte manual      c = correr contador     p = pausar contador
     v N = velocidad a N cortes/seg   h/? = ayuda             q/salir = detener
 
 Despues, en OTRA terminal (apuntar la app al simulador):
-    venv\\Scripts\\python test_modbus.py --ip 127.0.0.1
+    venv\\Scripts\\python test\\test_modbus.py --ip 127.0.0.1
     o bien con MODBUS_HOST=127.0.0.1 en el .env para la GUI / ModbusController.
 """
 
 import argparse
+import os
 import sys
 import threading
 import time
 from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pyModbusTCP.server import DataBank, ModbusServer
 

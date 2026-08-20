@@ -174,20 +174,21 @@ Convenciones:
 
 ---
 
-## Scripts de prueba (raíz, manuales)
+## Scripts de prueba (`test/`, manuales)
 
-Muchos requieren hardware (lector / módulo Modbus). Se ejecutan con `venv`:
+Muchos requieren hardware (lector / módulo Modbus). Se ejecutan con `venv`
+desde la raíz del proyecto:
 
 | Script | Uso |
 | --- | --- |
-| `test_lector.py` | Carga `dpfpdd.dll` directo (prueba del driver). |
-| `test_captura.py [salida.fmd]` | Captura huella a archivo (Windows + lector). |
-| `test_fmd.py` | Dos capturas y compara 1:1 y 1:N. |
-| `test_flujo.py registrar <fmd> <nombre> \| identificar <fmd>` | Flujo contra la BD. |
-| `test_modbus.py` | Diagnóstico del módulo Advantech (coils + registro contador). Usa el `.env`; sin `MODBUS_HOST` sale limpio. |
-| `simulador_modbus.py` | Emulador Modbus TCP del módulo (contador auto-incremental + coils) para probar todo lo anterior SIN hardware. |
+| `test\test_lector.py` | Carga `dpfpdd.dll` directo (prueba del driver). |
+| `test\test_captura.py [salida.fmd]` | Captura huella a archivo (Windows + lector). |
+| `test\test_fmd.py` | Dos capturas y compara 1:1 y 1:N. |
+| `test\test_flujo.py registrar <fmd> <nombre> \| identificar <fmd>` | Flujo contra la BD. |
+| `test\test_modbus.py` | Diagnóstico del módulo Advantech (coils + registro contador). Usa el `.env`; sin `MODBUS_HOST` sale limpio. |
+| `test\simulador_modbus.py` | Emulador Modbus TCP del módulo (contador auto-incremental + coils) para probar todo lo anterior SIN hardware. |
 
-`test_modbus.py` admite flags: `--ip`, `--port`, `--reg`, `--words`,
+`test\test_modbus.py` admite flags: `--ip`, `--port`, `--reg`, `--words`,
 `--coil 0 --pulso` (pulso de 300 ms tipo botón),
 `--coil 1 --pulso-invertido` (pulso activo `False`, para cableado NC),
 `--coil 1 --on/--off`.
@@ -195,8 +196,8 @@ Muchos requieren hardware (lector / módulo Modbus). Se ejecutan con `venv`:
 Sin hardware, corre en **dos terminales**:
 
 ```bash
-venv\Scripts\python simulador_modbus.py --velocidad 2   # terminal 1
-venv\Scripts\python test_modbus.py --ip 127.0.0.1 --coil 0 --pulso   # terminal 2
+venv\Scripts\python test\simulador_modbus.py --velocidad 2   # terminal 1
+venv\Scripts\python test\test_modbus.py --ip 127.0.0.1 --coil 0 --pulso   # terminal 2
 ```
 
 En la terminal 1 puedes **controlar el contador** y ver los cambios de relevadores
@@ -250,7 +251,7 @@ Notas:
   Para otra ubicación: variable de entorno del sistema `BIOMETRICO_DIR_DATOS`.
 - El `.env.example` se empaqueta (`--add-data ".env.example;."` en el `.spec`)
   como plantilla para instalaciones nuevas.
-- Verifica con `test_lector.py` y `test_fmd.py` antes del rollout.
+- Verifica con `test\test_lector.py` y `test\test_fmd.py` antes del rollout.
 
 ---
 
@@ -321,10 +322,10 @@ src/
 
 | Síntoma | Causa probable | Solución |
 | --- | --- | --- |
-| La biometría falla / "no hay lector" | Driver USB del lector no instalado o DLLs ausentes | Instala el driver `assets/SDK/x64/setup-x64.msi`; verifica con `test_lector.py` y `test_fmd.py`. |
+| La biometría falla / "no hay lector" | Driver USB del lector no instalado o DLLs ausentes | Instala el driver `assets/SDK/x64/setup-x64.msi`; verifica con `test\test_lector.py` y `test\test_fmd.py`. |
 | `main.py` no arranca con error de zona horaria | Falta el paquete `tzdata` | `venv\Scripts\pip install tzdata`. |
 | "database is locked" en logs | Varias conexiones escribiendo sin `busy_timeout`/WAL | Ver `Diagnostico.md` §2.1. |
-| La máquina no responde a START/PARO | Coils mal configurados en `.env` o cableado | `python test_modbus.py --ip <IP> --coil 0 --pulso`. |
+| La máquina no responde a START/PARO | Coils mal configurados en `.env` o cableado | `python test\test_modbus.py --ip <IP> --coil 0 --pulso`. |
 | No cuenta cortes en simulación | La GUI no llama a `simular_corte()` | El contador simulado solo sube con la acción del botón de prueba. |
 | El contador salta / cuenta basura | Delta mayor a `MODBUS_COUNTER_MAX_DELTA` (reset del módulo) | Ajusta `MODBUS_COUNTER_MAX_DELTA` y revisa el cable del sensor. |
 | Sesión "Activa" al arrancar | Apagón o cierre abrupto anterior | Es el mecanismo de recuperación: autorizar o cerrar formalmente. |

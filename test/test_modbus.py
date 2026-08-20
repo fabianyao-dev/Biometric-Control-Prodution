@@ -6,18 +6,21 @@ vive en .env (coils de START/PAUSE y registro contador). Lee los parametros
 del .env por defecto; los flags de abajo permiten probar a mano.
 
 Uso:
-    python test_modbus.py                 # lee contador usando el .env
-    python test_modbus.py --ip 192.168.0.10 --port 502
-    python test_modbus.py --coil 0 --pulso # pulso 300ms en el coil (tipo boton)
-    python test_modbus.py --coil 0 --pulso-invertido # pulso invertido (activo=False)
-    python test_modbus.py --coil 1 --on    # deja el coil en True (OJO: energiza)
-    python test_modbus.py --coil 1 --off   # pone el coil en False (seguro)
-    python test_modbus.py --reg 4 --words 2  # lee un registro cualquiera
+    python test\\test_modbus.py                 # lee contador usando el .env
+    python test\\test_modbus.py --ip 192.168.0.10 --port 502
+    python test\\test_modbus.py --coil 0 --pulso # pulso 300ms en el coil (tipo boton)
+    python test\\test_modbus.py --coil 0 --pulso-invertido # pulso invertido (activo=False)
+    python test\\test_modbus.py --coil 1 --on    # deja el coil en True (OJO: energiza)
+    python test\\test_modbus.py --coil 1 --off   # pone el coil en False (seguro)
+    python test\\test_modbus.py --reg 4 --words 2  # lee un registro cualquiera
 """
 
 import argparse
+import os
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pyModbusTCP.client import ModbusClient
 

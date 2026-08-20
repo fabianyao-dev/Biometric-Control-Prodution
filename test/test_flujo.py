@@ -1,4 +1,7 @@
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.database import guardar_operador, listar_fmds
 from src.hardware.biometric_service import BiometricService
@@ -35,7 +38,7 @@ def main():
         return registrar(sys.argv[2], sys.argv[3])
     if comando == "identificar":
         return identificar(sys.argv[2])
-    print("Uso: test_flujo.py registrar <fmd> <nombre> | identificar <fmd>")
+    print("Uso: test\\test_flujo.py registrar <fmd> <nombre> | identificar <fmd>")
     return 1
 
 if __name__ == "__main__":
