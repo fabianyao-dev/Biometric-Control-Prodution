@@ -91,8 +91,9 @@ Copia `.env.example` a `.env` y ajusta los valores. El `.env` local está en
 | `MODBUS_COUNTER_MAX_DELTA` | Delta máximo aceptable entre lecturas; saltos mayores se ignoran (reset del módulo). |
 | `PULSO_DURACION_MS` | Duración del pulso a los coils (tipo botón). |
 | `SEGURO_PARO_SEGUNDOS` | Seguro anti-paro/anti-apagado: bloquea PARO y apagado mientras la máquina esté en marcha y haya recibido un **corte real** en los últimos N segundos (default `3`). |
-| `DB_PATH` | Ruta de la base SQLite. **Obligatorio en producción**: en un `.exe` PyInstaller `__file__` cae en `_MEIPASS` y la BD se perdería. |
-| `LOG_DIR` | Directorio de logs diarios (rotación a 30 días). |
+| `DB_PATH` | Ruta de la base SQLite. En el `.exe` empaquetado **no hace falta definirlo**: `DB_PATH` y `LOG_DIR` se generan solos en la carpeta de datos persistente (ver Empaquetado). Definir solo si se quiere otra ubicación. |
+| `LOG_DIR` | Directorio de logs diarios (rotación a 30 días). En empaquetado apunta por defecto a `%USERPROFILE%\WTSControlData\logs`. |
+| `BIOMETRICO_DIR_DATOS` | (Solo empaquetado) Variable de entorno del sistema para cambiar la carpeta de datos persistente (default `%USERPROFILE%\WTSControlData`). No se lee del `.env`. |
 | `BIOMETRICO_KIOSKO` | `1` = kiosco pantalla completa (default); `0` = ventana normal. |
 
 ---
@@ -240,9 +241,15 @@ Notas:
 - El logo e íconos de la aplicación se encuentran en la carpeta `assets/` y se
   empaquetan automáticamente usando el `.spec` (`--add-data`/`--icon`; la
   aplicación los carga con `sys._MEIPASS`).
-- Copia un `.env` junto al `.exe` generado (o en `dist\WTSControl\`)
-  apuntando `DB_PATH` y `LOG_DIR` a un directorio persistente (p. ej.
-  `D:\datos`) y `MODBUS_HOST` a la IP del módulo.
+- **Datos persistentes fuera de la instalación**: en la primera ejecución el
+  `.exe` crea la carpeta `%USERPROFILE%\WTSControlData` y ahí coloca el `.env`,
+  `planta_corte.db` y `logs/`. Si ya existe un `.env`/`.db`/`logs` junto al
+  `.exe` (o en `_internal`), **se migran una sola vez** a esa carpeta (nunca
+  sobrescribe datos). Así, al actualizar solo se reemplaza la carpeta
+  `dist\WTSControl` y toda la información persiste sin reconfigurar nada.
+  Para otra ubicación: variable de entorno del sistema `BIOMETRICO_DIR_DATOS`.
+- El `.env.example` se empaqueta (`--add-data ".env.example;."` en el `.spec`)
+  como plantilla para instalaciones nuevas.
 - Verifica con `test_lector.py` y `test_fmd.py` antes del rollout.
 
 ---

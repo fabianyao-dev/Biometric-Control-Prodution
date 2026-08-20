@@ -19,6 +19,7 @@ Politicas:
       check_same_thread=False para los hilos de la GUI.
 """
 
+import os
 import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -40,12 +41,17 @@ PERMISOS_SISTEMA = [
     ("acceso_admin", "Acceder a Administracion (incluye la gestion de permisos).", 3),
 ]
 
-# Permisos por defecto de los roles clasicos, solo en el primer arranque
-# (cuando la tabla permisos_roles esta vacia).
+# Permisos por defecto de los roles clasicos. Se aplican en el primer arranque
+# (tabla permisos_roles vacia) y a cualquier rol de estos que no tenga ningun
+# permiso asignado (p. ej. un rol recien creado en una BD existente).
 PERMISOS_POR_DEFECTO = {
     "admin": ["autorizar_paro", "acceso_sesiones", "acceso_admin"],
     "supervisor": ["autorizar_paro", "acceso_sesiones"],
+    "mantenimiento": ["autorizar_paro"],
 }
+
+# Causas de paro que se crean por defecto (modo "Primera pieza").
+CAUSAS_PARO_POR_DEFECTO = ["Primera pieza"]
 
 # Permiso que protege el acceso a Administracion; nunca puede quedarse sin
 # ningun rol activo con el (evita quedarse fuera del sistema).
@@ -69,6 +75,9 @@ def obtener_conexion():
 
 def init_db():
     """Crea el esquema si no existe y migra versiones antiguas de la BD."""
+    # La carpeta de la BD puede no existir aun (p. ej. si DB_PATH apunta a un
+    # directorio nuevo): crearla antes de abrir la conexion.
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = obtener_conexion()
     cur = conn.cursor()
 
@@ -159,7 +168,8 @@ def init_db():
         cur.execute("ALTER TABLE operadores DROP COLUMN huella_template")
 
     # Roles por defecto: los operadores ya existentes quedan como admin.
-    for nombre in ("admin", "operador"):
+    # "mantenimiento" viene por defecto (puede autorizar paros).
+    for nombre in ("admin", "operador", "mantenimiento"):
         cur.execute("INSERT OR IGNORE INTO roles (nombre) VALUES (?)", (nombre,))
     admin = cur.execute(
         "SELECT id FROM roles WHERE nombre='admin' AND activo=1"
@@ -169,29 +179,50 @@ def init_db():
             "UPDATE operadores SET rol_id=? WHERE rol_id IS NULL", (admin["id"],)
         )
 
-    # Permisos: catalogo + defaults del primer arranque (solo si la tabla
-    # permisos_roles esta vacia, para no pisar cambios hechos por el admin).
+    # Permisos: catalogo + defaults por rol. Cada rol de PERMISOS_POR_DEFECTO
+    # recibe sus permisos si no tiene NINGUNO (primer arranque o rol recien
+    # creado en una BD existente); nunca pisa roles ya configurados.
     for nombre, descripcion, orden in PERMISOS_SISTEMA:
         cur.execute(
             "INSERT OR IGNORE INTO permisos (nombre, descripcion, orden) "
             "VALUES (?, ?, ?)",
             (nombre, descripcion, orden),
         )
-    sin_permisos = cur.execute(
-        "SELECT COUNT(*) AS n FROM permisos_roles"
-    ).fetchone()["n"] == 0
-    if sin_permisos:
-        for rol_nombre, permisos in PERMISOS_POR_DEFECTO.items():
-            rol = cur.execute(
-                "SELECT id FROM roles WHERE nombre=?", (rol_nombre,)
-            ).fetchone()
-            if rol is not None:
-                for permiso in permisos:
-                    cur.execute(
-                        "INSERT OR IGNORE INTO permisos_roles (rol_id, permiso) "
-                        "VALUES (?, ?)",
-                        (rol["id"], permiso),
-                    )
+    for rol_nombre, permisos in PERMISOS_POR_DEFECTO.items():
+        rol = cur.execute(
+            "SELECT id FROM roles WHERE nombre=?", (rol_nombre,)
+        ).fetchone()
+        if rol is None:
+            continue
+        tiene_permisos = cur.execute(
+            "SELECT COUNT(*) AS n FROM permisos_roles WHERE rol_id=?",
+            (rol["id"],),
+        ).fetchone()["n"] > 0
+        if not tiene_permisos:
+            for permiso in permisos:
+                cur.execute(
+                    "INSERT OR IGNORE INTO permisos_roles (rol_id, permiso) "
+                    "VALUES (?, ?)",
+                    (rol["id"], permiso),
+                )
+
+    # Causas de paro por defecto (misma politica que agregar_causa_paro:
+    # si existe inactiva, se reactiva; si no, se inserta).
+    for descripcion in CAUSAS_PARO_POR_DEFECTO:
+        causa = cur.execute(
+            "SELECT id, activo FROM causas_paro WHERE descripcion=?",
+            (descripcion,),
+        ).fetchone()
+        if causa is not None:
+            if not causa["activo"]:
+                cur.execute(
+                    "UPDATE causas_paro SET activo=1 WHERE id=?", (causa["id"],)
+                )
+        else:
+            cur.execute(
+                "INSERT INTO causas_paro (descripcion) VALUES (?)",
+                (descripcion,),
+            )
 
     conn.commit()
     conn.close()

@@ -9,7 +9,7 @@ y los cortes se suman con simular_corte(). Mantiene el mismo contrato que
 ModbusController para que la GUI no cambie:
 
     - maquina_lista()    -> simula pulso en rele START (arranca)
-    - maquina_pausada()  -> simula pulso en rele PAUSE (paro)
+    - maquina_pausada()  -> simula latch en rele PAUSE (paro sostenido)
     - reprisar_maquina() -> reanuda tras autorizar un paro
     - cortes_totales()   -> int (contador de cortes)
     - reset_conteo()     -> pone el contador en 0
@@ -118,7 +118,7 @@ class SimulacionController:
         return f"pin_{pin}"
 
     def maquina_lista(self):
-        """Simula un pulso a rele START (arranque tipo boton)."""
+        """Simula el arranque: suelta el rele de PARO (latch) y pulsa START."""
         if self._maquina_en_marcha:
             return
         log.info("-> MARCHA: pulso RELE_ENCENDIDO (start_pin=%s) [simulacion]",
@@ -128,11 +128,11 @@ class SimulacionController:
         log.info("Maquina INICIADA (pulso enviado)")
 
     def maquina_pausada(self):
-        """Simula un pulso a rele PAUSE (paro tipo boton)."""
-        log.info("-> PARO: pulso RELE_PARO (pause_pin=%s) [simulacion]",
+        """Simula PARO SOSTENIDO: rele PAUSE en nivel activo (latch)."""
+        log.info("-> PARO: latch RELE_PARO (pause_pin=%s) [simulacion]",
                  self._pin_pause)
         self._maquina_en_marcha = False
-        log.info("Maquina en PARO (pulso enviado)")
+        log.info("Maquina en PARO (rele sostenido)")
 
     def reprisar_maquina(self):
         """Reanuda la produccion tras un paro autorizado."""

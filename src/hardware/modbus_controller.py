@@ -12,13 +12,19 @@ Diseno (decisiones de planta):
       un SO en tiempo real y un micro-congelamiento del proceso perderia
       conteos. La PC solo hace polling por red (MODBUS_POLL_MS) y suma la
       diferencia del registro contador.
-    - Los relevadores se siguen manejando como PULSO MOMENTANEO (circuito
-      tipo boton, ver simulacion_controller.py): escribir el coil en True
-      durante PULSO_DURACION_MS y volver a False. Nunca dejar un rele
-      energizado. La polaridad de cada coil es configurable desde .env
+    - El rele START es PULSO MOMENTANEO (arranque tipo boton): escribir el
+      coil en True durante PULSO_DURACION_MS y volver a False. Nunca dejar
+      START energizado.
+    - El rele PAUSE es PARO SOSTENIDO (latch, cableado validado en campo):
+      `maquina_pausada()` deja el coil en su nivel activo y LO MANTIENE hasta
+      que `reprisar_maquina()`/`maquina_lista()` lo vuelve a reposo (la
+      maquina queda detenida mientras el rele este activo). Nunca se
+      auto-libera: si la app se cierra con la maquina en paro, el rele queda
+      energizado y la maquina sigue detenida (estado seguro).
+    - La polaridad de cada coil es configurable desde .env
       (MODBUS_START_COIL_INVERTIDO / MODBUS_PAUSE_COIL_INVERTIDO): por
-      defecto el pulso activo es True (contacto cerrado = boton presionado,
-      para botones NA en paralelo); con invertido=1 el pulso activo es False
+      defecto el nivel activo es True (contacto cerrado = boton presionado,
+      para botones NA en paralelo); con invertido=1 el nivel activo es False
       (contacto abierto) para cableados donde la maquina actua al abrir
       (boton NA en serie o logica NC).
     - La conexion es defensiva: si la red se cae (cable por vibracion), la UI
@@ -30,8 +36,8 @@ El mapa de registros (coils y registro contador) es CONFIGURABLE desde .env
 cambio de modelo/marca del modulo no toque el codigo fuente.
 
 Contrato (identico a SimulacionController):
-    - maquina_lista()     -> pulso en coil START (arranca)
-    - maquina_pausada()   -> pulso en coil PAUSE (paro)
+    - maquina_lista()     -> suelta PARO (si quedo en latch) + pulso START
+    - maquina_pausada()   -> latch en coil PAUSE (paro sostenido)
     - reprisar_maquina()  -> reanuda tras autorizar un paro
     - cortes_totales()    -> int (acumulado local)
     - reset_conteo()      -> pone el contador local en 0
@@ -273,31 +279,77 @@ class ModbusController:
             self._cortes = int(total)
 
     # ------------------------------------------------------------------
-    # Relees (pulso momentaneo tipo boton)
+    # Relees: START pulso momentaneo, PAUSE latch (paro sostenido)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _nivel_activo(invertido):
+        """Nivel logico del coil que activa la accion (True o False)."""
+        return not invertido
+
+    @staticmethod
+    def _nivel_reposo(invertido):
+        """Nivel logico del coil en reposo (sin accion)."""
+        return invertido
+
     def maquina_lista(self):
+        """Arranca la maquina: suelta el rele de PARO (por si quedo en latch)
+        y pulsa START."""
         if self._maquina_en_marcha:
             return
+        # El PARO es sostenido: garantizar que este en reposo antes de arrancar
+        # (idempotente; tambien cubre recuperacion tras cerrar la app en paro).
+        self._escribir_coil(
+            self._pause_coil, self._nivel_reposo(self._pause_invertido)
+        )
         log.info("-> MARCHA: pulso coil START (%s).", self._start_coil)
         self._maquina_en_marcha = True
         self._ultimo_arranque = time.time()
         self._pulso_coil(self._start_coil, invertido=self._start_invertido)
 
     def maquina_pausada(self):
-        log.info("-> PARO: pulso coil PAUSE (%s).", self._pause_coil)
+        """Para la maquina con PARO SOSTENIDO: deja el coil PAUSE en su nivel
+        activo y lo mantiene hasta reanudar (latch)."""
+        log.info("-> PARO: latch coil PAUSE (%s) activo.", self._pause_coil)
         self._maquina_en_marcha = False
-        self._pulso_coil(self._pause_coil, invertido=self._pause_invertido)
+        self._escribir_coil(
+            self._pause_coil, self._nivel_activo(self._pause_invertido)
+        )
 
     def reprisar_maquina(self):
-        """Reanuda la produccion tras un paro autorizado."""
+        """Reanuda la produccion tras un paro autorizado (suelta el latch
+        PAUSE y pulsa START)."""
         self.maquina_lista()
 
     def maquina_detenida(self) -> bool:
         return not self._maquina_en_marcha
 
+    def _escribir_coil(self, coil, valor):
+        """Escribe el coil y LO MANTIENE en `valor` (latch), en un hilo de
+        fondo. No regresa solo a reposo: la transicion la decide el estado de
+        la maquina (paro/arranque). En modo simulacion es un no-op silencioso.
+        """
+        if self._simulacion:
+            return
+
+        def _escribir():
+            with self._lock_modbus:
+                cliente = self._modbus
+                if not self._conectado or cliente is None:
+                    log.warning("Modbus sin conexion: no se pudo escribir "
+                                "el coil %s.", coil)
+                    return
+                try:
+                    cliente.write_single_coil(coil, valor)
+                    log.info("Coil %s -> %s (latch).", coil, valor)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Fallo escribir el coil %s: %s", coil, e)
+                    self._desconectar()
+
+        threading.Thread(target=_escribir, daemon=True).start()
+
     def _pulso_coil(self, coil, invertido=False):
-        """Pulso momentaneo del coil en un hilo de fondo.
+        """Pulso momentaneo del coil (solo START) en un hilo de fondo.
 
         Por defecto (invertido=False): True durante PULSO_DURACION_MS (rele
         energizado, contacto cerrado, simula presionar el boton) y luego False
@@ -311,8 +363,8 @@ class ModbusController:
         if self._simulacion:
             return
 
-        nivel_activo = not invertido
-        nivel_reposo = invertido
+        nivel_activo = self._nivel_activo(invertido)
+        nivel_reposo = self._nivel_reposo(invertido)
 
         def _pulso():
             with self._lock_modbus:

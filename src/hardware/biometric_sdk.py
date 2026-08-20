@@ -3,6 +3,7 @@ import logging
 import os
 import struct
 import sys
+import winreg
 
 log = logging.getLogger(__name__)
 
@@ -284,6 +285,58 @@ class BiometricSDK:
                 log.error("No se pudo cargar device driver %s (%s): %s",
                           nombre, ruta, e, exc_info=True)
 
+    def _diagnostico_lectores(self):
+        """Log de estado del registro de DigitalPersona y del dispositivo USB
+        cuando query_devices devuelve 0. Permite distinguir si el lector esta
+        vinculado al driver legacy (usbdpfp) o al WBF (Windows Hello)."""
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"SOFTWARE\DigitalPersona\Driver") as k:
+                claves = []
+                i = 0
+                while True:
+                    try:
+                        claves.append(winreg.EnumKey(k, i))
+                        i += 1
+                    except OSError:
+                        break
+                log.info("Diagnostico: HKLM\\SOFTWARE\\DigitalPersona\\Driver "
+                         "subclaves = %s", claves or ["(ninguna)"])
+        except OSError as e:
+            log.warning("Diagnostico: sin clave DigitalPersona\\Driver (%s)", e)
+
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"SYSTEM\CurrentControlSet\Enum\USB") as k:
+                i = 0
+                while True:
+                    try:
+                        dev = winreg.EnumKey(k, i)
+                        i += 1
+                        if "VID_05BA" not in dev:
+                            continue
+                        log.info("Diagnostico: USB %s presente en el registro PnP", dev)
+                        with winreg.OpenKey(k, dev) as inst:
+                            j = 0
+                            while True:
+                                try:
+                                    instancia = winreg.EnumKey(inst, j)
+                                    j += 1
+                                    with winreg.OpenKey(inst, instancia) as d:
+                                        for prop in ("Service", "DeviceDesc", "Mfg"):
+                                            try:
+                                                val, _ = winreg.QueryValueEx(d, prop)
+                                                log.info("Diagnostico:   %s -> %s = %s",
+                                                         instancia, prop, val)
+                                            except OSError:
+                                                pass
+                                except OSError:
+                                    break
+                    except OSError:
+                        break
+        except OSError as e:
+            log.warning("Diagnostico: sin clave PnP USB (%s)", e)
+
     def _cargar_dpfj(self):
         ruta = self._ruta_dll("dpfj.dll")
         try:
@@ -366,6 +419,7 @@ class BiometricSDK:
         elif res != 0 or dev_cnt.value == 0:
             log.warning("No se encontraron lectores (res=%s, count=%d).",
                         hex(res), dev_cnt.value)
+            self._diagnostico_lectores()
             return False
 
         self.h_reader = ctypes.c_void_p()

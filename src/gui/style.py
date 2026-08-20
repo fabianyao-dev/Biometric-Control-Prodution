@@ -135,6 +135,40 @@ QPushButton#Nav:pressed {
     background: #2e3846;
 }
 
+/* ---- Boton de advertencias del header (notificaciones) ---- */
+QPushButton#Aviso {
+    background: transparent;
+    color: #9aa5b3;
+    border: 1px solid #2e3846;
+    border-radius: 10px;
+    padding: 6px 8px;
+    font-size: 16px;
+    font-weight: 600;
+}
+QPushButton#Aviso:hover {
+    background: #232b39;
+    color: #e7eaf0;
+}
+QPushButton#AvisoActivo {
+    background: #fbbf24;
+    color: #14181f;
+    border: 1px solid #fbbf24;
+    border-radius: 10px;
+    padding: 6px 8px;
+    font-size: 16px;
+    font-weight: 700;
+}
+QPushButton#AvisoActivo:hover {
+    background: #fcd34d;
+}
+
+/* Panel flotante de advertencias (dropdown del header). */
+QFrame#PanelAvisos {
+    background: #1c232e;
+    border: 1px solid #2e3846;
+    border-radius: 12px;
+}
+
 /* Boton principal de poder: grande, redondo (PLAY/STOP). */
 QPushButton#Power, QPushButton#PowerOn {
     border-radius: 52px;

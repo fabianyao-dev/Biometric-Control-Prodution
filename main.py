@@ -17,6 +17,7 @@ import logging
 import os
 import sys
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -37,6 +38,7 @@ configurar_logging()
 from src import config
 from src.database import (
     init_db,
+    listar_fmds,
     obtener_rol_operador,
     roles_con_permiso,
     rol_tiene_permiso_operador,
@@ -44,6 +46,7 @@ from src.database import (
 from src.gui.admin_view import AdminView
 from src.gui.huella_modal import HuellaModal
 from src.gui.inicio_view import InicioView
+from src.gui.notificaciones import IndicadorAdvertencias
 from src.gui.sessions_view import SessionsView
 from src.gui.style import aplicar_estilo
 from src.hardware.biometric_service import BiometricService
@@ -111,6 +114,14 @@ class App(QMainWindow):
         ])
         self.mostrar_vista("inicio")
 
+        # Indicador de advertencias: estado de lector, HAL y operadores,
+        # refrescado en segundo plano (no interfiere con la GUI).
+        self._timer_avisos = QTimer(self)
+        self._timer_avisos.setInterval(3000)
+        self._timer_avisos.timeout.connect(self._revisar_avisos)
+        self._timer_avisos.start()
+        self._revisar_avisos()
+
         # Siempre en pantalla completa; desactivar con BIOMETRICO_KIOSKO=0.
         self.kiosko = os.environ.get("BIOMETRICO_KIOSKO") != "0"
         if self.kiosko:
@@ -136,10 +147,62 @@ class App(QMainWindow):
         lay.addWidget(titulo)
         lay.addStretch(1)
 
+        self.btn_advertencias = IndicadorAdvertencias(self.header)
+        lay.addWidget(self.btn_advertencias)
+
         btn_salir = QPushButton("Salir", self.header)
         btn_salir.setObjectName("Nav")
         btn_salir.clicked.connect(self._salir)
         lay.addWidget(btn_salir)
+
+    # ------------------------------------------------------------------
+    # Advertencias del sistema (lector, HAL, operadores)
+    # ------------------------------------------------------------------
+
+    def _revisar_avisos(self):
+        """Recalcula las advertencias operativas y actualiza el boton.
+
+        Mismas condiciones que el resto de la app: biometria disponible,
+        HAL en simulacion y sin operadores reales (listar_fmds vacio, lo que
+        deja entrar al 'Operador Temporal (dev)').
+        """
+        avisos = []
+
+        if not getattr(self.biometrico, "disponible", False):
+            avisos.append(
+                ("Lector biometrico no detectado",
+                 "La biometria no esta disponible (driver de DigitalPersona "
+                 "ausente).")
+            )
+
+        en_simulacion = getattr(
+            self.controlador, "en_simulacion", lambda: True
+        )()
+        if en_simulacion:
+            avisos.append(
+                ("Control en simulacion",
+                 "Sin modulo Modbus real (MODBUS_HOST vacio o "
+                 "MODBUS_SIMULACION=1).")
+            )
+        else:
+            conectado = getattr(self.controlador, "conectado", None)
+            if conectado is not None and not conectado():
+                avisos.append(
+                    ("Sin comunicacion con el modulo Modbus",
+                     "El modulo no responde; se reintenta en segundo plano.")
+                )
+
+        try:
+            sin_operadores = not listar_fmds(activos_solo=True)
+        except Exception:  # noqa: BLE001 - nunca debe crashear la UI
+            sin_operadores = False
+        if sin_operadores:
+            avisos.append(
+                ("Sin operadores registrados",
+                 "Acceso automatico con 'Operador Temporal (dev)'.")
+            )
+
+        self.btn_advertencias.set_advertencias(avisos)
 
     # ------------------------------------------------------------------
     # Sidebar lateral (ocultable con la hamburguesa)

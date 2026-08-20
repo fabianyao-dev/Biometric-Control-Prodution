@@ -1,26 +1,167 @@
+import logging
 import os
+import shutil
 import sys
 
 from dotenv import load_dotenv
 
+log = logging.getLogger(__name__)
+
 RUTA_BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Si corre como .exe empaquetado (PyInstaller), el .env vive junto al .exe;
-# en desarrollo, en la raiz del proyecto.
-if getattr(sys, "frozen", False):
+# ---------------------------------------------------------------------------
+# Carpeta de datos persistente (solo empaquetado)
+# ---------------------------------------------------------------------------
+# En el .exe empaquetado, `.env`, `planta_corte.db` y `logs/` viven en una
+# carpeta FUERA de la instalacion (por defecto %USERPROFILE%\WTSControlData)
+# para que sobrevivan a cada actualizacion del dist. La carpeta se crea en la
+# primera ejecucion y los datos que ya vivieran junto al .exe se migran ahi
+# una sola vez (nunca se sobrescribe informacion existente).
+VAR_DIR_DATOS = "BIOMETRICO_DIR_DATOS"
+NOMBRE_DIR_DATOS = "WTSControlData"
+NOMBRE_DB = "planta_corte.db"
+
+
+def _directorio_datos():
+    """Carpeta persistente de datos. En desarrollo es la raiz del proyecto."""
+    if getattr(sys, "frozen", False):
+        override = os.environ.get(VAR_DIR_DATOS, "").strip()
+        if override:
+            return os.path.abspath(override)
+        base = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+        return os.path.join(base, NOMBRE_DIR_DATOS)
+    return RUTA_BASE
+
+
+def _leer_lineas(ruta):
+    """Lee un .env a lineas, quitando un posible BOM UTF-8 de la primera
+    (lo agregan algunos editores/consolas y python-dotenv no lo limpia:
+    la primera clave quedaria como \ufeffCLAVE)."""
+    with open(ruta, "r", encoding="utf-8") as f:
+        lineas = f.readlines()
+    if lineas and lineas[0].startswith("\ufeff"):
+        lineas[0] = lineas[0][1:]
+    return lineas
+
+
+def _quitar_lineas_ruta(lineas):
+    """Deja fuera las lineas DB_PATH/LOG_DIR de un .env (se apuntan a la
+    carpeta de datos al migrar)."""
+    return [
+        l for l in lineas
+        if not l.lstrip().startswith(("DB_PATH=", "LOG_DIR="))
+    ]
+
+
+def _asegurar_env(dir_datos, dir_exe=None):
+    """Garantiza un .env en la carpeta de datos y devuelve su ruta.
+
+    Si ya existe, lo devuelve tal cual. Si no, lo crea con el contenido del
+    .env del .exe (migrado, sin DB_PATH/LOG_DIR) y si no existe, con el
+    .env.example empaquetado; como ultimo recurso con unos defaults minimos.
+    Siempre termina con DB_PATH y LOG_DIR apuntando a la carpeta de datos.
+    """
+    ruta_env = os.path.join(dir_datos, ".env")
+    if os.path.exists(ruta_env):
+        return ruta_env
+
+    lineas = None
+    if dir_exe:
+        origen = os.path.join(dir_exe, ".env")
+        if os.path.exists(origen):
+            lineas = _quitar_lineas_ruta(_leer_lineas(origen))
+
+    if lineas is None:
+        if getattr(sys, "frozen", False):
+            ejemplo = os.path.join(
+                getattr(sys, "_MEIPASS", dir_exe or ""), ".env.example"
+            )
+        else:
+            ejemplo = os.path.join(RUTA_BASE, ".env.example")
+        if ejemplo and os.path.exists(ejemplo):
+            lineas = _quitar_lineas_ruta(_leer_lineas(ejemplo))
+
+    if lineas is None:
+        lineas = [
+            "# .env generado automaticamente en la carpeta de datos.\n",
+            "# Edita solo lo que necesites; se conserva entre actualizaciones.\n",
+            "MODBUS_HOST=\n",
+            "MODBUS_SIMULACION=1\n",
+            "BIOMETRICO_KIOSKO=1\n",
+        ]
+
+    lineas.append("\n")
+    lineas.append(f"DB_PATH={os.path.join(dir_datos, NOMBRE_DB)}\n")
+    lineas.append(f"LOG_DIR={os.path.join(dir_datos, 'logs')}\n")
+    with open(ruta_env, "w", encoding="utf-8") as f:
+        f.writelines(lineas)
+    log.info(".env creado en %s", ruta_env)
+    return ruta_env
+
+
+def _migrar_desde_exe(dir_datos, dir_exe=None, meipass=None):
+    """Migra .env, BD y logs de la carpeta del .exe a la carpeta de datos.
+
+    Solo copia lo que aun no exista en la carpeta de datos (primera ejecucion
+    tras actualizar el .exe) y nunca sobrescribe datos existentes.
+    """
+    os.makedirs(dir_datos, exist_ok=True)
+    _asegurar_env(dir_datos, dir_exe=dir_exe)
+
+    fuentes = set()
+    if dir_exe:
+        fuentes.add(dir_exe)
+    if meipass:
+        fuentes.add(meipass)
+
+    for fuente in fuentes:
+        db_origen = os.path.join(fuente, NOMBRE_DB)
+        db_destino = os.path.join(dir_datos, NOMBRE_DB)
+        if os.path.exists(db_origen) and not os.path.exists(db_destino):
+            shutil.copy2(db_origen, db_destino)
+            log.info("BD migrada: %s -> %s", db_origen, db_destino)
+
+        logs_origen = os.path.join(fuente, "logs")
+        logs_destino = os.path.join(dir_datos, "logs")
+        if os.path.isdir(logs_origen) and not os.path.exists(logs_destino):
+            shutil.copytree(logs_origen, logs_destino)
+            log.info("Logs migrados: %s -> %s", logs_origen, logs_destino)
+
+
+def _asegurar_datos(dir_datos):
+    """Solo empaquetado: prepara la carpeta de datos y migra los datos que
+    vivieran junto al .exe. Idempotente."""
+    if not getattr(sys, "frozen", False):
+        return
     dir_exe = os.path.dirname(sys.executable)
-    ruta_env = os.path.join(dir_exe, ".env")
+    meipass = getattr(sys, "_MEIPASS", None)
+    _migrar_desde_exe(dir_datos, dir_exe, meipass)
+
+
+# ---------------------------------------------------------------------------
+# Carga del .env
+# ---------------------------------------------------------------------------
+DIR_DATOS = _directorio_datos()
+
+if getattr(sys, "frozen", False):
+    _asegurar_datos(DIR_DATOS)
+
+# Empaquetado: el .env vive en la carpeta de datos persistente; en desarrollo,
+# en la raiz del proyecto.
+if getattr(sys, "frozen", False):
+    ruta_env = os.path.join(DIR_DATOS, ".env")
 else:
     ruta_env = os.path.join(RUTA_BASE, ".env")
 
 load_dotenv(ruta_env)
 
-# Ruta de la BD configurable (.env) para que sobreviva al empaquetado con
-# PyInstaller, donde `__file__` cae dentro del directorio temporal.
-DB_PATH = os.environ.get("DB_PATH") or os.path.join(RUTA_BASE, "planta_corte.db")
+# Ruta de la BD configurable (.env). Empaquetado: por defecto vive en la
+# carpeta de datos persistente (sobrevive a las actualizaciones del .exe);
+# en desarrollo, en la raiz del proyecto.
+DB_PATH = os.environ.get("DB_PATH") or os.path.join(DIR_DATOS, NOMBRE_DB)
 
 # Directorio de logs diarios con rotacion (30 dias).
-LOG_DIR = os.environ.get("LOG_DIR") or os.path.join(RUTA_BASE, "logs")
+LOG_DIR = os.environ.get("LOG_DIR") or os.path.join(DIR_DATOS, "logs")
 
 # Zona horaria oficial de la planta (America/Monterrey).
 ZONA_HORARIA = "America/Monterrey"
@@ -83,10 +224,10 @@ MODBUS_CONFIG = {
     "pulso_duracion_ms": _env_int("PULSO_DURACION_MS", 300),
     "max_delta": _env_int("MODBUS_COUNTER_MAX_DELTA", 10000),
     "modo_simulacion": _env_bool("MODBUS_SIMULACION", not bool(os.environ.get("MODBUS_HOST", "").strip())),
-    # Polaridad del pulso por coil. Por defecto el pulso activo es True
-    # (rele energizado/contacto cerrado durante PULSO_DURACION_MS). Si el
-    # cableado de la maquina es al reves (la maquina actua cuando el circuito
-    # se ABRE), poner 1 invierte el pulso: activo = False, reposo = True.
+    # Polaridad del nivel activo por coil (START pulso / PAUSE latch). Por
+    # defecto el nivel activo es True (rele energizado/contacto cerrado). Si
+    # el cableado de la maquina es al reves (la maquina actua cuando el
+    # circuito se ABRE), poner 1 invierte: activo = False, reposo = True.
     "start_coil_invertido": _env_bool("MODBUS_START_COIL_INVERTIDO", False),
     "pause_coil_invertido": _env_bool("MODBUS_PAUSE_COIL_INVERTIDO", False),
 }
