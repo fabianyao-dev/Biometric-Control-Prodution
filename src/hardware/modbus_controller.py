@@ -49,7 +49,8 @@ Contrato (identico a SimulacionController):
     - establecer_conteo(n)-> base desde el ultimo checkpoint de la BD
     - suspender_conteo()  -> excluye cortes nuevos (modo Primera pieza)
     - retomar_conteo()    -> vuelve a contar; los excluidos se pierden
-    - incorporar_excluidos() -> confirma los excluidos y reanuda el conteo
+    - incorporar_excluidos(cantidad=None) -> confirma excluidos (o solo
+      `cantidad`) y reanuda el conteo; el resto se descarta
     - cortes_excluidos()  -> int (cortes hechos con conteo suspendido)
     - segundos_sin_corte()-> float (alimenta SEGURO_PARO_SEGUNDOS)
     - segundos_desde_arranque()-> float (alimenta PARO_IDLE_TIMEOUT_S)
@@ -308,12 +309,21 @@ class ModbusController:
             self._conteo_suspendido = False
             self._cortes_excluidos = 0
 
-    def incorporar_excluidos(self):
-        """Confirma los cortes excluidos como produccion real y reanuda el
-        conteo (corrida iniciada durante Primera pieza, ya autorizada): el
-        acumulado temporal pasa al total de la sesion."""
+    def incorporar_excluidos(self, cantidad=None):
+        """Confirma cortes excluidos como produccion real y reanuda el conteo
+        (corrida autorizada tras Primera pieza).
+
+        Con `cantidad=None` incorpora TODOS los excluidos. Con una cantidad,
+        solo esos pasan al total (p. ej. los de la ventana del seguro
+        anti-corrida y posteriores); el resto se DESCARTA (piezas de prueba
+        hechas antes de la deteccion).
+        """
         with self._lock:
-            self._cortes += self._cortes_excluidos
+            if cantidad is None:
+                n = self._cortes_excluidos
+            else:
+                n = min(max(int(cantidad), 0), self._cortes_excluidos)
+            self._cortes += n
             self._cortes_excluidos = 0
             self._conteo_suspendido = False
 

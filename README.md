@@ -227,6 +227,11 @@ venv\Scripts\pyinstaller --noconfirm tools\updater.spec   # primero el updater i
 venv\Scripts\pyinstaller --noconfirm WTSControl.spec      # luego la app (empaqueta el updater)
 ```
 
+> Para publicar una versión completa (bump + builds + verificación + manifest +
+> zip + copia a `release/`), usa el pipeline automatizado:
+> `venv\Scripts\python tools\hacer_version.py <version>` (ver
+> [Actualizaciones](#actualizaciones)).
+
 El resultado queda en `dist\WTSControl\` (`WTSControl.exe` + `_internal\`).
 Copiar la **carpeta completa** a la PC de producción.
 
@@ -289,6 +294,24 @@ en **Administración → Sistema**.
 
 ### Publicar una versión (servidor encendido)
 
+Todo el pipeline en un solo comando — bump de `version.txt`, build del
+updater, build de la app, verificación del build (exe, versión embebida,
+updater embebido, DLLs del SDK), manifest + zip y copia a `release/`:
+
+```bash
+venv\Scripts\python tools\hacer_version.py 1.1.0
+```
+
+El servidor **no** se enciende automáticamente: es el interruptor de seguridad
+del rollout.
+
+```bash
+# 5. Encender el servidor (y abrir el puerto en el firewall)
+venv\Scripts\python tools\servidor_actualizaciones.py
+```
+
+Pasos manuales equivalentes (por partes, si hace falta):
+
 ```bash
 # 1. Bump de version
 echo 1.1.0 > version.txt
@@ -303,9 +326,6 @@ venv\Scripts\python tools\hacer_manifest.py 1.1.0
 # 4. Copiar a la carpeta servida (release/)
 copy dist\manifest.json release\
 copy dist\WTSControl-1.1.0.zip release\
-
-# 5. Encender el servidor (y abrir el puerto en el firewall)
-venv\Scripts\python tools\servidor_actualizaciones.py
 ```
 
 En cada fanless, un rol con `actualizar_app` entra a **Administración →
@@ -361,6 +381,7 @@ sdk/vendor/dpf/               DLLs de DigitalPersona empaquetados (SDK 3.2.0.89)
 assets/                       Logo, ícono y MSI del driver USB del lector
 tools/
 ├── updater.py + updater.spec Updater interno (ONE-file, stdlib): swap con respaldo
+├── hacer_version.py          Pipeline completo de release en un comando
 ├── hacer_manifest.py         Genera manifest.json + WTSControl-<version>.zip
 └── servidor_actualizaciones.py  HTTP estático de actualizaciones (stdlib)
 src/

@@ -22,9 +22,10 @@ este activo.
 SEGURO ANTI-CORRIDA: durante el modo los cortes van a un acumulado temporal.
 Si se detecta una rafaga (mas de SEGURO_RAFAGA_CORTES cortes dentro de
 SEGURO_RAFAGA_SEGUNDOS, ver .env), suena una alarma y se pregunta si la
-maquina ya empezo a correr; al confirmar y autorizar por huella, esos cortes
-se INCORPORAN al total de la sesion. Con "No" (o sin autorizacion) siguen
-fuera del conteo y se pierden al salir del modo.
+maquina ya empezo a correr; al confirmar y autorizar por huella, SOLO los
+cortes de la ventana detectada y posteriores se INCORPORAN al total de la
+sesion (lo excluido antes queda como piezas de prueba descartadas). Con "No"
+(o sin autorizacion) todo sigue fuera del conteo y se pierde al salir del modo.
 
 La sesion se cuenta desde que la maquina arranca (LISTA) hasta que se
 detiene; no hay boton de mantenimiento de sesion.
@@ -98,6 +99,9 @@ class InicioView(QWidget):
         self._muestras_rafaga = deque()
         self._ultimo_excluidos = 0
         self._rafaga_en_curso = False
+        # Cortes excluidos ANTES del inicio de la ventana detectada: son
+        # piezas de prueba y NO se incorporan al confirmar la corrida.
+        self._excluidos_previos_rafaga = 0
 
         self._crear_interfaz()
         self._revisar_sesion_interrumpida()
@@ -629,13 +633,16 @@ class InicioView(QWidget):
         """Cierra el paro 'Primera pieza' en curso DESCARTANDO sus cortes."""
         self._cerrar_primera_pieza(id_operador, incorporar=False)
 
-    def _cerrar_primera_pieza(self, id_operador, incorporar=False):
+    def _cerrar_primera_pieza(self, id_operador, incorporar=False,
+                              cantidad=None):
         """Cierra el paro 'Primera pieza' en curso (causa fija + autorizador).
 
         Con `incorporar=False` los cortes hechos durante el modo se pierden
         (solo vivian en memoria). Con `incorporar=True` se confirman como
-        produccion de la sesion y pasan al total (corrida autorizada).
-        Devuelve cuantos cortes se incorporaron (0 si se descartaron).
+        produccion de la sesion: `cantidad=None` incorpora TODOS los
+        excluidos; con una cantidad solo esos (ventana del seguro
+        anti-corrida y posteriores) y el resto se descarta (piezas de
+        prueba). Devuelve cuantos cortes se incorporaron.
         """
         if not self._primera_pieza or not self._primera_pieza_paro_id:
             return 0
@@ -650,16 +657,21 @@ class InicioView(QWidget):
         self._primera_pieza_paro_id = None
         self._primera_pieza = False
         if incorporar:
-            # Corrida confirmada: lo hecho durante el modo cuenta como
+            # Corrida confirmada: los cortes confirmados cuentan como
             # produccion de la sesion y el conteo sigue normal.
-            self.controlador.incorporar_excluidos()
+            self.controlador.incorporar_excluidos(cantidad)
+            if cantidad is None:
+                incorporados = excluidos
+            else:
+                incorporados = min(max(int(cantidad), 0), excluidos)
         else:
+            incorporados = 0
             self.controlador.retomar_conteo()
         # Al salir del modo el minuto de inactividad arranca DE CERO: durante
         # el modo no hubo auto-paro y el tiempo sin corte acumulado no debe
         # disparar el modal justo al reanudar el conteo.
         self.controlador.reiniciar_gracia_inactividad()
-        return excluidos
+        return incorporados
 
     def _causa_primera_pieza_id(self):
         for causa in listar_causas_paro(activas_solo=True):
@@ -688,6 +700,7 @@ class InicioView(QWidget):
             self._muestras_rafaga.clear()
             self._ultimo_excluidos = 0
             self._rafaga_en_curso = False
+            self._excluidos_previos_rafaga = 0
             return
         if self._modal_abierto:
             return  # Otro modal en curso; evaluar al cerrarse.
@@ -710,8 +723,13 @@ class InicioView(QWidget):
         if self._rafaga_en_curso:
             return  # Ya se pregunto por esta rafaga; no insistir.
         self._rafaga_en_curso = True
-        log.warning("Rafaga en Primera pieza: %s cortes en %s s",
-                    en_ventana, ventana)
+        # Lo excluido antes de la ventana son piezas de prueba: al confirmar
+        # la corrida solo se incorporan los de la ventana en adelante
+        # (incluidos los que ocurran mientras el modal esta abierto).
+        self._excluidos_previos_rafaga = excluidos - en_ventana
+        log.warning("Rafaga en Primera pieza: %s cortes en %s s "
+                    "(%s previos quedan como prueba)",
+                    en_ventana, ventana, self._excluidos_previos_rafaga)
         self._sonar_alarma_rafaga()
         self._preguntar_corrida(en_ventana, ventana)
 
@@ -775,8 +793,18 @@ class InicioView(QWidget):
         modal.exec()
 
     def _corrida_confirmada(self, id_operador, nombre, causa_id=None):
-        """Cierra el modo Primera pieza INCORPORANDO sus cortes a la sesion."""
-        n_excluidos = self._cerrar_primera_pieza(id_operador, incorporar=True)
+        """Cierra el modo Primera pieza INCORPORANDO los cortes de la rafaga.
+
+        Solo se incorporan los cortes de la ventana detectada y posteriores;
+        los hechos antes quedan descartados (piezas de prueba).
+        """
+        a_incorporar = max(
+            self.controlador.cortes_excluidos() - self._excluidos_previos_rafaga,
+            0,
+        )
+        n_excluidos = self._cerrar_primera_pieza(
+            id_operador, incorporar=True, cantidad=a_incorporar
+        )
         self._fijar_switch(False)
         self._refrescar_estado_maquina()
         self._estado(
@@ -785,7 +813,8 @@ class InicioView(QWidget):
             "exito",
         )
         log.info("Corrida confirmada por %s: %s cortes pasaron al total "
-                 "de la sesion", nombre, n_excluidos)
+                 "(%s previos descartados como prueba)",
+                 nombre, n_excluidos, self._excluidos_previos_rafaga)
 
     def _refrescar_estado_maquina(self):
         estilo = self.style()
