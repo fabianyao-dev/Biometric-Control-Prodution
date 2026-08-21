@@ -205,6 +205,15 @@ def _env_bool(clave, por_defecto=False):
     return valor.strip().lower() in ("1", "true", "si", "yes", "on")
 
 
+# --- Actualizaciones por red (opcional) ---
+# URL base del servidor de actualizaciones (p. ej. http://10.0.0.2:8080).
+# Vacio => la app se comporta igual que hoy (sin boton de actualizar).
+UPDATE_SOURCE = os.environ.get("UPDATE_SOURCE", "").strip()
+
+# Timeout de las consultas/descargas HTTP al servidor de actualizaciones.
+UPDATE_TIMEOUT_S = _env_int("UPDATE_TIMEOUT_S", 8)
+
+
 # --- Modbus TCP (PC Fanless Windows) ---
 # Contador interno de alta velocidad del modulo Advantech: el PC solo hace
 # polling por red; NUNCA cuenta flancos localmente (Windows no es RTOS y un
@@ -245,6 +254,14 @@ PARO_IDLE_TIMEOUT_S = 60
 # de sesion) mientras la maquina este en marcha y se haya recibido un corte
 # dentro de estos ultimos segundos (la maquina sigue cortando).
 SEGURO_PARO_SEGUNDOS = _env_int("SEGURO_PARO_SEGUNDOS", 3)
+
+# Seguro anti-corrida en modo "Primera pieza": si dentro de esta ventana de
+# tiempo (segundos) entran mas de SEGURO_RAFAGA_CORTES cortes excluidos, se
+# pregunta al operador si la maquina ya empezo a correr; al confirmar y
+# autorizar, los cortes hechos durante el modo se incorporan a la sesion.
+# 0 en cualquiera de los dos = desactivado.
+SEGURO_RAFAGA_SEGUNDOS = _env_int("SEGURO_RAFAGA_SEGUNDOS", 7)
+SEGURO_RAFAGA_CORTES = _env_int("SEGURO_RAFAGA_CORTES", 5)
 
 # Selector de causa de paro: cuadricula con las causas mas usadas.
 CAUSAS_FRECUENTES_LIMITE = 6

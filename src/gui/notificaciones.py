@@ -2,7 +2,8 @@
 notificaciones.py - Indicador de advertencias del sistema (header del kiosco).
 
 Boton permanente en el header que avisa del estado operativo del kiosco:
-    - Lector biometrico no detectado (biometrico.disponible=False).
+    - Biometria no disponible (driver/SDK de DigitalPersona ausente).
+    - Lector biometrico no detectado (driver OK pero sin lector USB conectado).
     - Controlador HAL en modo simulacion (Modbus sin MODBUS_HOST / simulacion).
     - Enlace Modbus caido (configurado pero sin respuesta).
     - Sin operadores reales registrados (acceso automatico "Operador Temporal").

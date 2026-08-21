@@ -47,8 +47,13 @@ Contrato (identico a SimulacionController):
     - cortes_totales()    -> int (acumulado local)
     - reset_conteo()      -> pone el contador local en 0
     - establecer_conteo(n)-> base desde el ultimo checkpoint de la BD
+    - suspender_conteo()  -> excluye cortes nuevos (modo Primera pieza)
+    - retomar_conteo()    -> vuelve a contar; los excluidos se pierden
+    - incorporar_excluidos() -> confirma los excluidos y reanuda el conteo
+    - cortes_excluidos()  -> int (cortes hechos con conteo suspendido)
     - segundos_sin_corte()-> float (alimenta SEGURO_PARO_SEGUNDOS)
     - segundos_desde_arranque()-> float (alimenta PARO_IDLE_TIMEOUT_S)
+    - reiniciar_gracia_inactividad() -> reinicia la gracia del auto-paro
     - simular_corte()     -> suma un corte (modo simulacion / pruebas)
     - maquina_detenida()  -> bool
     - conectado()         -> bool (estado del enlace Modbus, para la UI)
@@ -102,6 +107,12 @@ class ModbusController:
         self._conectado = False
         self._cortes = 0
         self._ultimo_contador = 0
+        # Exclusion de cortes (modo "Primera pieza"): con el conteo
+        # suspendido los deltas van a `_cortes_excluidos`, NO a `_cortes`.
+        # Viven solo en memoria y se pierden al retomar (piezas de prueba/
+        # setup que no cuentan como produccion de la sesion).
+        self._cortes_excluidos = 0
+        self._conteo_suspendido = False
         # `_ultimo_corte` SOLO se actualiza con cortes reales (deltas del
         # contador). `_ultimo_arranque` es la ultima vez que la maquina
         # arranco/reanudo (gracia del auto-paro). Mezclarlos hacia que el
@@ -241,9 +252,9 @@ class ModbusController:
                 # Reset del modulo / salto anomalo: no contar basura.
                 delta = 0
             self._ultimo_contador = valor
-            if delta:
-                self._cortes += delta
-                self._ultimo_corte = time.time()
+        # Unico punto de acumulacion (aplica la exclusion de Primera pieza).
+        if delta:
+            self._sumar_corte(delta)
 
     def _desconectar(self):
         cliente = self._modbus
@@ -268,9 +279,48 @@ class ModbusController:
     # ------------------------------------------------------------------
 
     def _sumar_corte(self, cantidad=1):
+        """Unico punto de acumulacion de cortes (polling y simular_corte).
+
+        Con `suspender_conteo()` activo (modo Primera pieza), la cantidad va
+        a `_cortes_excluidos`: se muestra aparte pero NUNCA entra a
+        `cortes_totales()` ni a la BD, y se pierde al retomar. `_ultimo_corte`
+        SIEMPRE se actualiza: son cortes fisicos reales y el seguro
+        anti-paro/apagado debe seguir viendo actividad.
+        """
         with self._lock:
-            self._cortes += cantidad
             self._ultimo_corte = time.time()
+            if self._conteo_suspendido:
+                self._cortes_excluidos += cantidad
+            else:
+                self._cortes += cantidad
+
+    def suspender_conteo(self):
+        """Empieza a EXCLUIR cortes del total de la sesion (modo Primera
+        pieza): se acumulan solo en memoria (`cortes_excluidos`)."""
+        with self._lock:
+            self._conteo_suspendido = True
+            self._cortes_excluidos = 0
+
+    def retomar_conteo(self):
+        """Vuelve a contar cortes para la sesion; los excluidos se pierden
+        (se descartan las piezas hechas durante Primera pieza)."""
+        with self._lock:
+            self._conteo_suspendido = False
+            self._cortes_excluidos = 0
+
+    def incorporar_excluidos(self):
+        """Confirma los cortes excluidos como produccion real y reanuda el
+        conteo (corrida iniciada durante Primera pieza, ya autorizada): el
+        acumulado temporal pasa al total de la sesion."""
+        with self._lock:
+            self._cortes += self._cortes_excluidos
+            self._cortes_excluidos = 0
+            self._conteo_suspendido = False
+
+    def cortes_excluidos(self) -> int:
+        """Cortes hechos con el conteo suspendido (solo memoria)."""
+        with self._lock:
+            return self._cortes_excluidos
 
     def simular_corte(self):
         """Suma un corte (modo simulacion / pruebas)."""
@@ -291,6 +341,14 @@ class ModbusController:
             if not self._maquina_en_marcha:
                 return float("inf")
             return time.time() - self._ultimo_arranque
+
+    def reiniciar_gracia_inactividad(self):
+        """Reinicia la gracia del auto-paro por inactividad SIN contar corte
+        ni tocar relevadores (p. ej. al salir del modo Primera pieza): el
+        timeout vuelve a contar desde cero aunque el ultimo corte sea viejo.
+        `_ultimo_corte` NO se toca (alimenta SEGURO_PARO_SEGUNDOS)."""
+        with self._lock:
+            self._ultimo_arranque = time.time()
 
     def cortes_totales(self) -> int:
         with self._lock:

@@ -163,17 +163,35 @@ class App(QMainWindow):
         """Recalcula las advertencias operativas y actualiza el boton.
 
         Mismas condiciones que el resto de la app: biometria disponible,
-        HAL en simulacion y sin operadores reales (listar_fmds vacio, lo que
-        deja entrar al 'Operador Temporal (dev)').
+        lector fisico detectado, HAL en simulacion y sin operadores reales
+        (listar_fmds vacio, lo que deja entrar al 'Operador Temporal (dev)').
         """
         avisos = []
 
+        # Lector: distinguir dos fallos distintos - driver/SDK ausente
+        # (biometrico.disponible=False) y lector fisico desconectado del USB
+        # (disponible=True pero sin dispositivo enumerado).
         if not getattr(self.biometrico, "disponible", False):
             avisos.append(
-                ("Lector biometrico no detectado",
-                 "La biometria no esta disponible (driver de DigitalPersona "
+                ("Biometria no disponible",
+                 "El SDK de DigitalPersona no esta disponible (driver "
                  "ausente).")
             )
+        else:
+            try:
+                lector_ok = bool(
+                    getattr(self.biometrico, "lector_presente", lambda: True)()
+                )
+            except Exception:  # noqa: BLE001 - nunca debe crashear la UI
+                log.error("No se pudo consultar el lector biometrico",
+                          exc_info=True)
+                lector_ok = True
+            if not lector_ok:
+                avisos.append(
+                    ("Lector biometrico no detectado",
+                     "El lector no esta conectado; revisa el cable USB o el "
+                     "driver de DigitalPersona.")
+                )
 
         en_simulacion = getattr(
             self.controlador, "en_simulacion", lambda: True

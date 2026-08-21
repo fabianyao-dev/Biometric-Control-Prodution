@@ -7,8 +7,9 @@ Se usa para:
     - Autorizacion de paro (elegir causa + confirmar con el dedo).
 
 Con `pedir_causa=True` muestra el SelectorCausas: cuadricula con las causas
-mas usadas y un boton para buscar. Al autenticar con exito invoca
-`on_autenticado(operador_id, nombre, causa_id)`.
+mas usadas y un boton para buscar, SIN ninguna causa preseleccionada; no
+autoriza hasta que se elija una y la huella vuelva a pasar. Al autenticar con
+exito invoca `on_autenticado(operador_id, nombre, causa_id)`.
 
 Con `validador=(operador_id, nombre, causa_id) -> (bool, mensaje)` se puede
 restringir quien puede autenticarse: si el validador devuelve (False, msg),
@@ -233,7 +234,14 @@ class HuellaModal(QDialog):
                 on_progress=self._progreso
             )
             self.cola.put(("RESULTADO", resultado))
+        except RuntimeError as e:
+            # Fallos esperables de operacion (sin lector, lectura rechazada,
+            # driver ausente): mensaje claro en el modal, sin traceback que
+            # ensucie la depuracion.
+            log.warning("Autenticacion sin exito: %s", e)
+            self.cola.put(("ERROR", str(e)))
         except Exception as e:  # noqa: BLE001
+            # Fallo NO esperado: conservar el stack para depurar.
             log.error("Autenticacion fallo: %s", e, exc_info=True)
             self.cola.put(("ERROR", str(e)))
 
@@ -271,6 +279,17 @@ class HuellaModal(QDialog):
             causa_id = None
             if self.selector_causas is not None:
                 causa_id = self.selector_causas.seleccion_id
+                if causa_id is None:
+                    # Sin preseleccion de causa: exigir eleccion explicita
+                    # antes de autorizar (evita paros registrados sin causa).
+                    log.info("Huella %s autentica; falta seleccionar causa.",
+                             nombre)
+                    self._estado(
+                        "\u2713 Huella autenticada. Selecciona la causa del "
+                        "paro y vuelve a colocar tu huella.", "error"
+                    )
+                    QTimer.singleShot(2500, self._reintentar)
+                    return
             if self.validador is not None:
                 valido, mensaje = self.validador(op_id, nombre, causa_id)
                 if not valido:

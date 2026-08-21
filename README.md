@@ -95,6 +95,8 @@ Copia `.env.example` a `.env` y ajusta los valores. El `.env` local está en
 | `LOG_DIR` | Directorio de logs diarios (rotación a 30 días). En empaquetado apunta por defecto a `%USERPROFILE%\WTSControlData\logs`. |
 | `BIOMETRICO_DIR_DATOS` | (Solo empaquetado) Variable de entorno del sistema para cambiar la carpeta de datos persistente (default `%USERPROFILE%\WTSControlData`). No se lee del `.env`. |
 | `BIOMETRICO_KIOSKO` | `1` = kiosco pantalla completa (default); `0` = ventana normal. |
+| `UPDATE_SOURCE` | URL base del servidor de actualizaciones por red (p. ej. `http://10.0.0.2:8080`). **Vacía** = sin actualizaciones por red: el botón "Buscar actualización" no se muestra y la app se comporta igual que antes. |
+| `UPDATE_TIMEOUT_S` | Timeout (segundos) de consultas/descargas al servidor de actualizaciones (default `8`). |
 
 ---
 
@@ -221,11 +223,17 @@ que `onefile` para Qt + SQLite) usando el `.spec` del proyecto:
 
 ```bash
 venv\Scripts\pip install pyinstaller
-venv\Scripts\pyinstaller --noconfirm WTSControl.spec
+venv\Scripts\pyinstaller --noconfirm tools\updater.spec   # primero el updater interno
+venv\Scripts\pyinstaller --noconfirm WTSControl.spec      # luego la app (empaqueta el updater)
 ```
 
 El resultado queda en `dist\WTSControl\` (`WTSControl.exe` + `_internal\`).
 Copiar la **carpeta completa** a la PC de producción.
+
+> La app se **actualiza sola por red** (ver [Actualizaciones](#actualizaciones)):
+> `dist\WTSControl\` incluye el updater interno (`WTSControlUpdater.exe`) y el
+> `version.txt`. Para publicar una versión nueva se genera además el
+> `manifest.json` + el `.zip` (ver [Actualizaciones](#actualizaciones)).
 
 Notas:
 
@@ -255,6 +263,79 @@ Notas:
 
 ---
 
+## Actualizaciones
+
+El sistema se actualiza **por red local (HTTP)**, sin tocar nada a mano en cada
+máquina. La app **nunca** consulta actualizaciones por sí sola: solo lo hace
+cuando un rol con el permiso `actualizar_app` pulsa **"Buscar actualización"**
+en **Administración → Sistema**.
+
+### Cómo funciona
+
+1. **Servidor de actualizaciones** (`tools\servidor_actualizaciones.py`): un
+   HTTP estático (solo stdlib, sin instalación) que sirve `manifest.json` + el
+   `.zip`. Corre en cualquier PC de la planta (una PC que esté encendida al
+   momento de publicar). **Se enciende solo cuando se publica una versión** —
+   con el servidor apagado las máquinas corren la versión que ya tienen.
+2. **Manifest** (`tools\hacer_manifest.py`): tras compilar, genera
+   `manifest.json` (`version`, `published_at` — fecha/hora de publicación —,
+   `zip` con sha256, y el sha256 de cada archivo) y `WTSControl-<version>.zip`.
+3. **Cliente**: el botón consulta el manifest, muestra *Instalada / Disponible /
+   Publicada* y, al pulsar "Aplicar ahora", la app descarga el `.zip`, **verifica
+   su sha256**, lanza el **updater interno** (`WTSControlUpdater.exe`, va dentro
+   del paquete) y se cierra. El updater espera a que la app salga (Windows
+   bloquea los archivos en ejecución), reemplaza la instalación con respaldo
+   (`<instalar>_backup`) y **relanza la app**.
+
+### Publicar una versión (servidor encendido)
+
+```bash
+# 1. Bump de version
+echo 1.1.0 > version.txt
+
+# 2. Build (primero el updater, luego la app)
+venv\Scripts\pyinstaller --noconfirm tools\updater.spec
+venv\Scripts\pyinstaller --noconfirm WTSControl.spec
+
+# 3. Generar manifest + zip
+venv\Scripts\python tools\hacer_manifest.py 1.1.0
+
+# 4. Copiar a la carpeta servida (release/)
+copy dist\manifest.json release\
+copy dist\WTSControl-1.1.0.zip release\
+
+# 5. Encender el servidor (y abrir el puerto en el firewall)
+venv\Scripts\python tools\servidor_actualizaciones.py
+```
+
+En cada fanless, un rol con `actualizar_app` entra a **Administración →
+Sistema** y pulsa **"Buscar actualización"** → **"Aplicar ahora"**. La app se
+cierra, se actualiza sola y se reabre. En la PC de desarrollo (modo Python) el
+botón avisa que la actualización solo se aplica en el paquete `.exe`.
+
+### Configuración
+
+- En el `.env` de cada máquina: `UPDATE_SOURCE=http://<ip-del-servidor>:8080`.
+  Sin esta variable el botón no aparece (comportamiento idéntico al original).
+- **Regla de oro**: el updater reemplaza SOLO la carpeta de instalación. `.env`,
+  `planta_corte.db` y `logs/` viven en la carpeta de datos persistente
+  (`%USERPROFILE%\WTSControlData`) y **nunca se tocan**.
+- **Permiso de rol**: `actualizar_app` ("Buscar y aplicar actualizaciones de la
+  aplicación"). Se asigna por defecto a `admin` en instalaciones nuevas; en
+  instalaciones existentes se activa desde **Administración → Roles**.
+- **Instalación con permisos**: el updater renombra la carpeta de instalación,
+  así que la PC debe permitir escritura sobre el directorio **padre** de la
+  instalación (recomendado: instalar en una carpeta con permisos del usuario
+  kiosco, p. ej. `%LOCALAPPDATA%\WTSControl`).
+
+### Rollback (si una versión falla)
+
+En la PC afectada, cerrar la app, borrar la carpeta de instalación y renombrar
+`<instalar>_backup` a `<instalar>`. El servidor apagado evita que el resto de
+las máquinas se actualicen (interruptor de seguridad del rollout).
+
+---
+
 ## Deployment (procedimiento de TI, requiere admin/UAC)
 
 1. **Autostart**: crea una tarea en el Programador de Tareas que ejecute
@@ -275,17 +356,23 @@ Notas:
 ```
 main.py                       Orquesta app Qt, servicios compartidos y HAL
 WTSControl.spec               Build PyInstaller onedir (empaqueta assets y DLLs)
+version.txt                   Versión actual (se empaqueta; origen del manifest)
 sdk/vendor/dpf/               DLLs de DigitalPersona empaquetados (SDK 3.2.0.89)
 assets/                       Logo, ícono y MSI del driver USB del lector
+tools/
+├── updater.py + updater.spec Updater interno (ONE-file, stdlib): swap con respaldo
+├── hacer_manifest.py         Genera manifest.json + WTSControl-<version>.zip
+└── servidor_actualizaciones.py  HTTP estático de actualizaciones (stdlib)
 src/
 ├── config.py                 Config central (.env, simulación, Modbus)
 ├── database.py               SQLite: operadores, sesiones, paros, causas, permisos
 ├── logging_config.py         Logs consola + archivo diario (rotación 30 días)
+├── update.py                 Actualizaciones: version, manifest, descarga, updater
 ├── gui/
 │   ├── style.py              Tema oscuro propio (QSS + Fusion)
 │   ├── inicio_view.py        Vista principal (máquina de estados, paros, 1.ª pieza)
 │   ├── sessions_view.py      Historial de sesiones y paros
-│   ├── admin_view.py         CRUD operadores/causas/roles/permisos (captura en hilo)
+│   ├── admin_view.py         CRUD operadores/causas/roles/permisos + pestaña Sistema
 │   ├── huella_modal.py       Modal de autenticación reutilizable (SVG huella)
 │   ├── selector_causas.py    Cuadrícula de causas de paro + buscador
 │   ├── switch.py             Interruptor estilo iOS (QAbstractButton)

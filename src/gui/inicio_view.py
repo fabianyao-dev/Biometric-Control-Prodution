@@ -15,7 +15,16 @@ Con la sesion abierta y la maquina en LISTA, el switch "Primera pieza"
 (autorizado por huella al iniciar y al terminar) registra el evento como un
 paro con la causa fija 'Primera pieza'; durante el modo la maquina sigue en
 marcha y NO se aplica el auto-paro por inactividad (no cuenta el minuto de
-espera de corte). El boton PARO queda deshabilitado mientras este activo.
+espera de corte). Al salir del modo la gracia del auto-paro se reinicia: el
+minuto vuelve a contar desde cero. El boton PARO queda deshabilitado mientras
+este activo.
+
+SEGURO ANTI-CORRIDA: durante el modo los cortes van a un acumulado temporal.
+Si se detecta una rafaga (mas de SEGURO_RAFAGA_CORTES cortes dentro de
+SEGURO_RAFAGA_SEGUNDOS, ver .env), suena una alarma y se pregunta si la
+maquina ya empezo a correr; al confirmar y autorizar por huella, esos cortes
+se INCORPORAN al total de la sesion. Con "No" (o sin autorizacion) siguen
+fuera del conteo y se pierden al salir del modo.
 
 La sesion se cuenta desde que la maquina arranca (LISTA) hasta que se
 detiene; no hay boton de mantenimiento de sesion.
@@ -30,6 +39,10 @@ sesion nueva mientras exista la interrumpida.
 """
 
 import logging
+import threading
+import time
+from collections import deque
+
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -80,6 +93,11 @@ class InicioView(QWidget):
         self._primera_pieza = False
         self._primera_pieza_paro_id = None
         self._ajustando_switch = False
+        # Seguro anti-corrida en Primera pieza: ventana movil de cortes
+        # excluidos para detectar una corrida no autorizada.
+        self._muestras_rafaga = deque()
+        self._ultimo_excluidos = 0
+        self._rafaga_en_curso = False
 
         self._crear_interfaz()
         self._revisar_sesion_interrumpida()
@@ -435,7 +453,15 @@ class InicioView(QWidget):
     # ------------------------------------------------------------------
 
     def _refrescar_contador(self):
-        self.lbl_cortes.setText(f"Cortes: {self.controlador.cortes_totales()}")
+        if self._primera_pieza:
+            # Durante el modo se muestran SOLO los cortes temporales; el
+            # total de la sesion queda congelado (no entra a la BD).
+            self.lbl_cortes.setText(
+                f"Cortes (temporales): {self.controlador.cortes_excluidos()}"
+            )
+        else:
+            self.lbl_cortes.setText(f"Cortes: {self.controlador.cortes_totales()}")
+        self._verificar_rafaga_arranque()
         self._refrescar_estado_maquina()
         self._refrescar_enlace_modbus()
         self._verificar_inactividad()
@@ -524,7 +550,8 @@ class InicioView(QWidget):
 
         Durante el modo la maquina SIGUE EN MARCHA: solo se desactiva el
         auto-paro por inactividad (no se cuenta el minuto de espera de corte)
-        y el evento se registra como un paro con la causa fija 'Primera pieza'.
+        y el evento se registra como un paro con la causa fija 'Primera
+        pieza'. Al finalizar, la gracia del auto-paro se reinicia.
         """
         if self._modal_abierto or self._ajustando_switch:
             return
@@ -583,6 +610,9 @@ class InicioView(QWidget):
     def _primera_pieza_iniciada(self, id_operador, nombre, causa_id=None):
         self._primera_pieza_paro_id = iniciar_paro(self.sesion_id)
         self._primera_pieza = True
+        # Los cortes de este modo NO cuentan para la sesion: se acumulan solo
+        # en memoria (label "Cortes (temporales)") y se pierden al salir.
+        self.controlador.suspender_conteo()
         self._fijar_switch(True)
         self._refrescar_estado_maquina()
         self._estado(f"Primera pieza iniciada por {nombre}.", "exito")
@@ -596,22 +626,166 @@ class InicioView(QWidget):
         self._estado(f"Primera pieza finalizada por {nombre}.", "exito")
 
     def _finalizar_primera_pieza_si_activa(self, id_operador):
-        """Cierra el paro 'Primera pieza' en curso (causa fija + autorizador)."""
+        """Cierra el paro 'Primera pieza' en curso DESCARTANDO sus cortes."""
+        self._cerrar_primera_pieza(id_operador, incorporar=False)
+
+    def _cerrar_primera_pieza(self, id_operador, incorporar=False):
+        """Cierra el paro 'Primera pieza' en curso (causa fija + autorizador).
+
+        Con `incorporar=False` los cortes hechos durante el modo se pierden
+        (solo vivian en memoria). Con `incorporar=True` se confirman como
+        produccion de la sesion y pasan al total (corrida autorizada).
+        Devuelve cuantos cortes se incorporaron (0 si se descartaron).
+        """
         if not self._primera_pieza or not self._primera_pieza_paro_id:
-            return
+            return 0
         causa_id = self._causa_primera_pieza_id()
         if causa_id is None:
             log.warning("Causa 'Primera pieza' inactiva; paro %s sin causa",
                         self._primera_pieza_paro_id)
+        excluidos = (
+            self.controlador.cortes_excluidos() if incorporar else 0
+        )
         finalizar_paro(self._primera_pieza_paro_id, causa_id, id_operador)
         self._primera_pieza_paro_id = None
         self._primera_pieza = False
+        if incorporar:
+            # Corrida confirmada: lo hecho durante el modo cuenta como
+            # produccion de la sesion y el conteo sigue normal.
+            self.controlador.incorporar_excluidos()
+        else:
+            self.controlador.retomar_conteo()
+        # Al salir del modo el minuto de inactividad arranca DE CERO: durante
+        # el modo no hubo auto-paro y el tiempo sin corte acumulado no debe
+        # disparar el modal justo al reanudar el conteo.
+        self.controlador.reiniciar_gracia_inactividad()
+        return excluidos
 
     def _causa_primera_pieza_id(self):
         for causa in listar_causas_paro(activas_solo=True):
             if str(causa["descripcion"]).strip().lower() == "primera pieza":
                 return causa["id"]
         return None
+
+    # ------------------------------------------------------------------
+    # Seguro anti-corrida durante "Primera pieza"
+    # ------------------------------------------------------------------
+
+    def _verificar_rafaga_arranque(self):
+        """Detecta una corrida no autorizada en modo Primera pieza.
+
+        Con el conteo suspendido, si dentro de SEGURO_RAFAGA_SEGUNDOS entran
+        mas de SEGURO_RAFAGA_CORTES cortes excluidos, suena una alarma y
+        pregunta al operador si la maquina ya empezo a correr; al confirmar
+        y autorizar por huella, lo hecho durante el modo pasa al conteo.
+        """
+        ventana = config.SEGURO_RAFAGA_SEGUNDOS
+        umbral = config.SEGURO_RAFAGA_CORTES
+        if not ventana or ventana <= 0 or umbral <= 0:
+            return
+        if (not self._primera_pieza or self._en_paro
+                or self.sesion_id is None or not self._maquina_en_marcha()):
+            self._muestras_rafaga.clear()
+            self._ultimo_excluidos = 0
+            self._rafaga_en_curso = False
+            return
+        if self._modal_abierto:
+            return  # Otro modal en curso; evaluar al cerrarse.
+        excluidos = self.controlador.cortes_excluidos()
+        delta = excluidos - self._ultimo_excluidos
+        self._ultimo_excluidos = excluidos
+        ahora = time.time()
+        if delta > 0:
+            self._muestras_rafaga.append((ahora, delta))
+        elif delta < 0:
+            # Reinicio de temporales (reentrada al modo): baseline nuevo.
+            self._muestras_rafaga.clear()
+        limite = ahora - ventana
+        while self._muestras_rafaga and self._muestras_rafaga[0][0] < limite:
+            self._muestras_rafaga.popleft()
+        en_ventana = sum(n for _, n in self._muestras_rafaga)
+        if en_ventana <= umbral:
+            self._rafaga_en_curso = False  # La rafaga cedio: rearmar.
+            return
+        if self._rafaga_en_curso:
+            return  # Ya se pregunto por esta rafaga; no insistir.
+        self._rafaga_en_curso = True
+        log.warning("Rafaga en Primera pieza: %s cortes en %s s",
+                    en_ventana, ventana)
+        self._sonar_alarma_rafaga()
+        self._preguntar_corrida(en_ventana, ventana)
+
+    def _sonar_alarma_rafaga(self):
+        """Patron de beeps de atencion en hilo aparte (no bloquea la GUI)."""
+
+        def _sonar():
+            try:
+                import winsound
+                for _ in range(4):
+                    winsound.Beep(950, 220)
+                    winsound.Beep(1400, 220)
+            except Exception:  # noqa: BLE001 - sin sonido no debe fallar nada
+                pass
+
+        threading.Thread(target=_sonar, daemon=True).start()
+
+    def _preguntar_corrida(self, n_cortes, ventana):
+        """Modal '¿Ya empezo a correr?' del seguro anti-corrida."""
+        self._modal_abierto = True
+        try:
+            caja = QMessageBox(self.controller)
+            caja.setWindowTitle("Posible corrida sin conteo")
+            caja.setIcon(QMessageBox.Warning)
+            caja.setText(
+                f"Se detectaron {n_cortes} cortes en los ultimos {ventana} "
+                "segundos con el modo Primera pieza activo.\n\n"
+                "¿Ya empezo a correr la maquina?"
+            )
+            btn_si = caja.addButton("Sí", QMessageBox.YesRole)
+            caja.addButton("No", QMessageBox.NoRole)
+            caja.exec()
+            if caja.clickedButton() is btn_si:
+                self._abrir_huella_corrida()
+            else:
+                log.info("Corrida descartada por el operador "
+                         "(Primera pieza sigue activa)")
+                self._estado(
+                    "Corrida descartada: los cortes siguen fuera del conteo.",
+                    "info",
+                )
+        finally:
+            self._modal_abierto = False
+
+    def _abrir_huella_corrida(self):
+        """Autorizacion por huella para contar la corrida detectada."""
+        modal = HuellaModal(
+            self.controller,
+            self.biometrico,
+            titulo="CONFIRMAR CORRIDA",
+            mensaje="Coloca tu huella para contar estos cortes como "
+                    "produccion de la sesion.",
+            validador=self._validar_autorizacion_paro,
+            on_autenticado=self._corrida_confirmada,
+            on_cancelar=lambda: self._estado(
+                "Confirmacion cancelada; el modo Primera pieza sigue activo.",
+                "info",
+            ),
+            mostrar_cancelar=True,
+        )
+        modal.exec()
+
+    def _corrida_confirmada(self, id_operador, nombre, causa_id=None):
+        """Cierra el modo Primera pieza INCORPORANDO sus cortes a la sesion."""
+        n_excluidos = self._cerrar_primera_pieza(id_operador, incorporar=True)
+        self._fijar_switch(False)
+        self._refrescar_estado_maquina()
+        self._estado(
+            f"Corrida confirmada por {nombre}: {n_excluidos} cortes "
+            "incorporados al conteo.",
+            "exito",
+        )
+        log.info("Corrida confirmada por %s: %s cortes pasaron al total "
+                 "de la sesion", nombre, n_excluidos)
 
     def _refrescar_estado_maquina(self):
         estilo = self.style()

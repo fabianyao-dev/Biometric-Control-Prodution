@@ -39,6 +39,14 @@ class BiometricService:
         la app sigue corriendo, pero las capturas devuelven None/mensaje."""
         return self.sdk.disponible
 
+    def lector_presente(self):
+        """True si el lector fisico esta conectado y detectado por el SDK.
+
+        Complementa a `disponible`: los DLLs pueden cargar (driver instalado)
+        y aun asi el lector estar desconectado del USB. Barato de consultar.
+        """
+        return self.sdk.lector_presente()
+
     def abrir(self):
         """Prepara el lector. Devuelve True si está listo."""
         return self.sdk.abrir_lector()
@@ -108,7 +116,10 @@ class BiometricService:
         """
         captura = self.capturar_huella(timeout_ms)
         if not captura or not captura.get("fmd"):
-            raise RuntimeError("Captura sin plantilla.")
+            raise RuntimeError(
+                getattr(self.sdk, "ultimo_error_captura", "")
+                or "No se pudo capturar la huella."
+            )
         return self.identificar(captura["fmd"], lista_plantillas)
 
     def autenticar_operador(self, on_progress=None):

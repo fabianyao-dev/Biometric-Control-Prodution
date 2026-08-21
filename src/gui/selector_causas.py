@@ -83,9 +83,9 @@ class SelectorCausas(QFrame):
             self._grid.addWidget(boton, fila, col)
             self._grid.setColumnStretch(col, 1)
 
-        if causas:
-            self._seleccionar(causas[0]["id"], causas[0]["descripcion"])
-        else:
+        # SIN preseleccion: el operador debe elegir la causa explicitamente
+        # (seleccion_id queda en None hasta que pulse un boton o busque).
+        if not causas:
             self.lbl_vacio.setText("Aun sin causas frecuentes; usa 'Buscar caso'.")
             self.layout().addWidget(self.lbl_vacio)
 

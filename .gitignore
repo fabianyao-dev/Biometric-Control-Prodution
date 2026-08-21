@@ -18,6 +18,9 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+release/
+updates/
+test_pc/
 downloads/
 eggs/
 .eggs/

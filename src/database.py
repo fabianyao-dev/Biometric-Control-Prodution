@@ -39,13 +39,14 @@ PERMISOS_SISTEMA = [
     ("autorizar_paro", "Autorizar la reanudacion de un paro (ademas del operador de la sesion).", 1),
     ("acceso_sesiones", "Ver la vista de Sesiones.", 2),
     ("acceso_admin", "Acceder a Administracion (incluye la gestion de permisos).", 3),
+    ("actualizar_app", "Buscar y aplicar actualizaciones de la aplicacion.", 4),
 ]
 
 # Permisos por defecto de los roles clasicos. Se aplican en el primer arranque
 # (tabla permisos_roles vacia) y a cualquier rol de estos que no tenga ningun
 # permiso asignado (p. ej. un rol recien creado en una BD existente).
 PERMISOS_POR_DEFECTO = {
-    "admin": ["autorizar_paro", "acceso_sesiones", "acceso_admin"],
+    "admin": ["autorizar_paro", "acceso_sesiones", "acceso_admin", "actualizar_app"],
     "supervisor": ["autorizar_paro", "acceso_sesiones"],
     "mantenimiento": ["autorizar_paro"],
 }
@@ -801,11 +802,14 @@ def paro_en_curso(sesion_id: int):
 
 
 def obtener_paros_de_sesion(sesion_id: int):
-    """Paros de la sesion con causa, para reportes."""
+    """Paros de la sesion con causa y nombre del autorizador, para reportes."""
     conn = obtener_conexion()
     rows = conn.execute(
-        "SELECT p.id, c.descripcion, p.inicio_paro, p.fin_paro "
-        "FROM paros_produccion p LEFT JOIN causas_paro c ON c.id=p.causa_id "
+        "SELECT p.id, c.descripcion, p.inicio_paro, p.fin_paro, "
+        "       a.nombre AS autorizador "
+        "FROM paros_produccion p "
+        "LEFT JOIN causas_paro c ON c.id=p.causa_id "
+        "LEFT JOIN operadores a ON a.id=p.autorizado_por_operador_id "
         "WHERE p.sesion_id=? ORDER BY p.id",
         (sesion_id,),
     ).fetchall()
