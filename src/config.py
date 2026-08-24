@@ -1,7 +1,9 @@
+import json
 import logging
 import os
 import shutil
 import sys
+import tempfile
 
 from dotenv import load_dotenv
 
@@ -139,25 +141,122 @@ def _asegurar_datos(dir_datos):
 
 
 # ---------------------------------------------------------------------------
-# Carga del .env
+# config.json (archivo de configuracion de la aplicacion)
+# ---------------------------------------------------------------------------
+# En PRODUCCION (exe) reemplaza al .env: mismas claves (MODBUS_HOST,
+# UPDATE_SOURCE, SEGURO_*, DB_PATH, LOG_DIR, ...) en JSON, y es el archivo
+# que la app SI puede escribir en caliente (p. ej. el tema claro/oscuro),
+# con escritura atomica. En la primera ejecucion se genera automaticamente
+# importando las claves del .env que ya existiera en la carpeta de datos.
+# En DESARROLLO la configuracion operativa sigue siendo el .env de la raiz;
+# config.json local solo guarda preferencias de UI (tema).
+NOMBRE_CONFIG_JSON = "config.json"
+
+
+def ruta_config_json():
+    """Ruta del config.json activo: carpeta de datos (produccion) o raiz
+    del proyecto (desarrollo)."""
+    return os.path.join(DIR_DATOS, NOMBRE_CONFIG_JSON)
+
+
+def _leer_json(ruta):
+    try:
+        with open(ruta, "r", encoding="utf-8") as f:
+            datos = json.load(f)
+        return datos if isinstance(datos, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:  # noqa: BLE001 - JSON corrupto no debe tirar el arranque
+        log.warning("config.json ilegible (%s); se ignora", ruta, exc_info=True)
+        return {}
+
+
+def _escribir_json(ruta, datos):
+    """Escritura atomica: temp + replace para no dejar un JSON a medias si
+    se va la luz a mitad de guardado."""
+    directorio = os.path.dirname(ruta) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".config-", dir=directorio)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(datos, f, indent=2, ensure_ascii=True, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp, ruta)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def guardar_config(clave, valor):
+    """Guarda una clave en el config.json activo (escritura atomica)."""
+    ruta = ruta_config_json()
+    datos = _leer_json(ruta)
+    datos[clave] = valor
+    _escribir_json(ruta, datos)
+    log.info("config.json: %s = %s", clave, valor)
+
+
+def leer_config(clave, por_defecto=None):
+    """Lee una clave del config.json activo (o el default)."""
+    return _leer_json(ruta_config_json()).get(clave, por_defecto)
+
+
+def _aplicar_config_json():
+    """Produccion: carga config.json sobre el entorno del proceso.
+
+    Si no existe, lo GENERA importando las claves del .env de la carpeta de
+    datos (migracion de una sola vez; DB_PATH/LOG_DIR se normalizan a la
+    carpeta de datos). Las claves del archivo NO pisan variables de entorno
+    ya presentes (setdefault), salvo que vengan del propio archivo.
+    """
+    ruta = ruta_config_json()
+    datos = _leer_json(ruta)
+    if not datos:
+        origen = {}
+        ruta_env = os.path.join(DIR_DATOS, ".env")
+        if os.path.exists(ruta_env):
+            for linea in _leer_lineas(ruta_env):
+                texto = linea.strip()
+                if not texto or texto.startswith("#") or "=" not in texto:
+                    continue
+                clave, _, valor = texto.partition("=")
+                origen[clave.strip()] = valor.strip()
+        origen["DB_PATH"] = os.path.join(DIR_DATOS, NOMBRE_DB)
+        origen["LOG_DIR"] = os.path.join(DIR_DATOS, "logs")
+        datos = origen
+        _escribir_json(ruta, datos)
+        log.info("config.json generado desde .env en %s", ruta)
+    for clave, valor in datos.items():
+        if clave == VAR_DIR_DATOS:
+            continue  # esa decide DONDE esta esta carpeta: solo entorno
+        os.environ.setdefault(str(clave), str(valor))
+
+
+# ---------------------------------------------------------------------------
+# Carga de la configuracion
 # ---------------------------------------------------------------------------
 DIR_DATOS = _directorio_datos()
 
 if getattr(sys, "frozen", False):
     _asegurar_datos(DIR_DATOS)
 
-# Empaquetado: el .env vive en la carpeta de datos persistente; en desarrollo,
-# en la raiz del proyecto.
+# Produccion (exe): config.json en la carpeta de datos es LA configuracion
+# (generado desde el .env heredado si hacia falta). Desarrollo: .env de la
+# raiz, mas un config.json local opcional solo para preferencias de UI.
 if getattr(sys, "frozen", False):
-    ruta_env = os.path.join(DIR_DATOS, ".env")
+    _aplicar_config_json()
 else:
     ruta_env = os.path.join(RUTA_BASE, ".env")
+    load_dotenv(ruta_env)
+    for clave, valor in _leer_json(ruta_config_json()).items():
+        if clave != VAR_DIR_DATOS:
+            os.environ.setdefault(str(clave), str(valor))
 
-load_dotenv(ruta_env)
-
-# Ruta de la BD configurable (.env). Empaquetado: por defecto vive en la
-# carpeta de datos persistente (sobrevive a las actualizaciones del .exe);
-# en desarrollo, en la raiz del proyecto.
+# Ruta de la BD configurable (.env / config.json). Empaquetado: por defecto
+# vive en la carpeta de datos persistente (sobrevive a las actualizaciones
+# del .exe); en desarrollo, en la raiz del proyecto.
 DB_PATH = os.environ.get("DB_PATH") or os.path.join(DIR_DATOS, NOMBRE_DB)
 
 # Directorio de logs diarios con rotacion (30 dias).

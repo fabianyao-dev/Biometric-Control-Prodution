@@ -2,11 +2,29 @@
 util.py - Utilidades de GUI reutilizables (PySide6/Qt).
 
 Funciones de apoyo para ventanas emergentes: ajustar el dialogo a su
-contenido (tamano dinamico), centrarlo sobre su ventana padre y un dialogo
-generico para pedir texto (usado por el CRUD de roles).
+contenido (tamano dinamico), centrarlo sobre su ventana padre, un dialogo
+generico para pedir texto (usado por el CRUD de roles) y conversion de SVG
+monocolor a QIcon (iconos nítidos, nunca emojis).
 """
 
+from PySide6.QtCore import QRect, Qt
+from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QInputDialog
+
+
+def icono_svg(plantilla, color, tamano=20):
+    """Convierte un SVG monocolor ({color} = placeholder) en un QIcon."""
+    renderer = QSvgRenderer(plantilla.replace("{color}", color).encode("utf-8"))
+    pixmap = QPixmap(tamano, tamano)
+    pixmap.fill(Qt.transparent)
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.Antialiasing)
+    renderer.render(p, QRect(0, 0, tamano, tamano))
+    p.end()
+    icono = QIcon()
+    icono.addPixmap(pixmap)
+    return icono
 
 
 def centrar_y_ajustar(ventana, parent=None, margen=20,

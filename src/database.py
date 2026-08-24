@@ -8,6 +8,11 @@ Esquema relacional:
                            operador puede tener varias).
     causas_paro            Motivos configurables de paro (soft-delete).
     sesiones_produccion    Entrada/salida del operador por turno.
+    trabajos               Trabajos de corte por QR (folio|num_part|cantidad),
+                           vinculados a una sesion; folio es la clave unica.
+                           'Cerrado' SOLO al alcanzar cantidad_total; un
+                           parcial (FINALIZAR TRABAJO / cierre de sesion) queda
+                           'Abierto' con fecha_fin y es retomable.
     paros_produccion       Paros vinculados a una sesion (FK a sesion_id).
 
 Politicas:
@@ -134,6 +139,17 @@ def init_db():
             fecha_fin TIMESTAMP,
             total_cortes INTEGER NOT NULL DEFAULT 0,
             estado TEXT NOT NULL DEFAULT 'Activa'
+        );
+
+        CREATE TABLE IF NOT EXISTS trabajos (
+            folio INTEGER PRIMARY KEY,
+            sesion_id INTEGER NOT NULL REFERENCES sesiones_produccion(id),
+            num_part TEXT NOT NULL,
+            cantidad_total INTEGER NOT NULL,
+            cantidad_cortada INTEGER NOT NULL DEFAULT 0,
+            fecha_inicio TIMESTAMP DEFAULT (ahora_monterrey()),
+            fecha_fin TIMESTAMP,
+            estado TEXT NOT NULL DEFAULT 'Abierto'
         );
 
         CREATE TABLE IF NOT EXISTS paros_produccion (
@@ -758,6 +774,158 @@ def obtener_operador_de_sesion(sesion_id: int) -> str:
     ).fetchone()
     conn.close()
     return row["nombre"] if row else "Desconocido"
+
+
+# ---------------------------------------------------------------------------
+# Trabajos (QR folio|num_part|cantidad_total)
+# ---------------------------------------------------------------------------
+
+ESTADO_ABIERTO = "Abierto"
+ESTADO_CERRADO = "Cerrado"
+
+
+def abrir_trabajo(folio: int, sesion_id: int, num_part: str,
+                  cantidad_total: int):
+    """Abre (o retoma) un trabajo identificado por su folio unico.
+
+    Devuelve (ok, mensaje|fila):
+        - Folio nuevo: se crea 'Abierto' con cantidad_cortada=0.
+        - Folio 'Abierto': se RETOMA sin perder `cantidad_cortada`; se
+          re-vincula a la sesion actual, refresca num_part/cantidad con lo
+          escaneado y limpia `fecha_fin` (queda activo de nuevo).
+        - Folio 'Cerrado': rechazado (ya alcanzo su cantidad_total).
+    """
+    try:
+        folio = int(folio)
+    except (TypeError, ValueError):
+        return False, "El folio debe ser numerico."
+    try:
+        cantidad_total = int(cantidad_total)
+    except (TypeError, ValueError):
+        return False, "La cantidad total debe ser numerica."
+    if cantidad_total <= 0:
+        return False, "La cantidad total debe ser mayor que cero."
+    num_part = (num_part or "").strip()
+    if not num_part:
+        return False, "El numero de parte no puede ir vacio."
+
+    conn = obtener_conexion()
+    existe = conn.execute(
+        "SELECT folio, sesion_id, num_part, cantidad_total, cantidad_cortada, "
+        "       fecha_inicio, estado FROM trabajos WHERE folio=?", (folio,)
+    ).fetchone()
+    if existe is not None and existe["estado"] == ESTADO_CERRADO:
+        conn.close()
+        return False, (
+            f"El trabajo {folio} ya esta CERRADO "
+            f"({existe['cantidad_cortada']}/{existe['cantidad_total']})."
+        )
+    if existe is not None:
+        conn.execute(
+            "UPDATE trabajos SET sesion_id=?, num_part=?, cantidad_total=?, "
+            "fecha_fin=NULL WHERE folio=?",
+            (sesion_id, num_part, cantidad_total, folio),
+        )
+        conn.commit()
+        fila = conn.execute(
+            "SELECT * FROM trabajos WHERE folio=?", (folio,)
+        ).fetchone()
+        conn.close()
+        return True, fila
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO trabajos (folio, sesion_id, num_part, cantidad_total) "
+        "VALUES (?, ?, ?, ?)",
+        (folio, sesion_id, num_part, cantidad_total),
+    )
+    conn.commit()
+    fila = conn.execute(
+        "SELECT * FROM trabajos WHERE folio=?", (folio,)
+    ).fetchone()
+    conn.close()
+    return True, fila
+
+
+def completar_trabajo(folio: int, cantidad_cortada: int):
+    """Marca 'Cerrado' un trabajo al ALCANZAR su cantidad_total.
+
+    Solo la meta alcanzada cierra un trabajo; guarda la cantidad REAL
+    cortada aunque se haya pasado (p. ej. 202/200).
+    """
+    conn = obtener_conexion()
+    conn.execute(
+        "UPDATE trabajos SET estado=?, fecha_fin=?, cantidad_cortada=? "
+        "WHERE folio=?",
+        (ESTADO_CERRADO, ahora_local(), int(cantidad_cortada), int(folio)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def pausar_trabajo(folio: int, cantidad_cortada: int):
+    """Guarda el parcial de un trabajo SIN cerrarlo (queda 'Abierto').
+
+    Se usa en el cierre anticipado (FINALIZAR TRABAJO) y al apagar/cerrar
+    sesion con trabajo en curso: `fecha_fin` marca el momento del parcial y
+    `cantidad_cortada` permite retomarlo despues re-escaneando el mismo
+    folio (que lo reactiva) o via recuperacion tras apagon.
+    """
+    conn = obtener_conexion()
+    conn.execute(
+        "UPDATE trabajos SET fecha_fin=?, cantidad_cortada=? "
+        "WHERE folio=? AND estado=?",
+        (ahora_local(), int(cantidad_cortada), int(folio), ESTADO_ABIERTO),
+    )
+    conn.commit()
+    conn.close()
+
+
+def actualizar_cantidad_cortada(folio: int, cantidad_cortada: int):
+    """Checkpoint periodico del conteo del trabajo (respaldo ante apagon)."""
+    conn = obtener_conexion()
+    conn.execute(
+        "UPDATE trabajos SET cantidad_cortada=? WHERE folio=?",
+        (int(cantidad_cortada), int(folio)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def obtener_trabajo_abierto(sesion_id: int | None = None):
+    """Trabajo 'Abierto' EN CURSO (sin fecha_fin) o None.
+
+    `fecha_fin IS NULL` distingue un trabajo activo de uno con parcial
+    guardado (pausado): los pausados NO se restauran ni se muestran como
+    vigentes; se retoman solo re-escanendo su folio.
+    """
+    conn = obtener_conexion()
+    if sesion_id is None:
+        row = conn.execute(
+            "SELECT * FROM trabajos WHERE estado=? AND fecha_fin IS NULL "
+            "ORDER BY folio DESC LIMIT 1",
+            (ESTADO_ABIERTO,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM trabajos WHERE estado=? AND fecha_fin IS NULL "
+            "AND sesion_id=? ORDER BY folio DESC LIMIT 1",
+            (ESTADO_ABIERTO, sesion_id),
+        ).fetchone()
+    conn.close()
+    return row
+
+
+def listar_trabajos_de_sesion(sesion_id: int):
+    """Trabajos de una sesion para reportes (uno por fila, folio unico)."""
+    conn = obtener_conexion()
+    rows = conn.execute(
+        "SELECT folio, num_part, cantidad_total, cantidad_cortada, "
+        "       fecha_inicio, fecha_fin, estado "
+        "FROM trabajos WHERE sesion_id=? ORDER BY fecha_inicio",
+        (sesion_id,),
+    ).fetchall()
+    conn.close()
+    return rows
 
 
 # ---------------------------------------------------------------------------

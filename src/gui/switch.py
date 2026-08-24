@@ -12,12 +12,7 @@ from PySide6.QtCore import Property, QPropertyAnimation, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QAbstractButton
 
-from src.gui.style import (
-    COLOR_ACCENTE,
-    COLOR_BORDE,
-    COLOR_DESACTIVADO,
-    COLOR_TEXTO,
-)
+from src.gui import style
 
 
 class Switch(QAbstractButton):
@@ -65,12 +60,13 @@ class Switch(QAbstractButton):
 
         w, h = self.width(), self.height()
 
-        # Pista (track) redondeada.
-        p.setPen(QPen(QColor(COLOR_BORDE), 1))
+        # Pista (track) redondeada. Colores del tema ACTIVO (consultados
+        # aqui para que el cambio de tema repinte sin reiniciar).
+        p.setPen(QPen(QColor(style.color("borde")), 1))
         if self.isChecked():
-            p.setBrush(QColor(COLOR_ACCENTE))
+            p.setBrush(QColor(style.color("accento")))
         else:
-            p.setBrush(QColor(COLOR_DESACTIVADO))
+            p.setBrush(QColor(style.color("deshabilitado_bg")))
         p.drawRoundedRect(QRectF(1, 1, w - 2, h - 2), h / 2.0, h / 2.0)
 
         # Perilla (knob) blanca que se desliza.
@@ -78,5 +74,5 @@ class Switch(QAbstractButton):
         diam = h - 2 * margen
         x = margen + self._progreso * (w - diam - 2 * margen)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(COLOR_TEXTO))
+        p.setBrush(QColor(style.color("texto")))
         p.drawEllipse(QRectF(x, margen, diam, diam))

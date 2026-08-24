@@ -17,6 +17,13 @@ el modal NO se cierra, muestra `msg` como error y vuelve a pedir la huella
 (se usa para que solo el operador de la sesion o un rol autorizado pueda
 autorizar la reanudacion de un paro).
 
+Con `pedir_trabajo=True` el modal TAMBIEN exige el escaneo de un codigo QR
+de trabajo con formato `folio|num_part|cantidad_total`, capturado por un
+escaner USB tipo teclado (escribe en un campo con foco y manda Enter).
+Solo acepta cuando hay QR valido Y huella autenticada (en cualquier orden):
+si falta uno, avisa y sigue pidiendo. Al aceptar invoca
+`on_autenticado(operador_id, nombre, causa_id, folio, num_part, cantidad_total)`.
+
 El tamano de la ventana se calcula en funcion del contenido (vease
 `centrar_y_ajustar`), asi el modal crece o encoge segun la causa. Se abre en
 bloqueo con `exec()`; los hilos secundarios solo escriben a `queue.Queue()`
@@ -25,20 +32,16 @@ que se drena con un QTimer en el hilo principal.
 
 import logging
 import queue
+import re
 import threading
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
+from src.gui import style
 from src.gui.selector_causas import SelectorCausas
-from src.gui.style import (
-    COLOR_BORDE,
-    COLOR_EXITO,
-    COLOR_SUPERFICIE_ELEVADA,
-    COLOR_TEXTO,
-    aplicar_estado,
-)
+from src.gui.style import aplicar_estado
 from src.gui.util import centrar_y_ajustar
 
 log = logging.getLogger(__name__)
@@ -86,20 +89,21 @@ class HuellaWidget(QWidget):
         self.update()
 
     def _svg_con_color(self):
-        tono = COLOR_TEXTO if self._autenticado else COLOR_EXITO
+        tono = (style.color("texto") if self._autenticado
+                else style.color("exito"))
         return SVG_HUELLA.replace("{color}", tono)
 
     def paintEvent(self, _evento):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
 
-        # Fondo circular (insignia).
-        p.setPen(QPen(QColor(COLOR_BORDE), 2))
+        # Fondo circular (insignia). Colores del tema ACTIVO.
+        p.setPen(QPen(QColor(style.color("borde")), 2))
         if self._autenticado:
-            fondo = QColor(COLOR_EXITO)
+            fondo = QColor(style.color("exito"))
             fondo.setAlpha(30)
         else:
-            fondo = QColor(COLOR_SUPERFICIE_ELEVADA)
+            fondo = QColor(style.color("elevada"))
         p.setBrush(fondo)
         p.drawEllipse(0, 0, self.width() - 1, self.height() - 1)
 
@@ -111,7 +115,8 @@ class HuellaWidget(QWidget):
             return
 
         # Respaldo por si QtSvg no pudiera cargar el icono.
-        p.setPen(QPen(QColor(COLOR_EXITO), 3, Qt.SolidLine, Qt.RoundCap))
+        p.setPen(QPen(QColor(style.color("exito")), 3, Qt.SolidLine,
+                      Qt.RoundCap))
         p.drawEllipse(rect)
 
 
@@ -119,7 +124,8 @@ class HuellaModal(QDialog):
     def __init__(self, parent, biometrico, titulo, mensaje,
                  on_autenticado=None, on_cancelar=None,
                  mostrar_cancelar=True, cerrable=True, pedir_causa=False,
-                 validador=None):
+                 validador=None, pedir_trabajo=False, qr_solo=False,
+                 on_trabajo_escaneado=None):
         super().__init__(parent)
         self.biometrico = biometrico
         self.titulo = titulo
@@ -129,9 +135,22 @@ class HuellaModal(QDialog):
         self.mostrar_cancelar = mostrar_cancelar
         self.cerrable = cerrable
         self.validador = validador
+        self.pedir_trabajo = pedir_trabajo
+        # Modo SOLO QR: no pide huella; al leer un QR valido acepta y
+        # notifica via on_trabajo_escaneado(folio, num_part, cantidad).
+        self.qr_solo = qr_solo
+        self.on_trabajo_escaneado = on_trabajo_escaneado
+        # Trabajo escaneado (folio, num_part, cantidad_total) o None hasta
+        # que el escaner entregue un QR con formato valido.
+        self.trabajo_escaneado = None
 
         self._autenticado = False
         self._abierto = True
+        # (operador_id, nombre, causa_id) del exito pendiente de notificar
+        # una vez cerrado el modal.
+        self._datos_exito = None
+        # (folio, num_part, cantidad_total) pendiente en modo qr_solo.
+        self._datos_qr = None
         self.cola = queue.Queue()
         self.selector_causas = None
 
@@ -146,7 +165,12 @@ class HuellaModal(QDialog):
         self._timer_cola.setInterval(60)
         self._timer_cola.timeout.connect(self._revisar_cola)
         self._timer_cola.start()
-        self._empezar()
+        if not self.qr_solo:
+            self._empezar()
+
+        # El escaner USB tipo teclado escribe aqui y manda Enter.
+        if self.pedir_trabajo:
+            self.input_qr.setFocus()
 
     # ------------------------------------------------------------------
     # Cierre (X / ESC)
@@ -154,7 +178,8 @@ class HuellaModal(QDialog):
 
     def closeEvent(self, evento):
         # La ventana de paro NO puede cerrarse (X/ESC) hasta autenticar.
-        if not self._autenticado:
+        # En modo qr_solo no hay huella: siempre se puede cerrar.
+        if not self._autenticado and not self.qr_solo:
             self._estado("No se puede cerrar. Identifica tu huella.", "error")
             evento.ignore()
             return
@@ -201,7 +226,25 @@ class HuellaModal(QDialog):
             self.selector_causas = SelectorCausas(self)
             layout.addWidget(self.selector_causas)
 
-        self.lbl_estado = QLabel("Coloca tu huella...", self)
+        if self.pedir_trabajo:
+            self.input_qr = QLineEdit(self)
+            self.input_qr.setPlaceholderText(
+                "Escanea el QR del trabajo (folio|num_part|cantidad_total)"
+            )
+            self.input_qr.returnPressed.connect(self._leer_qr)
+            layout.addWidget(self.input_qr)
+
+            self.lbl_trabajo = QLabel("Sin trabajo escaneado.", self)
+            aplicar_estado(self.lbl_trabajo, "procesando")
+            self.lbl_trabajo.setAlignment(Qt.AlignCenter)
+            self.lbl_trabajo.setWordWrap(True)
+            layout.addWidget(self.lbl_trabajo)
+
+        self.lbl_estado = QLabel(
+            "Escanea el QR del trabajo..." if self.qr_solo
+            else "Coloca tu huella...",
+            self,
+        )
         self.lbl_estado.setObjectName("EstadoInfo")
         self.lbl_estado.setAlignment(Qt.AlignCenter)
         self.lbl_estado.setWordWrap(True)
@@ -209,8 +252,83 @@ class HuellaModal(QDialog):
 
         if self.mostrar_cancelar:
             btn_cancelar = QPushButton("Cancelar", self)
+            # El escaner USB termina su lectura con Enter: sin esto,
+            # un Enter con el foco fuera del QLineEdit pulsa Cancelar
+            # y aborta el escaneo sin motivo.
+            btn_cancelar.setAutoDefault(False)
+            btn_cancelar.setDefault(False)
             btn_cancelar.clicked.connect(self._cancelar)
             layout.addWidget(btn_cancelar)
+
+    # ------------------------------------------------------------------
+    # Escaneo del QR de trabajo (escaner USB tipo teclado)
+    # ------------------------------------------------------------------
+
+    def _leer_qr(self):
+        """Procesa la linea que el escaner escribio (termina en Enter).
+
+        Formato exigido: folio|num_part|cantidad_total, con folio y cantidad
+        enteros positivos. Invalido -> error, limpia y vuelve a esperar.
+
+        Los escaneres USB tipo teclado NO mandan caracteres: mandan codigos
+        de tecla de una distribucion US y Windows los traduce segun la
+        disposicion activa. Con la PC en ES/Latinoamericano, el separador
+        '|' llega como ']' u otro simbolo vecino (p. ej. Steren): se aceptan
+        las variantes tipicas como separadores.
+        """
+        texto = self.input_qr.text().strip()
+        partes = [p.strip() for p in re.split(r"[|]", texto)]
+        if len(partes) != 3:
+            self._rechazar_qr(
+                "Formato invalido: se esperan 3 campos "
+                "folio|num_part|cantidad_total."
+            )
+            return
+        folio_txt, num_part, cantidad_txt = partes
+        try:
+            folio = int(folio_txt)
+        except ValueError:
+            self._rechazar_qr(f"Folio no numerico: '{folio_txt}'.")
+            return
+        try:
+            cantidad_total = int(cantidad_txt)
+        except ValueError:
+            self._rechazar_qr(f"Cantidad no numerica: '{cantidad_txt}'.")
+            return
+        if folio <= 0:
+            self._rechazar_qr("El folio debe ser mayor que cero.")
+            return
+        if not num_part:
+            self._rechazar_qr("El numero de parte viene vacio.")
+            return
+        if cantidad_total <= 0:
+            self._rechazar_qr("La cantidad total debe ser mayor que cero.")
+            return
+        self.trabajo_escaneado = (folio, num_part, cantidad_total)
+        self.lbl_trabajo.setText(
+            f"\u2713 Folio {folio} \u00b7 Parte {num_part} \u00b7 "
+            f"{cantidad_total} pzs"
+        )
+        aplicar_estado(self.lbl_trabajo, "exito")
+        self.input_qr.clear()
+        if self.qr_solo:
+            # Sin huella: el QR valido ES el exito del modal.
+            self._estado(f"\u2713 Trabajo {folio} cargado.", "exito")
+            self._datos_qr = (folio, num_part, cantidad_total)
+            QTimer.singleShot(250, self._cerrar_y_notificar_qr)
+            return
+        self._estado(
+            "Trabajo escaneado. Coloca tu huella para confirmar.", "procesando"
+        )
+
+    def _rechazar_qr(self, motivo):
+        log.warning("QR de trabajo rechazado: %s", motivo)
+        self.trabajo_escaneado = None
+        self.lbl_trabajo.setText("Sin trabajo escaneado.")
+        aplicar_estado(self.lbl_trabajo, "error")
+        self.input_qr.clear()
+        self._estado(f"{motivo} Escanea de nuevo.", "error")
+        self.input_qr.setFocus()
 
     # ------------------------------------------------------------------
     # Captura automatica
@@ -290,6 +408,18 @@ class HuellaModal(QDialog):
                     )
                     QTimer.singleShot(2500, self._reintentar)
                     return
+            if self.pedir_trabajo and self.trabajo_escaneado is None:
+                # Misma puerta que la causa: exigir el escaneo antes de
+                # aceptar (evita trabajos sin QR).
+                log.info("Huella %s autentica; falta escanear el trabajo.",
+                         nombre)
+                self._estado(
+                    "\u2713 Huella autenticada. Escanea el QR del trabajo y "
+                    "vuelve a colocar tu huella.", "error"
+                )
+                self.input_qr.setFocus()
+                QTimer.singleShot(2500, self._reintentar)
+                return
             if self.validador is not None:
                 valido, mensaje = self.validador(op_id, nombre, causa_id)
                 if not valido:
@@ -302,9 +432,13 @@ class HuellaModal(QDialog):
             self._autenticado = True
             self.huella.set_autenticado(True)
             self._estado(f"\u2713 {nombre} autenticado.", "exito")
-            if self.on_autenticado:
-                self.on_autenticado(op_id, nombre, causa_id)
-            QTimer.singleShot(300, self.accept)
+            # Guarda los datos y CIERRA primero: on_autenticado se invoca
+            # desde _cerrar_y_notificar, con este modal ya cerrado, para que
+            # los flujos que reaccionan abriendo OTRO modal (el QR del
+            # trabajo al arrancar la maquina, el reintento tras un folio
+            # rechazado, etc.) no queden apilados sobre este.
+            self._datos_exito = (op_id, nombre, causa_id)
+            QTimer.singleShot(300, self._cerrar_y_notificar)
         else:
             log.warning("Huella no reconocida; reintentando.")
             self._estado("Huella NO reconocida. Intenta de nuevo.", "error")
@@ -313,6 +447,27 @@ class HuellaModal(QDialog):
     def _reintentar(self):
         if not self._autenticado and self._abierto:
             threading.Thread(target=self._escanea, daemon=True).start()
+
+    def _cerrar_y_notificar(self):
+        """Cierra el modal y DESPUES invoca on_autenticado."""
+        self.accept()
+        if not self.on_autenticado or self._datos_exito is None:
+            return
+        op_id, nombre, causa_id = self._datos_exito
+        if self.pedir_trabajo:
+            folio, num_part, cantidad_total = self.trabajo_escaneado
+            self.on_autenticado(
+                op_id, nombre, causa_id,
+                folio, num_part, cantidad_total,
+            )
+        else:
+            self.on_autenticado(op_id, nombre, causa_id)
+
+    def _cerrar_y_notificar_qr(self):
+        """Modo qr_solo: cierra y notifica el trabajo escaneado."""
+        self.accept()
+        if self.on_trabajo_escaneado and self._datos_qr is not None:
+            self.on_trabajo_escaneado(*self._datos_qr)
 
     def _cancelar(self):
         if self.on_cancelar and not self._autenticado:

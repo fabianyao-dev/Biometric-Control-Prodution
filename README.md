@@ -6,7 +6,8 @@ máquina: el operador arranca y para la máquina con su huella, el sistema
 registra sesiones y cortes por turno, y deja un historial de paros con causa y
 autorización.
 
-- GUI en **PySide6 (Qt)** con tema oscuro propio (QSS + Fusion).
+- GUI en **PySide6 (Qt)** con tema propio (QSS + Fusion) en **oscuro y claro**,
+  intercambiables en caliente desde el botón ☀/🌙 del header.
 - Autenticación por huella (SDK **DigitalPersona**, Windows-only).
 - Control de relés y contador de cortes vía **Modbus TCP** (módulo Advantech),
   con **modo simulación** cuando no hay hardware.
@@ -39,6 +40,8 @@ autorización.
     (autorizar paro, ver sesiones, acceder a administración).
 - **Control de acceso por permiso**: Sesiones y Administración piden huella y
   verifican el permiso del rol contra la BD (no hay tuplas en `config.py`).
+- **Tema claro/oscuro**: botón ☀/🌙 en el header; el cambio es inmediato (sin
+  reiniciar) y se recuerda entre ejecuciones.
 
 ---
 
@@ -72,10 +75,17 @@ copy .env.example .env
 
 ---
 
-## Configuración (`.env`)
+## Configuración (`.env` / `config.json`)
 
 Copia `.env.example` a `.env` y ajusta los valores. El `.env` local está en
-`.gitignore`; **nunca se sube al repo**.
+`.gitignore`; **nunca se sube al repo**. En el `.exe` empaquetado estas MISMAS
+variables viven en **`config.json`**, dentro de la carpeta de datos
+persistente (ver [Empaquetado](#empaquetado-pc-fanless-pyinstaller)): en el
+primer arranque se genera automáticamente importando las claves del `.env` que
+existiera, y es el único archivo que la app consulta y puede escribir en
+caliente (p. ej. el tema). En desarrollo la configuración operativa sigue
+siendo el `.env`; el `config.json` local (gitignored) solo guarda preferencias
+de UI como el tema.
 
 | Variable | Descripción |
 | --- | --- |
@@ -256,12 +266,15 @@ Notas:
   empaquetan automáticamente usando el `.spec` (`--add-data`/`--icon`; la
   aplicación los carga con `sys._MEIPASS`).
 - **Datos persistentes fuera de la instalación**: en la primera ejecución el
-  `.exe` crea la carpeta `%USERPROFILE%\WTSControlData` y ahí coloca el `.env`,
-  `planta_corte.db` y `logs/`. Si ya existe un `.env`/`.db`/`logs` junto al
-  `.exe` (o en `_internal`), **se migran una sola vez** a esa carpeta (nunca
-  sobrescribe datos). Así, al actualizar solo se reemplaza la carpeta
-  `dist\WTSControl` y toda la información persiste sin reconfigurar nada.
-  Para otra ubicación: variable de entorno del sistema `BIOMETRICO_DIR_DATOS`.
+  `.exe` crea la carpeta `%USERPROFILE%\WTSControlData` y ahí coloca el
+  **`config.json`**, `planta_corte.db` y `logs/`. Si ya existe un
+  `.env`/`.db`/`logs` junto al `.exe` (o en `_internal`), **se migran una sola
+  vez** a esa carpeta (nunca sobrescribe datos): el `.env` se importa al
+  `config.json` (que desde entonces es el único archivo de configuración que
+  lee el `.exe`) y los datos a la carpeta persistente. Así, al actualizar solo
+  se reemplaza la carpeta `dist\WTSControl` y toda la información persiste sin
+  reconfigurar nada. Para otra ubicación: variable de entorno del sistema
+  `BIOMETRICO_DIR_DATOS`.
 - El `.env.example` se empaqueta (`--add-data ".env.example;."` en el `.spec`)
   como plantilla para instalaciones nuevas.
 - Verifica con `test\test_lector.py` y `test\test_fmd.py` antes del rollout.
@@ -385,12 +398,12 @@ tools/
 ├── hacer_manifest.py         Genera manifest.json + WTSControl-<version>.zip
 └── servidor_actualizaciones.py  HTTP estático de actualizaciones (stdlib)
 src/
-├── config.py                 Config central (.env, simulación, Modbus)
+├── config.py                 Config central (.env en dev, config.json en producción)
 ├── database.py               SQLite: operadores, sesiones, paros, causas, permisos
 ├── logging_config.py         Logs consola + archivo diario (rotación 30 días)
 ├── update.py                 Actualizaciones: version, manifest, descarga, updater
 ├── gui/
-│   ├── style.py              Tema oscuro propio (QSS + Fusion)
+│   ├── style.py              Tema oscuro/claro (paletas + QSS + Fusion)
 │   ├── inicio_view.py        Vista principal (máquina de estados, paros, 1.ª pieza)
 │   ├── sessions_view.py      Historial de sesiones y paros
 │   ├── admin_view.py         CRUD operadores/causas/roles/permisos + pestaña Sistema

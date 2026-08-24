@@ -63,6 +63,7 @@ from src.database import (
     roles_con_permiso,
     sesion_activa_actual,
 )
+from src.gui import style
 from src.gui.style import COLOR_ACCENTE, aplicar_estado
 from src.gui.util import preguntar_texto
 
@@ -117,11 +118,11 @@ class CheckboxListDelegate(QStyledItemDelegate):
         rect = option.rect
         habilitado = bool(option.state & QStyle.State_Enabled)
 
-        # Fondo de la fila: seleccion o neutro.
+        # Fondo de la fila: seleccion o neutro. Colores del tema ACTIVO.
         if habilitado and option.state & QStyle.State_Selected:
             painter.fillRect(rect, QColor(COLOR_ACCENTE))
         else:
-            painter.fillRect(rect, QColor("#1c232e"))
+            painter.fillRect(rect, QColor(style.color("superficie")))
 
         # Cuadro del checkbox.
         alto = rect.height()
@@ -130,15 +131,15 @@ class CheckboxListDelegate(QStyledItemDelegate):
             int(index.data(Qt.CheckStateRole) or 0) == Qt.CheckState.Checked.value
         )
         if habilitado:
-            borde = QColor("#6b7686")
-            fondo = QColor("#232b39")
+            borde = QColor(style.color("deshabilitado_texto"))
+            fondo = QColor(style.color("elevada"))
             relleno = QColor(COLOR_ACCENTE)
-            palomita = QColor("#ffffff")
+            palomita = QColor(style.color("blanco"))
         else:
-            borde = QColor("#3a4454")
-            fondo = QColor("#1a2029")
-            relleno = QColor("#3a4454")
-            palomita = QColor("#6b7686")
+            borde = QColor(style.color("deshabilitado_bg"))
+            fondo = QColor(style.color("lista_disabled_bg"))
+            relleno = QColor(style.color("deshabilitado_bg"))
+            palomita = QColor(style.color("deshabilitado_texto"))
         painter.setPen(QPen(relleno if marcado else borde, 2))
         painter.setBrush(relleno if marcado else fondo)
         painter.drawRoundedRect(cb, 5, 5)
@@ -159,7 +160,9 @@ class CheckboxListDelegate(QStyledItemDelegate):
         # Texto de la descripcion.
         texto = index.data(Qt.DisplayRole)
         tr = QRectF(rect.adjusted(38, 0, -8, 0))
-        painter.setPen(QColor("#9aa5b3" if not habilitado else "#e7eaf0"))
+        painter.setPen(QColor(
+            style.color("deshabilitado_texto" if not habilitado else "texto")
+        ))
         painter.drawText(
             tr,
             int(Qt.AlignVCenter | Qt.AlignLeft),

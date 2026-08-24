@@ -15,8 +15,8 @@ clic fuera o con ESC (comportamiento nativo de Qt.Popup).
 
 import logging
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QFrame,
@@ -27,13 +27,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.gui.style import (
-    COLOR_ADVERTENCIA,
-    COLOR_BORDE,
-    COLOR_FONDO,
-    COLOR_TEXTO_SECUNDARIO,
-    aplicar_estilo_boton,
-)
+from src.gui import style
+from src.gui.style import aplicar_estilo_boton
+from src.gui.util import icono_svg
 
 log = logging.getLogger(__name__)
 
@@ -52,20 +48,6 @@ SVG_OK = """\
 
 # Aviso "todo en orden" cuando el panel se abre sin advertencias.
 AVISO_VACIO = "Todos los sistemas en orden."
-
-
-def _icono_svg(plantilla, color, tamano=20):
-    """Convierte un SVG monocolor en un QIcon listo para botones."""
-    renderer = QSvgRenderer(plantilla.replace("{color}", color).encode("utf-8"))
-    pixmap = QPixmap(tamano, tamano)
-    pixmap.fill(Qt.transparent)
-    p = QPainter(pixmap)
-    p.setRenderHint(QPainter.Antialiasing)
-    renderer.render(p, QRect(0, 0, tamano, tamano))
-    p.end()
-    icono = QIcon()
-    icono.addPixmap(pixmap)
-    return icono
 
 
 class _IconoAdvertencia(QWidget):
@@ -124,7 +106,7 @@ class PanelAdvertencias(QFrame):
         lay = QHBoxLayout(fila)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
-        lay.addWidget(_IconoAdvertencia(COLOR_ADVERTENCIA, fila),
+        lay.addWidget(_IconoAdvertencia(style.color("advertencia"), fila),
                       alignment=Qt.AlignTop)
 
         caja = QVBoxLayout()
@@ -162,11 +144,14 @@ class IndicadorAdvertencias(QPushButton):
     def set_advertencias(self, avisos):
         self._avisos = list(avisos)
         if self._avisos:
-            self.setIcon(_icono_svg(SVG_ADVERTENCIA, COLOR_FONDO))
+            # Colores del tema ACTIVO (consultados aqui para que el cambio
+            # de tema regenere los iconos en el siguiente refresco).
+            self.setIcon(icono_svg(SVG_ADVERTENCIA,
+                                    style.color("sobre_advertencia")))
             self.setText(f" {len(self._avisos)}")
             aplicar_estilo_boton(self, "AvisoActivo")
         else:
-            self.setIcon(_icono_svg(SVG_OK, COLOR_TEXTO_SECUNDARIO))
+            self.setIcon(icono_svg(SVG_OK, style.color("texto_sec")))
             self.setText("")
             aplicar_estilo_boton(self, "Aviso")
         if self._panel is not None and self._panel.isVisible():

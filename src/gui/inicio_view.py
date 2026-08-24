@@ -27,6 +27,22 @@ cortes de la ventana detectada y posteriores se INCORPORAN al total de la
 sesion (lo excluido antes queda como piezas de prueba descartadas). Con "No"
 (o sin autorizacion) todo sigue fuera del conteo y se pierde al salir del modo.
 
+TRABAJOS POR QR: al abrir la sesion la maquina entra AUTOMATICAMENTE en modo
+Primera pieza (estado "ESPERA TRABAJO") y se ofrece un modal CANCELABLE que
+pide el escaneo de un QR `folio|num_part|cantidad_total` (escaner USB tipo
+teclado) + huella. El operador manda: puede cancelar para ajustar la maquina
+y hacer piezas de prueba (el modo suprime el auto-paro por inactividad, por
+eso sigue existiendo) y escanear cuando este listo con ESCANEAR TRABAJO o el
+switch manual. Al aceptar se registra/retoma el trabajo en la tabla
+`trabajos` (folio unico: re-escanear uno Abierto retoma su conteo; uno
+Cerrado se rechaza), se salen las piezas de prueba (mismo descarte del modo)
+y los cortes empiezan a contar para ese trabajo (total - baseline). El
+contador muestra Total de la sesion y `NUM_PART: X/cantidad`. 'Cerrado' SOLO
+al alcanzar la cantidad_total: ahi suena la alarma, se guarda la cantidad
+REAL y vuelve a Primera pieza para el siguiente QR. FINALIZAR TRABAJO guarda
+el parcial SIN cerrar (queda Abierto/retomable); lo mismo al cerrar sesion.
+Tras un apagon se recupera el trabajo Abierto en curso desde su checkpoint.
+
 La sesion se cuenta desde que la maquina arranca (LISTA) hasta que se
 detiene; no hay boton de mantenimiento de sesion.
 
@@ -46,6 +62,7 @@ from collections import deque
 
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -58,18 +75,24 @@ from PySide6.QtWidgets import (
 from src import config
 from src.database import (
     abrir_sesion,
+    abrir_trabajo,
+    actualizar_cantidad_cortada,
     actualizar_cortes_sesion,
     cerrar_sesion,
+    completar_trabajo,
     finalizar_paro,
     iniciar_paro,
     listar_causas_paro,
     obtener_rol_operador,
     obtener_sesion_interrumpida,
+    obtener_trabajo_abierto,
     paro_en_curso,
+    pausar_trabajo,
     roles_con_permiso,
     rol_tiene_permiso_operador,
 )
 from src.gui.huella_modal import HuellaModal
+from src.gui.marcador import DisplaySieteSegmentos
 from src.gui.style import aplicar_estado, aplicar_estilo_boton
 from src.gui.switch import Switch
 
@@ -102,6 +125,12 @@ class InicioView(QWidget):
         # Cortes excluidos ANTES del inicio de la ventana detectada: son
         # piezas de prueba y NO se incorporan al confirmar la corrida.
         self._excluidos_previos_rafaga = 0
+        # Trabajo abierto (fila de la tabla `trabajos`, folio unico) y el
+        # valor de cortes_totales() al asignarlo: los cortes del trabajo se
+        # calculan como total - baseline. Con folio re-escanado y Abierto, el
+        # baseline se ajusta para RETOMAR desde `cantidad_cortada`.
+        self._trabajo = None
+        self._baseline_trabajo = 0
 
         self._crear_interfaz()
         self._revisar_sesion_interrumpida()
@@ -123,10 +152,31 @@ class InicioView(QWidget):
         self.lbl_operador.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_operador, alignment=Qt.AlignHCenter)
 
-        self.lbl_cortes = QLabel("Cortes: 0", self)
-        self.lbl_cortes.setObjectName("Big")
+        # Tablero de contadores (marcador LED de planta): el display rojo
+        # de 7 segmentos muestra DESDE EL INICIO el contador del trabajo
+        # (piezas hechas de la orden); sin trabajo muestra guiones. El total
+        # de la sesion y el setup van en la linea inferior ambar.
+        self.tablero = QFrame(self)
+        self.tablero.setObjectName("Tablero")
+        tab = QVBoxLayout(self.tablero)
+        tab.setContentsMargins(22, 10, 22, 12)
+        tab.setSpacing(4)
+
+        self.lbl_cortes = QLabel("SIN TRABAJO", self.tablero)
+        self.lbl_cortes.setObjectName("TableroEtiqueta")
         self.lbl_cortes.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.lbl_cortes, alignment=Qt.AlignHCenter)
+        tab.addWidget(self.lbl_cortes)
+
+        self.display_trabajo = DisplaySieteSegmentos(self.tablero, alto=84)
+        self.display_trabajo.set_valor("----")
+        tab.addWidget(self.display_trabajo, alignment=Qt.AlignHCenter)
+
+        self.lbl_cortes_trabajo = QLabel("", self.tablero)
+        self.lbl_cortes_trabajo.setObjectName("TableroInfo")
+        self.lbl_cortes_trabajo.setAlignment(Qt.AlignCenter)
+        tab.addWidget(self.lbl_cortes_trabajo)
+
+        layout.addWidget(self.tablero, alignment=Qt.AlignHCenter)
 
         fila_estado = QWidget(self)
         h = QHBoxLayout(fila_estado)
@@ -158,6 +208,22 @@ class InicioView(QWidget):
         self.btn_paro.setMinimumWidth(180)
         self.btn_paro.clicked.connect(self._boton_paro)
         layout.addWidget(self.btn_paro, alignment=Qt.AlignHCenter)
+
+        # --- Trabajos: cerrar el trabajo actual (guarda el conteo) o
+        # reabrir el escaneo del QR si se cancelo ---
+        self.btn_finalizar_trabajo = QPushButton("FINALIZAR TRABAJO", self)
+        self.btn_finalizar_trabajo.setMinimumWidth(180)
+        self.btn_finalizar_trabajo.clicked.connect(
+            self._boton_finalizar_trabajo
+        )
+        layout.addWidget(self.btn_finalizar_trabajo, alignment=Qt.AlignHCenter)
+        self.btn_finalizar_trabajo.setVisible(False)
+
+        self.btn_escanear = QPushButton("ESCANEAR TRABAJO", self)
+        self.btn_escanear.setMinimumWidth(180)
+        self.btn_escanear.clicked.connect(self._boton_escanear_trabajo)
+        layout.addWidget(self.btn_escanear, alignment=Qt.AlignHCenter)
+        self.btn_escanear.setVisible(False)
 
         self._fila_switch = QWidget(self)
         fila_h = QHBoxLayout(self._fila_switch)
@@ -217,6 +283,7 @@ class InicioView(QWidget):
         total = self.controlador.cortes_totales()
         if self.sesion_id is not None:
             self._finalizar_primera_pieza_si_activa(self.operador_id)
+            self._cerrar_trabajo_por_cierre_sesion()
             cerrar_sesion(self.sesion_id, total)
         self.controlador.reset_conteo()
         self.sesion_id = None
@@ -262,9 +329,13 @@ class InicioView(QWidget):
         self._en_paro = False
         self._paro_idle_triggado = False
         self._refrescar_operador()
-        self._refrescar_estado_maquina()
         self._estado(f"Maquina lista. Operador: {nombre}.", "exito")
         log.info("Sesion %s abierta para %s", self.sesion_id, nombre)
+        # Flujo de trabajos: la sesion SIEMPRE arranca en modo Primera pieza
+        # (setup/pruebas sin auto-paro) esperando que el operador escanee el
+        # QR del trabajo cuando este listo.
+        self._entrar_primera_pieza(nombre)
+        self._abrir_modal_trabajo()
 
     # ------------------------------------------------------------------
     # Recuperacion de sesion/paro tras cierre abrupto
@@ -287,6 +358,19 @@ class InicioView(QWidget):
         self.operador_id = sesion["operador_id"]
         self.operador_nombre = sesion["nombre"]
         self.controlador.establecer_conteo(sesion["total_cortes"] or 0)
+        # Trabajo abierto de la sesion interrumpida: se retoma desde su
+        # ultimo checkpoint. El baseline retrocede lo ya cortado para que el
+        # conteo siga sumando AL MISMO trabajo al reanudar.
+        trabajo = obtener_trabajo_abierto(self.sesion_id)
+        if trabajo is not None:
+            self._trabajo = trabajo
+            self._baseline_trabajo = (
+                (sesion["total_cortes"] or 0)
+                - (trabajo["cantidad_cortada"] or 0)
+            )
+            log.info("Trabajo %s (%s) recuperado con %s/%s piezas",
+                     trabajo["folio"], trabajo["num_part"],
+                     trabajo["cantidad_cortada"], trabajo["cantidad_total"])
         self._en_paro = True
         self._paro_idle_triggado = True
         # Paro en curso de la sesion; si no existia, se formaliza la detencion.
@@ -457,19 +541,44 @@ class InicioView(QWidget):
     # ------------------------------------------------------------------
 
     def _refrescar_contador(self):
-        if self._primera_pieza:
-            # Durante el modo se muestran SOLO los cortes temporales; el
-            # total de la sesion queda congelado (no entra a la BD).
-            self.lbl_cortes.setText(
-                f"Cortes (temporales): {self.controlador.cortes_excluidos()}"
-            )
-        else:
-            self.lbl_cortes.setText(f"Cortes: {self.controlador.cortes_totales()}")
+        self._refrescar_labels_cortes()
         self._verificar_rafaga_arranque()
+        self._verificar_meta_trabajo()
         self._refrescar_estado_maquina()
         self._refrescar_enlace_modbus()
         self._verificar_inactividad()
         QTimer.singleShot(config.REFRESCO_CONTADOR_MS, self._refrescar_contador)
+
+    def _refrescar_labels_cortes(self):
+        """Tablero: el LED grande es el contador del TRABAJO (piezas hechas
+        de la orden, ancho fijo a 4 digitos); la etiqueta lleva folio y
+        meta; el total de sesion y el setup van en la linea inferior."""
+        total = self.controlador.cortes_totales()
+        setup = self.controlador.cortes_excluidos()
+        if self._trabajo is None:
+            # Espera de trabajo: guiones en el display y totales abajo para
+            # que el operador vea la actividad del modo Primera pieza.
+            self.lbl_cortes.setText("SIN TRABAJO")
+            self.display_trabajo.set_valor("----")
+            self.lbl_cortes_trabajo.setText(
+                f"TOTAL {total}  |  SETUP {setup}"
+            )
+            return
+        # Nunca se muestra mas alla de la meta (aunque un delta tarde llegue
+        # a pasarla, el trabajo ya se cerro en la verificacion de meta).
+        hecho = min(self._cortes_trabajo(), self._trabajo["cantidad_total"])
+        self.lbl_cortes.setText(
+            f"TRABAJO {self._trabajo['folio']} - "
+            f"{self._trabajo['num_part']}  |  META "
+            f"{self._trabajo['cantidad_total']}"
+        )
+        self.display_trabajo.set_valor(f"{hecho:04d}")
+        texto = f"TOTAL SESION {total}"
+        if self._primera_pieza:
+            # Trabajo CARGADO en espera: ademas se ven los cortes de setup
+            # que se descartan al salir del modo.
+            texto += f"  |  SETUP {setup}"
+        self.lbl_cortes_trabajo.setText(texto)
 
     def _refrescar_enlace_modbus(self):
         """Alerta visual si el enlace Modbus se cae (sin crashear la UI).
@@ -499,6 +608,10 @@ class InicioView(QWidget):
         """
         if self.sesion_id is not None:
             actualizar_cortes_sesion(self.sesion_id, self.controlador.cortes_totales())
+        if self._trabajo is not None:
+            actualizar_cantidad_cortada(
+                self._trabajo["folio"], self._cortes_trabajo()
+            )
         QTimer.singleShot(
             config.CORTES_GUARDAR_INTERVALO_MS, self._checkpoint_cortes
         )
@@ -556,8 +669,24 @@ class InicioView(QWidget):
         auto-paro por inactividad (no se cuenta el minuto de espera de corte)
         y el evento se registra como un paro con la causa fija 'Primera
         pieza'. Al finalizar, la gracia del auto-paro se reinicia.
+
+        Con un trabajo CARGADO en espera (modo activo), apagar el switch ES
+        la salida del modo: pide huella y al salir arranca el conteo del
+        folio. Con un trabajo EN PRODUCCION (fuera del modo) encender el
+        switch sigue bloqueado; este guard cubre toggles en vuelo.
         """
         if self._modal_abierto or self._ajustando_switch:
+            return
+        if activo and self._primera_pieza:
+            self._fijar_switch(True)
+            return
+        if (self._trabajo is not None and activo
+                and not self._primera_pieza):
+            self._fijar_switch(False)
+            self._estado(
+                f"Hay un trabajo abierto ({self._trabajo['folio']}); usa "
+                "FINALIZAR TRABAJO para cambiar de modo.", "error"
+            )
             return
         self._abrir_huella_primera_pieza(activo)
 
@@ -612,22 +741,24 @@ class InicioView(QWidget):
         )
 
     def _primera_pieza_iniciada(self, id_operador, nombre, causa_id=None):
-        self._primera_pieza_paro_id = iniciar_paro(self.sesion_id)
-        self._primera_pieza = True
-        # Los cortes de este modo NO cuentan para la sesion: se acumulan solo
-        # en memoria (label "Cortes (temporales)") y se pierden al salir.
-        self.controlador.suspender_conteo()
-        self._fijar_switch(True)
-        self._refrescar_estado_maquina()
+        self._entrar_primera_pieza(nombre)
         self._estado(f"Primera pieza iniciada por {nombre}.", "exito")
-        log.info("Primera pieza iniciada por %s (paro %s)",
-                 nombre, self._primera_pieza_paro_id)
 
     def _primera_pieza_finalizada(self, id_operador, nombre, causa_id=None):
         self._finalizar_primera_pieza_si_activa(id_operador)
         self._fijar_switch(False)
         self._refrescar_estado_maquina()
-        self._estado(f"Primera pieza finalizada por {nombre}.", "exito")
+        if self._trabajo is not None:
+            # Salida del modo con trabajo cargado: aqui ARRANCA el conteo
+            # del folio (los cortes de setup quedaron descartados).
+            self._estado(
+                f"Contando para el trabajo {self._trabajo['folio']} "
+                f"({self._trabajo['num_part']}).", "exito"
+            )
+            log.info("Salida de Primera pieza por %s: inicia conteo del "
+                     "trabajo %s", nombre, self._trabajo["folio"])
+        else:
+            self._estado(f"Primera pieza finalizada por {nombre}.", "exito")
 
     def _finalizar_primera_pieza_si_activa(self, id_operador):
         """Cierra el paro 'Primera pieza' en curso DESCARTANDO sus cortes."""
@@ -680,6 +811,206 @@ class InicioView(QWidget):
         return None
 
     # ------------------------------------------------------------------
+    # Trabajos (QR folio|num_part|cantidad_total)
+    # ------------------------------------------------------------------
+
+    def _entrar_primera_pieza(self, nombre):
+        """Entra al modo Primera pieza (espera de trabajo o piezas de setup).
+
+        Registra el paro con causa 'Primera pieza' y suspende el conteo: los
+        cortes van a excluidos (solo memoria) hasta que un trabajo valido se
+        asigne (los descarta como piezas de prueba) o el switch vuelva a OFF.
+        """
+        self._primera_pieza_paro_id = iniciar_paro(self.sesion_id)
+        self._primera_pieza = True
+        # Los cortes de este modo NO cuentan para la sesion ni para ningun
+        # trabajo: se acumulan solo en memoria y se pierden al salir.
+        self.controlador.suspender_conteo()
+        self._fijar_switch(True)
+        self._refrescar_estado_maquina()
+        log.info("Primera pieza iniciada por %s (paro %s)",
+                 nombre, self._primera_pieza_paro_id)
+
+    def _abrir_modal_trabajo(self):
+        """Modal QR + huella que CARGA el trabajo estando en Primera pieza.
+
+        El QR trae los datos y la huella CONFIRMA la carga; el modal no
+        arranca el conteo ni saca la maquina del modo: sigue en Primera
+        pieza (cortes de setup excluidos, sin auto-paro) mostrando el
+        folio/parte. La SALIDA del modo (switch + huella) es lo que empieza
+        a contar para el folio.
+        """
+        if self.sesion_id is None:
+            return
+        self._modal_abierto = True
+        try:
+            modal = HuellaModal(
+                self.controller,
+                self.biometrico,
+                titulo="TRABAJO NUEVO",
+                mensaje=(
+                    "Escanea el QR del trabajo "
+                    "(folio|num_part|cantidad_total) y confirma con tu "
+                    "huella. El conteo inicia al salir del modo Primera "
+                    "pieza."
+                ),
+                validador=self._validar_autorizacion_paro,
+                pedir_trabajo=True,
+                mostrar_cancelar=True,
+                cerrable=True,
+                on_autenticado=self._trabajo_cargado,
+                on_cancelar=lambda: self._estado(
+                    "Escaneo cancelado: la maquina sigue en modo Primera "
+                    "pieza, los cortes no cuentan.", "info"
+                ),
+            )
+            modal.exec()
+        finally:
+            self._modal_abierto = False
+
+    def _trabajo_cargado(self, id_operador, nombre, causa_id,
+                         folio, num_part, cantidad_total):
+        """QR + huella aceptados: registra/retoma el folio EN ESPERA.
+
+        NO sale del modo Primera pieza: el conteo del trabajo arranca hasta
+        que el operador autorice la salida del modo (switch + huella).
+        """
+        ok, res = abrir_trabajo(folio, self.sesion_id, num_part,
+                                cantidad_total)
+        if not ok:
+            log.warning("Trabajo %s rechazado: %s", folio, res)
+            QMessageBox.warning(self.controller, "Trabajo rechazado", res)
+            self._abrir_modal_trabajo()
+            return
+        self._trabajo = res
+        guardada = res["cantidad_cortada"] or 0
+        # Baseline fijo desde la carga: los cortes de setup siguen
+        # excluidos (total congelado), asi que `_cortes_trabajo()` muestra
+        # lo ya hecho del folio y al salir del modo empieza a sumar.
+        self._baseline_trabajo = self.controlador.cortes_totales() - guardada
+        self._refrescar_labels_cortes()
+        self._estado(
+            f"Trabajo {res['folio']} ({res['num_part']}) cargado por "
+            f"{nombre} ({guardada}/{res['cantidad_total']} ya hechas). Sal "
+            "del modo Primera pieza con tu huella para empezar a contar.",
+            "exito",
+        )
+        log.info("Trabajo %s (%s) cargado en espera por %s a la sesion %s "
+                 "(retoma %s/%s)", res["folio"], res["num_part"], nombre,
+                 self.sesion_id, guardada, res["cantidad_total"])
+
+    def _cortes_trabajo(self):
+        """Cortes hechos DENTRO del trabajo abierto (total - baseline)."""
+        if self._trabajo is None:
+            return 0
+        return max(
+            self.controlador.cortes_totales() - self._baseline_trabajo, 0
+        )
+
+    def _verificar_meta_trabajo(self):
+        """Meta alcanzada: CIERRA el trabajo ('Cerrado') y pide el siguiente.
+
+        Llamado desde `_refrescar_contador` (hilo principal). Solo aqui un
+        trabajo pasa a 'Cerrado': guarda la cantidad REAL cortada aunque se
+        haya pasado (p. ej. 202/200), suena la alarma, re-entra a Primera
+        pieza y abre el modal del siguiente QR (cancelable: el operador
+        puede seguir ajustando antes de escanear).
+        """
+        if self._trabajo is None or self._modal_abierto or self._en_paro:
+            return
+        if self._cortes_trabajo() < self._trabajo["cantidad_total"]:
+            return
+        folio = self._trabajo["folio"]
+        meta = self._trabajo["cantidad_total"]
+        real = self._cortes_trabajo()
+        completar_trabajo(folio, real)
+        self._trabajo = None
+        self._baseline_trabajo = 0
+        log.info("Trabajo %s COMPLETADO (Cerrado): %s/%s", folio, real, meta)
+        self._sonar_alarma()
+        self._entrar_primera_pieza("meta alcanzada")
+        self._estado(f"Trabajo {folio} completado ({real}/{meta}). "
+                     "Escanea el siguiente trabajo.", "procesando")
+        self._abrir_modal_trabajo()
+
+    def _boton_finalizar_trabajo(self):
+        """FINALIZAR TRABAJO: guarda el conteo parcial y pasa al siguiente."""
+        if self._modal_abierto or self.sesion_id is None:
+            return
+        if self._trabajo is None:
+            self._estado("No hay trabajo abierto que finalizar.", "error")
+            return
+        modal = HuellaModal(
+            self.controller,
+            self.biometrico,
+            titulo="FINALIZAR TRABAJO",
+            mensaje=(
+                f"Se guardara el trabajo {self._trabajo['folio']} "
+                f"({self._trabajo['num_part']}) con "
+                f"{self._cortes_trabajo()} piezas. Coloca tu huella."
+            ),
+            validador=self._validar_autorizacion_paro,
+            on_autenticado=self._trabajo_finalizado_manual,
+            on_cancelar=lambda: self._estado(
+                "Finalizacion cancelada; el trabajo sigue abierto.", "info"
+            ),
+            mostrar_cancelar=True,
+        )
+        modal.exec()
+
+    def _trabajo_finalizado_manual(self, id_operador, nombre, causa_id=None):
+        """FINALIZAR TRABAJO: guarda el parcial SIN cerrar el trabajo.
+
+        'Cerrado' es SOLO para trabajos que alcanzan su cantidad_total; un
+        parcial queda 'Abierto' (con fecha_fin) y se retoma re-escaneando el
+        mismo folio desde lo ya cortado.
+        """
+        folio = self._trabajo["folio"]
+        real = self._cortes_trabajo()
+        pausar_trabajo(folio, real)
+        self._trabajo = None
+        self._baseline_trabajo = 0
+        log.info("Trabajo %s pausado por %s con %s piezas (sigue Abierto)",
+                 folio, nombre, real)
+        # De vuelta a Primera pieza esperando el siguiente QR.
+        self._entrar_primera_pieza(nombre)
+        self._estado(
+            f"Trabajo {folio} guardado por {nombre} con {real} piezas "
+            "(queda Abierto; re-escanear para continuar).",
+            "exito",
+        )
+        self._abrir_modal_trabajo()
+
+    def _boton_escanear_trabajo(self):
+        """Reabre el modal QR + huella cuando no hay trabajo abierto."""
+        if self._modal_abierto or self.sesion_id is None:
+            return
+        if self._trabajo is not None:
+            self._estado(
+                f"El trabajo {self._trabajo['folio']} sigue abierto; "
+                "finalizalo antes de escanear otro.", "error"
+            )
+            return
+        self._abrir_modal_trabajo()
+
+    def _cerrar_trabajo_por_cierre_sesion(self):
+        """Guarda el parcial del trabajo abierto al apagar/cerrar sesion.
+
+        El trabajo NO se cierra (solo la meta lo cierra): queda 'Abierto'
+        con su parcial y puede retomarse re-escaneando el folio en cualquier
+        sesion futura.
+        """
+        if self._trabajo is None:
+            return
+        folio = self._trabajo["folio"]
+        real = self._cortes_trabajo()
+        pausar_trabajo(folio, real)
+        self._trabajo = None
+        self._baseline_trabajo = 0
+        log.info("Trabajo %s con parcial guardado al cerrar la sesion "
+                 "(%s piezas, sigue Abierto)", folio, real)
+
+    # ------------------------------------------------------------------
     # Seguro anti-corrida durante "Primera pieza"
     # ------------------------------------------------------------------
 
@@ -730,11 +1061,15 @@ class InicioView(QWidget):
         log.warning("Rafaga en Primera pieza: %s cortes en %s s "
                     "(%s previos quedan como prueba)",
                     en_ventana, ventana, self._excluidos_previos_rafaga)
-        self._sonar_alarma_rafaga()
+        self._sonar_alarma()
         self._preguntar_corrida(en_ventana, ventana)
 
-    def _sonar_alarma_rafaga(self):
-        """Patron de beeps de atencion en hilo aparte (no bloquea la GUI)."""
+    def _sonar_alarma(self):
+        """Patron de beeps de atencion en hilo aparte (no bloquea la GUI).
+
+        Se usa para el seguro anti-corrida y para avisar que un trabajo
+        alcanzo su cantidad total.
+        """
 
         def _sonar():
             try:
@@ -835,7 +1170,7 @@ class InicioView(QWidget):
             )
             aplicar_estilo_boton(self.btn_poder, "Power")
         elif self._primera_pieza:
-            self.lbl_estado_maquina.setText("Maquina: LISTA - PRIMERA PIEZA")
+            self.lbl_estado_maquina.setText("Maquina: ESPERA TRABAJO")
             aplicar_estado(self.lbl_estado_maquina, "procesando")
             self._icono_estado(estilo, QStyle.StandardPixmap.SP_MediaPlay)
             self.btn_poder.setIcon(
@@ -853,6 +1188,17 @@ class InicioView(QWidget):
         self._fila_switch.setVisible(
             self.sesion_id is not None and not self._en_paro
         )
+        # Botones de trabajo: finalizar solo hay algo abierto; escanear solo
+        # si no hay trabajo cargado. El switch manual queda habilitado con
+        # sesion activa: apagarlo con un trabajo EN ESPERA es la salida del
+        # modo (huella) que arranca el conteo.
+        self.btn_finalizar_trabajo.setVisible(
+            self.sesion_id is not None and self._trabajo is not None
+        )
+        self.btn_escanear.setVisible(
+            self.sesion_id is not None and self._trabajo is None
+        )
+        self.switch_primera_pieza.setEnabled(self.sesion_id is not None)
 
     def _icono_estado(self, estilo, sp):
         self.icono_estado.setPixmap(estilo.standardIcon(sp).pixmap(22, 22))

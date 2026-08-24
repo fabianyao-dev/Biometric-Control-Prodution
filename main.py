@@ -48,12 +48,36 @@ from src.gui.huella_modal import HuellaModal
 from src.gui.inicio_view import InicioView
 from src.gui.notificaciones import IndicadorAdvertencias
 from src.gui.sessions_view import SessionsView
-from src.gui.style import aplicar_estilo
+from src.gui import style
+from src.gui.util import icono_svg
 from src.hardware.biometric_service import BiometricService
 from src.hardware.modbus_controller import ModbusController
 from src.hardware.simulacion_controller import SimulacionController
 
 log = logging.getLogger(__name__)
+
+# Icono "light_mode" de Material Symbols (path oficial,
+# google/material-design-icons): sol, para pasar a tema claro.
+SVG_TEMA_CLARO = """\
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="22" height="22">\
+<path fill="{color}" d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 \
+13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 \
+1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 \
+1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 \
+.45-1 1zM5.99 4.58c-.39-.39-1.03-.39-1.41 0-.39.39-.39 1.03 0 1.41l1.06 1.06c.39.39 \
+1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37c-.39-.39-1.03-.39-1.41 \
+0-.39.39-.39 1.03 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0 .39-.39.39-1.03 0-1.41l-1.06-1.06zm1.06-10.96c.39-.39 \
+.39-1.03 0-1.41-.39-.39-1.03-.39-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 \
+1.41 0l1.06-1.06zM7.05 18.36c.39-.39.39-1.03 0-1.41-.39-.39-1.03-.39-1.41 \
+0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06z"/></svg>
+"""
+
+# Icono "dark_mode" de Material Symbols: luna, para pasar a tema oscuro.
+SVG_TEMA_OSCURO = """\
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="22" height="22">\
+<path fill="{color}" d="M12.01 12c0-3.57 2.2-6.62 5.31-7.87.89-.36.75-1.69-.19-1.9-1.56-.35-3.23-.33-4.88.06C8.01 \
+3.16 4.79 6.54 4.11 10.8c-.98 6.09 3.76 11.44 9.81 11.44 1.85 0 3.66-.51 5.23-1.47.82-.5.67-1.77-.29-2.05-4.02-1.17-6.85-4.9-6.85-9.22z"/></svg>
+"""
 
 def _ruta_recurso(nombre):
     """Ruta a un recurso empaquetado. Con PyInstaller los assets viven en
@@ -150,10 +174,47 @@ class App(QMainWindow):
         self.btn_advertencias = IndicadorAdvertencias(self.header)
         lay.addWidget(self.btn_advertencias)
 
+        # Tema claro/oscuro: cambia en caliente y persiste en config.json.
+        self.btn_tema = QPushButton(self.header)
+        self.btn_tema.setObjectName("Nav")
+        self.btn_tema.setFixedWidth(44)
+        self.btn_tema.clicked.connect(self._alternar_tema)
+        self._refrescar_boton_tema()
+        lay.addWidget(self.btn_tema)
+
         btn_salir = QPushButton("Salir", self.header)
         btn_salir.setObjectName("Nav")
         btn_salir.clicked.connect(self._salir)
         lay.addWidget(btn_salir)
+
+    # ------------------------------------------------------------------
+    # Tema claro/oscuro
+    # ------------------------------------------------------------------
+
+    def _alternar_tema(self):
+        nuevo = "claro" if style.tema_activo == "oscuro" else "oscuro"
+        style.cambiar_tema(QApplication.instance(), nuevo)
+        try:
+            config.guardar_config("tema", nuevo)
+        except Exception:  # noqa: BLE001 - el tema no debe tumbar la app
+            log.warning("No se pudo guardar el tema en config.json",
+                        exc_info=True)
+        self._refrescar_boton_tema()
+        # Regenera de inmediato los iconos SVG del indicador de avisos con
+        # los colores del tema nuevo (si no, esperarian al siguiente poll).
+        self._revisar_avisos()
+
+    def _refrescar_boton_tema(self):
+        # Iconos SVG (Material Symbols), nunca emojis: el glifo Unicode sale
+        # distinto segun la fuente del sistema.
+        if style.tema_activo == "oscuro":
+            self.btn_tema.setIcon(icono_svg(SVG_TEMA_CLARO,
+                                            style.color("texto_sec")))
+            self.btn_tema.setToolTip("Cambiar a tema claro")
+        else:
+            self.btn_tema.setIcon(icono_svg(SVG_TEMA_OSCURO,
+                                            style.color("texto")))
+            self.btn_tema.setToolTip("Cambiar a tema oscuro")
 
     # ------------------------------------------------------------------
     # Advertencias del sistema (lector, HAL, operadores)
@@ -320,7 +381,7 @@ class App(QMainWindow):
 
         self.header = QFrame(self._central)
         self.header.setObjectName("Header")
-        self.header.setFixedHeight(56)
+        self.header.setFixedHeight(64)
         self._body.addWidget(self.header)
 
         self._cuerpo = QWidget(self._central)
@@ -372,7 +433,14 @@ class App(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    aplicar_estilo(app)
+    # Tema inicial: el guardado en config.json (produccion) o en el
+    # config.json local de desarrollo; default oscuro.
+    tema_guardado = config.leer_config("tema", style.TEMA_POR_DEFECTO)
+    style.aplicar_estilo(
+        app,
+        tema_guardado if tema_guardado in style.PALETAS
+        else style.TEMA_POR_DEFECTO,
+    )
     init_db()
     # La sesion 'Activa' que quede tras un apagon se recupera en la vista
     # de Inicio (InicioView._revisar_sesion_interrumpida), no se borra.

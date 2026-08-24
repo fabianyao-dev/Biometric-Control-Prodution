@@ -161,6 +161,9 @@ activemq-data/
 # Environments
 .env
 .envrc
+# Configuracion local de la app (tema en dev; en produccion vive fuera, en
+# la carpeta de datos WTSControlData)
+config.json
 .venv
 env/
 venv/
