@@ -848,10 +848,13 @@ class AdminView(QWidget):
             self._lbl_rol("Selecciona un rol de la lista.", "error")
             return
         rol_id = int(self.lista_roles.item(fila, 0).text())
-        eliminar_rol(rol_id)
-        self._lbl_rol("Rol eliminado (desactivado).", "exito")
-        self._recargar_roles()
-        self._recargar_roles_combo()
+        ok, mensaje = eliminar_rol(rol_id)
+        if ok:
+            self._lbl_rol("Rol eliminado (desactivado).", "exito")
+            self._recargar_roles()
+            self._recargar_roles_combo()
+        else:
+            self._lbl_rol(mensaje, "error")
 
     def _recargar_roles(self):
         self.lista_roles.setRowCount(0)

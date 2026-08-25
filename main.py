@@ -421,11 +421,18 @@ class App(QMainWindow):
 
     def _salir(self):
         log.info("Cerrando aplicacion ...")
-        self.controlador.cleanup()
         self.close()
 
     def closeEvent(self, evento):
-        # Shutdown seguro: al cerrar la ventana tambien se libera el HAL.
+        # Shutdown seguro: guard de seguridad + liberacion del HAL. El guard
+        # vive AQUI (no en _salir) para cubrir tambien Alt+F4 y el cierre del
+        # sistema: con la maquina EN MARCHA la ventana no se cierra.
+        vista = self.vistas.get("inicio")
+        if vista is not None and not vista.aplicacion_puede_cerrarse():
+            evento.ignore()
+            return
+        # cleanup() deja el coil PAUSE en paro sostenido si hay enlace, para
+        # que la maquina nunca quede cortando sin supervision (7.2.2).
         self.controlador.cleanup()
         log.info("Aplicacion cerrada.")
         evento.accept()

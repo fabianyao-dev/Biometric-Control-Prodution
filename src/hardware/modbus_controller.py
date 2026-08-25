@@ -490,12 +490,43 @@ class ModbusController:
     # ------------------------------------------------------------------
 
     def cleanup(self):
-        """Detiene el polling y cierra el socket. Idempotente."""
+        """Detiene el polling, ASEGURA el paro y cierra el socket. Idempotente.
+
+        La maquina NUNCA debe quedar cortando sin supervision al morir la
+        app: si hay enlace vivo se escribe el latch PAUSE (paro sostenido)
+        ANTES de desconectar. Con la maquina ya detenida re-latchear es
+        inocuo (el rele queda energizado, su estado seguro desde el arranque).
+        La escritura es SINCRONA bajo `_lock_modbus`, asi que espera a que un
+        pulso START en vuelo termine antes de tocar PAUSE; se verifica el
+        retorno porque pyModbusTCP devuelve False ante cualquier error sin
+        lanzar (ver Diagnostico 7.2.1).
+        """
         if self._cleaned:
             return
         self._cleaned = True
         self._stop.set()
         with self._lock_modbus:
+            cliente = self._modbus
+            if (not self._simulacion and self._conectado
+                    and cliente is not None):
+                try:
+                    ok = cliente.write_single_coil(
+                        self._pause_coil,
+                        self._nivel_activo(self._pause_invertido),
+                    )
+                    if ok:
+                        log.info("Cierre seguro: coil PAUSE (%s) latch "
+                                 "activo; maquina asegurada en paro.",
+                                 self._pause_coil)
+                    else:
+                        log.error(
+                            "Cierre: el modulo rechazo escribir PAUSE (%s); "
+                            "VERIFICAR LA MAQUINA MANUALMENTE.",
+                            self._pause_coil,
+                        )
+                except Exception as e:  # noqa: BLE001 - cerrar no debe fallar
+                    log.error("Cierre: fallo asegurar PAUSE (%s); VERIFICAR "
+                              "LA MAQUINA MANUALMENTE.", e)
             self._maquina_en_marcha = False
             self._desconectar()
         log.info("ModbusController detenido (hilo de polling finalizado).")

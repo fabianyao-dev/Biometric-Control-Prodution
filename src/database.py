@@ -304,11 +304,40 @@ def renombrar_rol(rol_id: int, nombre: str) -> bool:
 
 
 def eliminar_rol(rol_id: int):
-    """Soft-delete de un rol."""
+    """Soft-delete de un rol. Devuelve (ok, mensaje).
+
+    Nunca desactiva al ULTIMO rol activo con `acceso_admin` (mismo guard
+    que actualizar_permisos_rol): desde que los permisos respetan
+    r.activo=1 (Diagnostico 7.2.3), desactivar ese rol dejaria a nadie con
+    acceso a Administracion.
+    """
     conn = obtener_conexion()
-    conn.execute("UPDATE roles SET activo=0 WHERE id=?", (rol_id,))
-    conn.commit()
-    conn.close()
+    try:
+        tiene_admin = conn.execute(
+            "SELECT 1 FROM roles r "
+            "JOIN permisos_roles pr ON pr.rol_id=r.id "
+            "WHERE pr.rol_id=? AND r.activo=1 AND pr.permiso=?",
+            (rol_id, PERMISO_ACCESO_ADMIN),
+        ).fetchone() is not None
+        if tiene_admin:
+            otros = conn.execute(
+                "SELECT COUNT(*) AS n FROM permisos_roles pr "
+                "JOIN roles r ON r.id=pr.rol_id "
+                "WHERE r.activo=1 AND pr.permiso=? AND pr.rol_id<>?",
+                (PERMISO_ACCESO_ADMIN, rol_id),
+            ).fetchone()["n"]
+            if otros == 0:
+                conn.close()
+                return False, (
+                    "No se puede desactivar: es el ultimo rol activo con "
+                    "acceso a Administracion."
+                )
+        conn.execute("UPDATE roles SET activo=0 WHERE id=?", (rol_id,))
+        conn.commit()
+        conn.close()
+        return True, ""
+    except Exception as e:
+        return False, f"Error en base de datos: {str(e)}"
 
 
 def rol_id_por_defecto() -> int | None:
@@ -352,11 +381,20 @@ def permisos_de_rol(rol_id: int):
 
 
 def rol_tiene_permiso_operador(operador_id: int, permiso: str) -> bool:
-    """¿El operador (via su rol) tiene el permiso?."""
+    """¿El operador (via su rol ACTIVO) tiene el permiso?
+
+    El JOIN pasa por la tabla `roles` exigiendo r.activo=1: desactivar un
+    rol debe REVOCAR sus permisos de inmediato para todos sus operadores
+    (antes un rol desactivado retenia autorizar_paro/acceso_admin/etc.;
+    ver Diagnostico 7.2.3). La autenticacion ya solo acepta operadores
+    activos (listar_fmds activos_solo=True), asi que aqui basta el filtro
+    de rol.
+    """
     conn = obtener_conexion()
     row = conn.execute(
         "SELECT 1 FROM operadores o "
-        "JOIN permisos_roles pr ON pr.rol_id=o.rol_id "
+        "JOIN roles r ON r.id=o.rol_id AND r.activo=1 "
+        "JOIN permisos_roles pr ON pr.rol_id=r.id "
         "WHERE o.id=? AND pr.permiso=?",
         (operador_id, permiso),
     ).fetchone()

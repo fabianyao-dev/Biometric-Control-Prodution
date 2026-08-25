@@ -269,8 +269,39 @@ class InicioView(QWidget):
     def _encender_maquina(self):
         self._abrir_huella_encendido()
 
-    def _apagar_maquina(self) -> bool:
-        """Cierra la sesion y detiene la maquina. Devuelve True si cerro."""
+    def aplicacion_puede_cerrarse(self):
+        """Guard del boton Salir del header y de cualquier cierre de ventana.
+
+        Diferente del cierre de SESION (`_apagar_maquina`): si la maquina
+        esta EN MARCHA no se permite cerrar el programa, porque quedaria
+        cortando sin conteo ni supervision (el cleanup() solo puede
+        latchear PAUSE si el enlace Modbus vive; ante apagon no hay nada).
+        Se exige detenerla antes con el boton PARO (o salir del modo
+        Primera pieza y parar). Con la maquina detenida SI se permite salir
+        aunque quede sesion 'Activa': se recupera al arrancar, mismo camino
+        que un apagon.
+
+        Aplica igual en simulacion (una sola conducta en toda la app): en
+        dev basta detener la maquina simulada antes de salir.
+        """
+        if not self.controlador.maquina_detenida():
+            QMessageBox.warning(
+                self.controller,
+                "No se puede cerrar",
+                "La maquina esta EN MARCHA.\n\n"
+                "Detenla con el boton PARO antes de cerrar el programa.",
+            )
+            log.warning("Salida de la app bloqueada: la maquina esta en "
+                        "marcha.")
+            return False
+        return True
+
+    def _apagar_maquina(self, autorizador_id=None) -> bool:
+        """Cierra la sesion y detiene la maquina. Devuelve True si cerro.
+
+        `autorizador_id` es el operador que autentico el cierre (si se pasa);
+        por defecto se atribuye al dueno de la sesion, como en Primera pieza.
+        """
         if self._seguro_paro_segundos() is not None:
             self._estado(
                 "La maquina esta cortando: espera unos segundos para apagar.",
@@ -284,6 +315,22 @@ class InicioView(QWidget):
         if self.sesion_id is not None:
             self._finalizar_primera_pieza_si_activa(self.operador_id)
             self._cerrar_trabajo_por_cierre_sesion()
+            # Paro normal o de recuperacion EN CURSO: cerrarlo junto con la
+            # sesion para no dejar filas 'En curso' eternas sobre una sesion
+            # ya Finalizada (Diagnostico 7.2.5). El paro nunca llego a
+            # autorizarse, asi que queda SIN causa (la columna lo permite,
+            # igual que _cerrar_primera_pieza cuando falta la causa).
+            if self.paro_id is not None:
+                autorizador = autorizador_id or self.operador_id
+                try:
+                    finalizar_paro(self.paro_id, None, autorizador)
+                    log.info("Paro %s cerrado junto con la sesion "
+                             "(autorizado por operador %s)",
+                             self.paro_id, autorizador)
+                except Exception:  # noqa: BLE001 - no debe frenar el cierre
+                    log.warning("No se pudo cerrar el paro %s al cerrar la "
+                                "sesion", self.paro_id, exc_info=True)
+                self.paro_id = None
             cerrar_sesion(self.sesion_id, total)
         self.controlador.reset_conteo()
         self.sesion_id = None
@@ -417,7 +464,7 @@ class InicioView(QWidget):
         era_recuperacion = self._recuperando
         sesion_id = self.sesion_id
         self._recuperando = False
-        if not self._apagar_maquina():
+        if not self._apagar_maquina(autorizador_id=id_operador):
             return
         if era_recuperacion:
             self._estado(f"Sesion interrumpida cerrada por {nombre}.", "exito")
@@ -819,8 +866,28 @@ class InicioView(QWidget):
 
         Registra el paro con causa 'Primera pieza' y suspende el conteo: los
         cortes van a excluidos (solo memoria) hasta que un trabajo valido se
-        asigne (los descarta como piezas de prueba) o el switch vuelva a OFF.
+        asigne (los descartan como piezas de prueba) o el switch vuelva a OFF.
+
+        IDEMPOTENTE: si el modo ya esta activo NO re-registra otro paro ni
+        reinicia el conteo de excluidos (solo reasegura el estado visual).
+        Antes, FINALIZAR TRABAJO estando en espera de trabajo (o una meta
+        instantanea al re-escanear un folio sobre-cumplido) creaba un segundo
+        paro y dejaba el anterior abierto para siempre en Sesiones, ademas de
+        borrar el contador de setup a mitad de modo (Diagnostico 7.2.4).
         """
+        if self.sesion_id is None:
+            log.warning("Primera pieza sin sesion activa; solicitud de %s "
+                        "ignorada.", nombre)
+            return
+        if self._primera_pieza:
+            # Ya en modo: conservar el paro vigente y los cortes de setup
+            # acumulados.
+            self._fijar_switch(True)
+            self._refrescar_estado_maquina()
+            log.info("Primera pieza ya activa; se conserva el paro %s "
+                     "(solicitud de %s).", self._primera_pieza_paro_id,
+                     nombre)
+            return
         self._primera_pieza_paro_id = iniciar_paro(self.sesion_id)
         self._primera_pieza = True
         # Los cortes de este modo NO cuentan para la sesion ni para ningun
