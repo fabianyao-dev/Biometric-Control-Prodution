@@ -91,8 +91,8 @@ class SessionsView(QWidget):
         col_trabajos.addWidget(self.lbl_trabajos)
         self.tree_trabajos = QTableWidget(0, 7, self)
         self.tree_trabajos.setHorizontalHeaderLabels(
-            ["Folio", "Num Part", "Cantidad", "Cortados", "Inicio", "Fin",
-             "Estado"]
+            ["Folio", "Num Part", "Cantidad", "Cortados (sesion)",
+             "Inicio", "Fin", "Estado"]
         )
         # Num Part se estira; el resto al contenido.
         self._config_tabla(self.tree_trabajos, col_stretch=(1,))
@@ -159,16 +159,17 @@ class SessionsView(QWidget):
         self._recargar_trabajos(sesion_id)
 
     def _recargar_trabajos(self, sesion_id):
-        """Trabajos (QR folio|num_part|cantidad) vinculados a la sesion."""
+        """Trabajos de la sesion POR SEGMENTO (folio x sesion): 'Cortados
+        (sesion)' es lo cortado en ESTA sesion para ese folio."""
         self.tree_trabajos.setRowCount(0)
         for t in listar_trabajos_de_sesion(sesion_id):
             fila = self.tree_trabajos.rowCount()
             self.tree_trabajos.insertRow(fila)
             valores = (
                 t["folio"], t["num_part"], t["cantidad_total"],
-                t["cantidad_cortada"],
+                t["cantidad_sesion"],
                 t["fecha_inicio"],
-                t["fecha_fin"] or ("Abierto" if t["estado"] == "Abierto"
+                t["fecha_fin"] or ("En curso" if t["estado"] == "Abierto"
                                    else "Sin registro"),
                 t["estado"],
             )

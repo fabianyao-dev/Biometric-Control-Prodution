@@ -258,6 +258,50 @@ QPushButton#Nav:pressed {
     background: @borde@;
 }
 
+/* ---- Botones de ICONO del header (sesion, tema, hamburguesa): cuadrados
+   y con contenido centrado; el #Nav del sidebar es texto a la izquierda. */
+QPushButton#NavIcono {
+    background: transparent;
+    color: @texto_sec@;
+    text-align: center;
+    padding: 0px;
+    border-radius: 10px;
+}
+QPushButton#NavIcono:hover {
+    background: @elevada@;
+    color: @texto@;
+}
+QPushButton#NavIcono:pressed {
+    background: @borde@;
+}
+
+/* ---- Boton de SESION del header: icono + texto ("Iniciar sesion" o el
+   nombre del operador) en una sola pieza. ---- */
+QPushButton#NavSesion {
+    background: transparent;
+    color: @texto@;
+    text-align: center;
+    padding: 8px 14px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+}
+QPushButton#NavSesion:hover {
+    background: @elevada@;
+}
+QPushButton#NavSesion:pressed {
+    background: @borde@;
+}
+
+/* ---- Linea de ESTADO del pie de Inicio: discreta/difuminada, sin pastilla
+   de color; solo texto secundario pequeno sobre el fondo. ---- */
+QLabel#ResumenEstado {
+    background: transparent;
+    color: @texto_sec@;
+    font-size: 13px;
+    padding: 4px 10px;
+}
+
 /* ---- Boton de advertencias del header (notificaciones) ---- */
 QPushButton#Aviso {
     background: transparent;

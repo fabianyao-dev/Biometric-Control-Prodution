@@ -1,23 +1,30 @@
 """
 inicio_view.py - Vista principal de produccion (Inicio).
 
-Maquina de estados de la maquina:
-    EN ESPERA -> LISTA: al pulsar PLAY se abre un modal que pide la
-                 huella de inmediato; al autenticar se abre la sesion
-                 (automatica) y la maquina arranca.
-    LISTA     -> EN ESPERA: al pulsar STOP se abre un modal que pide la
-                 huella (operador de la sesion o un rol con el permiso
-                 'autorizar_paro'); al autorizar se cierra la sesion.
-    LISTA     -> PARO: al pulsar PARO (o por inactividad) se abre el modal
-                 que pide motivo + huella; al autorizar se reanuda.
+La pantalla separa DOS controles independientes:
 
-Con la sesion abierta y la maquina en LISTA, el switch "Primera pieza"
-(autorizado por huella al iniciar y al terminar) registra el evento como un
-paro con la causa fija 'Primera pieza'; durante el modo la maquina sigue en
-marcha y NO se aplica el auto-paro por inactividad (no cuenta el minuto de
-espera de corte). Al salir del modo la gracia del auto-paro se reinicia: el
-minuto vuelve a contar desde cero. El boton PARO queda deshabilitado mientras
-este activo.
+SESION (boton del header, esquina superior derecha): identidad + TOTALES.
+    Al iniciarla se pide huella, se abre la sesion y se REINICIA el contador
+    (el total de produccion es POR SESION). El icono muestra persona (rol
+    operador) o engranaje (cualquier otro rol) y el nombre del operador queda
+    a su lado. NO se puede cerrar sesion con la maquina en marcha: una
+    maquina encendida siempre vive dentro de una sesion (al encender entra a
+    Primera pieza y pide trabajo); cerrarla dejaria cortes sin dueno.
+
+MAQUINA (boton central grande): enciende/apaga el relevo DENTRO de la
+    sesion, sin huella extra (hereda la del login). Encender pone la maquina
+    en marcha y entra AUTOMATICAMENTE al modo Primera pieza (estado "ESPERA
+    TRABAJO") abriendo el pedido de trabajo; la espera de trabajo queda asi
+    atada al ENCENDIDO, no al login. Apagar SIN trabajo detiene el relevo
+    (seguro anti-corte mediante). Apagar CON trabajo cargado hace el cierre
+    completo: pide huella, guarda el parcial (Abierto/retomable) y DETIENE
+    la maquina, quedando en espera de trabajo.
+
+Modo "Primera pieza": con la sesion abierta y la maquina en marcha, registra
+el evento como un paro con la causa fija 'Primera pieza'; durante el modo la
+maquina sigue en marcha y NO se aplica el auto-paro por inactividad. Al salir
+del modo (switch + huella) la gracia del auto-paro se reinicia. El boton PARO
+queda deshabilitado mientras este activo.
 
 SEGURO ANTI-CORRIDA: durante el modo los cortes van a un acumulado temporal.
 Si se detecta una rafaga (mas de SEGURO_RAFAGA_CORTES cortes dentro de
@@ -27,32 +34,33 @@ cortes de la ventana detectada y posteriores se INCORPORAN al total de la
 sesion (lo excluido antes queda como piezas de prueba descartadas). Con "No"
 (o sin autorizacion) todo sigue fuera del conteo y se pierde al salir del modo.
 
-TRABAJOS POR QR: al abrir la sesion la maquina entra AUTOMATICAMENTE en modo
-Primera pieza (estado "ESPERA TRABAJO") y se ofrece un modal CANCELABLE que
+TRABAJOS POR QR: al ENCENDER la maquina se ofrece un modal CANCELABLE que
 pide el escaneo de un QR `folio|num_part|cantidad_total` (escaner USB tipo
 teclado) + huella. El operador manda: puede cancelar para ajustar la maquina
-y hacer piezas de prueba (el modo suprime el auto-paro por inactividad, por
-eso sigue existiendo) y escanear cuando este listo con ESCANEAR TRABAJO o el
-switch manual. Al aceptar se registra/retoma el trabajo en la tabla
-`trabajos` (folio unico: re-escanear uno Abierto retoma su conteo; uno
+y hacer piezas de prueba (el modo suprime el auto-paro por inactividad) y
+escanear cuando este listo con ESCANEAR TRABAJO (visible solo sin trabajo
+cargado y maquina en marcha). Al aceptar se registra/retoma el trabajo en la
+tabla `trabajos` (folio unico: re-escanear uno Abierto retoma su conteo; uno
 Cerrado se rechaza), se salen las piezas de prueba (mismo descarte del modo)
 y los cortes empiezan a contar para ese trabajo (total - baseline). El
-contador muestra Total de la sesion y `NUM_PART: X/cantidad`. 'Cerrado' SOLO
+marcador muestra NUMERO DE PARTE arriba, los digitos al centro y CANTIDAD/
+META abajo; la linea inferior de estado resume sesion, folio, parte,
+cantidad, meta, ciclos totales y setup. 'Cerrado' SOLO
 al alcanzar la cantidad_total: ahi suena la alarma, se guarda la cantidad
-REAL y vuelve a Primera pieza para el siguiente QR. FINALIZAR TRABAJO guarda
-el parcial SIN cerrar (queda Abierto/retomable); lo mismo al cerrar sesion.
-Tras un apagon se recupera el trabajo Abierto en curso desde su checkpoint.
-
-La sesion se cuenta desde que la maquina arranca (LISTA) hasta que se
-detiene; no hay boton de mantenimiento de sesion.
+REAL y vuelve a Primera pieza para el siguiente QR. Lo mismo al cerrar
+sesion: el parcial queda Abierto. Tras un apagon se recupera el trabajo
+Abierto en curso desde su checkpoint.
 
 RECUPERACION TRAS CIERRE ABRUPTO: si la app se cerro con una sesion 'Activa'
 (apagon, crash, cierre de ventana), al reiniciar se detecta en
-`_revisar_sesion_interrumpida`: se restaura el operador, el total de cortes
-del ultimo checkpoint y se deja la maquina en estado EN PARO. El operador
-dueño o un rol con el permiso 'autorizar_paro' debe autorizar la reanudacion
-(causa + huella) o cerrar formalmente la sesion; no se puede iniciar una
-sesion nueva mientras exista la interrumpida.
+`_revisar_sesion_interrumpida`: se restaura el operador y el total de cortes
+del ultimo checkpoint. SOLO si hay evidencia de que la maquina estaba en
+marcha (paro en curso o trabajo Abierto en curso) se deja el estado EN PARO:
+el operador dueno o un rol con el permiso 'autorizar_paro' debe autorizar la
+reanudacion (causa + huella) o cerrar formalmente la sesion. Si la maquina
+estaba detenida (login sin encender), la sesion se recupera lista para
+ENCENDER sin autorizacion. No se puede iniciar una sesion nueva mientras
+exista la interrumpida.
 """
 
 import logging
@@ -60,7 +68,7 @@ import threading
 import time
 from collections import deque
 
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -100,6 +108,10 @@ log = logging.getLogger(__name__)
 
 
 class InicioView(QWidget):
+    # (nombre, rol) al cambiar la sesion; nombre vacio = sin sesion. El
+    # header de la App lo consume para pintar nombre + icono persona/engranaje.
+    sesion_cambiada = Signal(str, str)
+
     def __init__(self, parent, controller, biometrico, controlador):
         super().__init__(parent)
         self.controller = controller
@@ -147,10 +159,8 @@ class InicioView(QWidget):
         layout.setSpacing(12)
         layout.addStretch(1)
 
-        self.lbl_operador = QLabel("Operador: Sin sesion", self)
-        self.lbl_operador.setObjectName("HeaderLabel")
-        self.lbl_operador.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.lbl_operador, alignment=Qt.AlignHCenter)
+        # La identidad del operador vive en el HEADER de la App (boton de
+        # sesion + nombre); aqui ya no se repite "Operador: ...".
 
         # Tablero de contadores (marcador LED de planta): el display rojo
         # de 7 segmentos muestra DESDE EL INICIO el contador del trabajo
@@ -190,35 +200,33 @@ class InicioView(QWidget):
         h.addWidget(self.lbl_estado_maquina)
         layout.addWidget(fila_estado, alignment=Qt.AlignHCenter)
 
-        self.lbl_detalle = QLabel("", self)
-        aplicar_estado(self.lbl_detalle, "info")
-        self.lbl_detalle.setAlignment(Qt.AlignCenter)
-        self.lbl_detalle.setWordWrap(True)
-        layout.addWidget(self.lbl_detalle)
+        # Mensaje de ACCIONES (al centro, sobre los botones): guia al
+        # operador paso a paso. Los avisos de SISTEMA (Modbus, lector,
+        # biometria) viven en el indicador del header, no aqui.
+        self.lbl_estado = QLabel(
+            "Inicia sesion para encender la maquina.", self
+        )
+        aplicar_estado(self.lbl_estado, "info")
+        self.lbl_estado.setAlignment(Qt.AlignCenter)
+        self.lbl_estado.setWordWrap(True)
+        layout.addWidget(self.lbl_estado)
 
-        # --- Boton principal: PLAY (verde, lista para arrancar) o STOP
-        # (rojo, con sesion activa: en espera o en paro) ---
-        self.btn_poder = QPushButton(self)
-        self.btn_poder.setObjectName("PowerOn")
-        self.btn_poder.setIconSize(QSize(56, 56))
-        self.btn_poder.clicked.connect(self._toggle_poder)
-        layout.addWidget(self.btn_poder, alignment=Qt.AlignHCenter)
+        # --- Boton de MAQUINA (centro): encender/apagar el relevo dentro
+        # de la sesion. La sesion se abre/cierra desde el header. ---
+        self.btn_maquina = QPushButton(self)
+        self.btn_maquina.setObjectName("PowerOn")
+        self.btn_maquina.setIconSize(QSize(56, 56))
+        self.btn_maquina.clicked.connect(self._toggle_maquina)
+        layout.addWidget(self.btn_maquina, alignment=Qt.AlignHCenter)
 
         self.btn_paro = QPushButton("PARO", self)
         self.btn_paro.setMinimumWidth(180)
         self.btn_paro.clicked.connect(self._boton_paro)
         layout.addWidget(self.btn_paro, alignment=Qt.AlignHCenter)
 
-        # --- Trabajos: cerrar el trabajo actual (guarda el conteo) o
-        # reabrir el escaneo del QR si se cancelo ---
-        self.btn_finalizar_trabajo = QPushButton("FINALIZAR TRABAJO", self)
-        self.btn_finalizar_trabajo.setMinimumWidth(180)
-        self.btn_finalizar_trabajo.clicked.connect(
-            self._boton_finalizar_trabajo
-        )
-        layout.addWidget(self.btn_finalizar_trabajo, alignment=Qt.AlignHCenter)
-        self.btn_finalizar_trabajo.setVisible(False)
-
+        # --- Trabajos: reabrir el escaneo del QR; solo sin trabajo cargado
+        # y con la maquina en marcha (el cierre del trabajo vive en el boton
+        # de maquina) ---
         self.btn_escanear = QPushButton("ESCANEAR TRABAJO", self)
         self.btn_escanear.setMinimumWidth(180)
         self.btn_escanear.clicked.connect(self._boton_escanear_trabajo)
@@ -237,37 +245,263 @@ class InicioView(QWidget):
         self._fila_switch.setVisible(False)
         layout.addWidget(self._fila_switch, alignment=Qt.AlignHCenter)
 
-        self.lbl_estado = QLabel(
-            "Pulsa el boton y coloca tu huella para encender.", self
-        )
-        aplicar_estado(self.lbl_estado, "info")
-        self.lbl_estado.setAlignment(Qt.AlignCenter)
-        self.lbl_estado.setWordWrap(True)
-        layout.addWidget(self.lbl_estado)
-
+        # El estiro ANTES del resumen lo pega al fondo de la pantalla;
+        # sin el, el bloque completo quedaria agrupado con los botones.
         layout.addStretch(1)
 
+        # Linea de ESTADO (hasta abajo): dueno de la sesion, folio, parte,
+        # cantidad hecha, meta del folio, ciclos totales y piezas de setup.
+        # Estilo difuminado (texto secundario, sin pastilla): informacion
+        # de consulta, no de accion.
+        self.lbl_resumen = QLabel("", self)
+        self.lbl_resumen.setObjectName("ResumenEstado")
+        self.lbl_resumen.setAlignment(Qt.AlignCenter)
+        self.lbl_resumen.setWordWrap(True)
+        layout.addWidget(self.lbl_resumen)
+
     # ------------------------------------------------------------------
-    # Boton de poder (interruptor)
+    # Sesion (boton del header): identidad + TOTALES
     # ------------------------------------------------------------------
 
-    def _toggle_poder(self):
+    def toggle_sesion(self):
+        """Accion del boton de sesion del header (delegada desde la App).
+
+        Sin sesion abre el modal de huella de inicio; con sesion la cierra,
+        PERO solo con la maquina detenida: una maquina encendida siempre
+        vive dentro de una sesion (al encender entra a Primera pieza y pide
+        trabajo), asi que cerrarla en marcha dejaria cortes sin dueno.
+        """
         if self._modal_abierto:
             return
         if self.sesion_id is None:
-            self._encender_maquina()
+            self._abrir_huella_sesion()
             return
+        if not self.controlador.maquina_detenida():
+            QMessageBox.warning(
+                self.controller,
+                "No se puede cerrar la sesion",
+                "La maquina esta EN MARCHA.\n\n"
+                "Detenla con el boton de maquina antes de cerrar la sesion.",
+            )
+            log.warning("Cierre de sesion bloqueado: la maquina esta en "
+                        "marcha")
+            return
+        self._abrir_huella_cierre()
+
+    def _abrir_huella_sesion(self):
+        """Modal de huella para INICIAR sesion (cualquier operador registrado).
+
+        Solo identidad: aqui NO se toca el relevo ni el modo Primera pieza;
+        eso lo hace el boton de maquina al encender.
+        """
+        self._modal_abierto = True
+        try:
+            modal = HuellaModal(
+                self.controller,
+                self.biometrico,
+                titulo="INICIAR SESION",
+                mensaje="Coloca tu huella para iniciar la sesion.",
+                on_autenticado=self._sesion_abierta,
+                on_cancelar=lambda: self._estado(
+                    "Inicio de sesion cancelado.", "info"
+                ),
+            )
+            modal.exec()
+        finally:
+            self._modal_abierto = False
+
+    def _sesion_abierta(self, id_operador, nombre, causa_id=None):
+        """Sesion abierta: reinicia el contador (el TOTAL es por sesion).
+
+        La maquina NO arranca aqui: queda DETENIDA hasta que el operador
+        pulse el boton de maquina.
+        """
+        self.sesion_id = abrir_sesion(id_operador)
+        self.operador_id = id_operador
+        self.operador_nombre = nombre
+        self.controlador.reset_conteo()
+        self._en_paro = False
+        self._paro_idle_triggado = False
+        self._refrescar_operador()
+        self._refrescar_estado_maquina()
+        self._estado(
+            f"Sesion iniciada por {nombre}. Enciende la maquina para "
+            "comenzar.", "exito",
+        )
+        log.info("Sesion %s abierta para %s", self.sesion_id, nombre)
+
+    def _apagar_maquina(self, autorizador_id=None) -> bool:
+        """Cierra la sesion (solo con la maquina ya detenida). Devuelve True
+        si cerro.
+
+        `autorizador_id` es el operador que autentico el cierre (si se pasa);
+        por defecto se atribuye al dueno de la sesion, como en Primera pieza.
+        El reset del contador vive en la APERTURA de sesion (`_sesion_abierta`),
+        no aqui: encender/apagar la maquina ya no toca el acumulado.
+        """
         if self._seguro_paro_segundos() is not None:
             self._estado(
                 "La maquina esta cortando: espera unos segundos para apagar.",
                 "error",
             )
-            log.info("APAGADO bloqueado por seguro anti-corte")
+            log.info("Apagado bloqueado por seguro anti-corte")
+            return False
+        if not self.controlador.maquina_detenida():
+            # Camino defensivo: el guard de toggle_sesion deberia haber
+            # bloqueado este caso con la maquina en marcha.
+            self.controlador.maquina_pausada()
+        total = self.controlador.cortes_totales()
+        if self.sesion_id is not None:
+            self._finalizar_primera_pieza_si_activa(self.operador_id)
+            self._cerrar_trabajo_por_cierre_sesion()
+            # Paro normal o de recuperacion EN CURSO: cerrarlo junto con la
+            # sesion para no dejar filas 'En curso' eternas sobre una sesion
+            # ya Finalizada (Diagnostico 7.2.5). El paro nunca llego a
+            # autorizarse, asi que queda SIN causa (la columna lo permite,
+            # igual que _cerrar_primera_pieza cuando falta la causa).
+            if self.paro_id is not None:
+                autorizador = autorizador_id or self.operador_id
+                try:
+                    finalizar_paro(self.paro_id, None, autorizador)
+                    log.info("Paro %s cerrado junto con la sesion "
+                             "(autorizado por operador %s)",
+                             self.paro_id, autorizador)
+                except Exception:  # noqa: BLE001 - no debe frenar el cierre
+                    log.warning("No se pudo cerrar el paro %s al cerrar la "
+                                "sesion", self.paro_id, exc_info=True)
+                self.paro_id = None
+            cerrar_sesion(self.sesion_id, total)
+        self.sesion_id = None
+        self.operador_id = None
+        self.operador_nombre = None
+        self.paro_id = None
+        self._en_paro = False
+        self._paro_idle_triggado = False
+        self._primera_pieza = False
+        self._primera_pieza_paro_id = None
+        self._fijar_switch(False)
+        self._refrescar_operador()
+        self._refrescar_estado_maquina()
+        self._estado(f"Maquina en espera. {total} cortes registrados.", "info")
+        log.info("Sesion cerrada con %s cortes", total)
+        return True
+
+    # ------------------------------------------------------------------
+    # Boton de MAQUINA (centro): relevo dentro de la sesion
+    # ------------------------------------------------------------------
+
+    def _toggle_maquina(self):
+        if self._modal_abierto:
             return
-        self._abrir_huella_cierre()
+        if self.sesion_id is None:
+            self._estado(
+                "Inicia sesion antes de encender la maquina.", "error"
+            )
+            return
+        if self._en_paro:
+            # La salida del paro es por el modal de autorizacion (boton
+            # PARO); el boton de maquina queda deshabilitado mientras tanto.
+            return
+        if self._maquina_en_marcha():
+            if self._seguro_paro_segundos() is not None:
+                self._estado(
+                    "La maquina esta cortando: espera unos segundos para "
+                    "apagar.", "error",
+                )
+                log.info("APAGADO bloqueado por seguro anti-corte")
+                return
+            self._apagar_maquina_en_marcha()
+        else:
+            self._encender_maquina()
 
     def _encender_maquina(self):
-        self._abrir_huella_encendido()
+        """Enciende la maquina dentro de la sesion activa (sin huella extra).
+
+        Entra al modo Primera pieza y abre el pedido de trabajo: la espera
+        de trabajo queda atada al ENCENDIDO de la maquina, no al login.
+        """
+        if self.controlador.maquina_detenida():
+            self.controlador.maquina_lista()
+        self._entrar_primera_pieza(self.operador_nombre)
+        self._refrescar_estado_maquina()
+        self._estado(
+            "Maquina en marcha: escanea el trabajo o haz piezas de prueba.",
+            "exito",
+        )
+        log.info("Maquina encendida por %s (sesion %s)",
+                 self.operador_nombre, self.sesion_id)
+        self._abrir_modal_trabajo()
+
+    def _apagar_maquina_en_marcha(self):
+        """Apaga la maquina manteniendo la sesion abierta.
+
+        Con un trabajo cargado hace el CIERRE COMPLETO: pide huella, guarda
+        el parcial (Abierto/retomable) y detiene el relevo, quedando en
+        espera de trabajo. Sin trabajo detiene directo (saliendo del modo
+        Primera pieza si estuviera activo). La sesion sigue abierta: solo se
+        cierra desde el header con la maquina ya detenida.
+        """
+        if self._trabajo is not None:
+            self._modal_abierto = True
+            try:
+                modal = HuellaModal(
+                    self.controller,
+                    self.biometrico,
+                    titulo="FINALIZAR TRABAJO Y APAGAR",
+                    mensaje=(
+                        f"Se guardara el trabajo {self._trabajo['folio']} "
+                        f"({self._trabajo['num_part']}) con "
+                        f"{self._cortes_trabajo()} piezas y la maquina se "
+                        "detendra. Coloca tu huella."
+                    ),
+                    validador=self._validar_autorizacion_paro,
+                    on_autenticado=self._apagado_con_trabajo_autenticado,
+                    on_cancelar=lambda: self._estado(
+                        "Apagado cancelado; el trabajo sigue abierto.",
+                        "info",
+                    ),
+                    mostrar_cancelar=True,
+                )
+                modal.exec()
+            finally:
+                self._modal_abierto = False
+            return
+        # Detener PRIMERO el relevo y despues salir del modo: cualquier
+        # delta en vuelo cae a los excluidos y se descarta con el modo.
+        self.controlador.maquina_pausada()
+        self._finalizar_primera_pieza_si_activa(self.operador_id)
+        self._fijar_switch(False)
+        self._refrescar_estado_maquina()
+        self._refrescar_labels_cortes()
+        self._estado(
+            "Maquina detenida. La sesion sigue abierta.", "info"
+        )
+        log.info("Maquina apagada por %s (sesion %s continua)",
+                 self.operador_nombre, self.sesion_id)
+
+    def _apagado_con_trabajo_autenticado(self, id_operador, nombre,
+                                         causa_id=None):
+        """Cierre completo autorizado: guarda el parcial y DETIENE la maquina.
+
+        El trabajo queda 'Abierto' (retomable re-escaneando el folio); la
+        sesion sigue abierta con la maquina detenida.
+        """
+        folio = self._trabajo["folio"]
+        real = self._cortes_trabajo()
+        self.controlador.maquina_pausada()
+        self._finalizar_primera_pieza_si_activa(id_operador)
+        self._fijar_switch(False)
+        pausar_trabajo(folio, real)
+        self._trabajo = None
+        self._baseline_trabajo = 0
+        self._refrescar_estado_maquina()
+        self._refrescar_labels_cortes()
+        self._estado(
+            f"Trabajo {folio} guardado por {nombre} con {real} piezas y "
+            "maquina detenida.", "exito",
+        )
+        log.info("Trabajo %s pausado y maquina apagada por %s con %s piezas "
+                 "(sesion %s continua)", folio, nombre, real, self.sesion_id)
 
     def aplicacion_puede_cerrarse(self):
         """Guard del boton Salir del header y de cualquier cierre de ventana.
@@ -296,94 +530,6 @@ class InicioView(QWidget):
             return False
         return True
 
-    def _apagar_maquina(self, autorizador_id=None) -> bool:
-        """Cierra la sesion y detiene la maquina. Devuelve True si cerro.
-
-        `autorizador_id` es el operador que autentico el cierre (si se pasa);
-        por defecto se atribuye al dueno de la sesion, como en Primera pieza.
-        """
-        if self._seguro_paro_segundos() is not None:
-            self._estado(
-                "La maquina esta cortando: espera unos segundos para apagar.",
-                "error",
-            )
-            log.info("Apagado bloqueado por seguro anti-corte")
-            return False
-        if not self.controlador.maquina_detenida():
-            self.controlador.maquina_pausada()
-        total = self.controlador.cortes_totales()
-        if self.sesion_id is not None:
-            self._finalizar_primera_pieza_si_activa(self.operador_id)
-            self._cerrar_trabajo_por_cierre_sesion()
-            # Paro normal o de recuperacion EN CURSO: cerrarlo junto con la
-            # sesion para no dejar filas 'En curso' eternas sobre una sesion
-            # ya Finalizada (Diagnostico 7.2.5). El paro nunca llego a
-            # autorizarse, asi que queda SIN causa (la columna lo permite,
-            # igual que _cerrar_primera_pieza cuando falta la causa).
-            if self.paro_id is not None:
-                autorizador = autorizador_id or self.operador_id
-                try:
-                    finalizar_paro(self.paro_id, None, autorizador)
-                    log.info("Paro %s cerrado junto con la sesion "
-                             "(autorizado por operador %s)",
-                             self.paro_id, autorizador)
-                except Exception:  # noqa: BLE001 - no debe frenar el cierre
-                    log.warning("No se pudo cerrar el paro %s al cerrar la "
-                                "sesion", self.paro_id, exc_info=True)
-                self.paro_id = None
-            cerrar_sesion(self.sesion_id, total)
-        self.controlador.reset_conteo()
-        self.sesion_id = None
-        self.operador_id = None
-        self.operador_nombre = None
-        self.paro_id = None
-        self._en_paro = False
-        self._paro_idle_triggado = False
-        self._primera_pieza = False
-        self._primera_pieza_paro_id = None
-        self._fijar_switch(False)
-        self._refrescar_operador()
-        self._refrescar_estado_maquina()
-        self._estado(f"Maquina en espera. {total} cortes registrados.", "info")
-        log.info("Sesion cerrada con %s cortes", total)
-        return True
-
-    # ------------------------------------------------------------------
-    # Modal: huella para arrancar (abre sesion automaticamente)
-    # ------------------------------------------------------------------
-
-    def _abrir_huella_encendido(self):
-        self._modal_abierto = True
-        try:
-            modal = HuellaModal(
-                self.controller,
-                self.biometrico,
-                titulo="ARRANCAR MAQUINA",
-                mensaje="Coloca tu huella. La sesion se abrira automaticamente.",
-                on_autenticado=self._encendido_autenticado,
-                on_cancelar=lambda: self._estado("Arranque cancelado.", "info"),
-            )
-            modal.exec()
-        finally:
-            self._modal_abierto = False
-
-    def _encendido_autenticado(self, id_operador, nombre, causa_id=None):
-        self.sesion_id = abrir_sesion(id_operador)
-        self.operador_id = id_operador
-        self.operador_nombre = nombre
-        self.controlador.reset_conteo()
-        self.controlador.maquina_lista()
-        self._en_paro = False
-        self._paro_idle_triggado = False
-        self._refrescar_operador()
-        self._estado(f"Maquina lista. Operador: {nombre}.", "exito")
-        log.info("Sesion %s abierta para %s", self.sesion_id, nombre)
-        # Flujo de trabajos: la sesion SIEMPRE arranca en modo Primera pieza
-        # (setup/pruebas sin auto-paro) esperando que el operador escanee el
-        # QR del trabajo cuando este listo.
-        self._entrar_primera_pieza(nombre)
-        self._abrir_modal_trabajo()
-
     # ------------------------------------------------------------------
     # Recuperacion de sesion/paro tras cierre abrupto
     # ------------------------------------------------------------------
@@ -391,16 +537,26 @@ class InicioView(QWidget):
     def _revisar_sesion_interrumpida(self):
         """Detecta una sesion 'Activa' heredada de un apagon y la recupera.
 
-        Restaura operador, contador de cortes (ultimo checkpoint) y deja la
-        maquina en EN PARO: el dueno o un rol autorizado debe autorizar la
-        reanudacion, o cerrar formalmente la sesion. Mientras exista esta
-        sesion no se puede iniciar una nueva (el boton de poder pasa a
-        cerrar/recuperar, nunca a encender).
+        Restaura operador, contador de cortes (ultimo checkpoint) y, SOLO si
+        hay evidencia de que la maquina estaba en marcha al morir la app,
+        deja el estado EN PARO: el dueno o un rol autorizado debe autorizar
+        la reanudacion, o cerrar formalmente la sesion. Mientras exista esta
+        sesion no se puede iniciar una nueva (el boton de sesion del header
+        pasa a cerrar/recuperar, nunca a abrir otra).
+
+        Evidencia de marcha: un paro EN CURSO (PARO pulsado antes del corte,
+        o modo Primera pieza activo, cuyo paro propio queda abierto) o un
+        trabajo Abierto EN CURSO (apagar con trabajo lo pausa con fecha_fin,
+        asi que si sigue en curso la maquina cortaba). Con los botones
+        divididos tambien existe la sesion viva con maquina YA DETENIDA
+        (login sin encender, o se apago la maquina y quedo la sesion): en ese
+        caso NO se registra paro ni se pide autorizacion; la sesion se
+        recupera lista para ENCENDER (el latch PAUSE inicial del HAL ya deja
+        la maquina fisicamente detenida).
         """
         sesion = obtener_sesion_interrumpida()
         if not sesion:
             return
-        self._recuperando = True
         self.sesion_id = sesion["id"]
         self.operador_id = sesion["operador_id"]
         self.operador_nombre = sesion["nombre"]
@@ -418,22 +574,42 @@ class InicioView(QWidget):
             log.info("Trabajo %s (%s) recuperado con %s/%s piezas",
                      trabajo["folio"], trabajo["num_part"],
                      trabajo["cantidad_cortada"], trabajo["cantidad_total"])
-        self._en_paro = True
-        self._paro_idle_triggado = True
-        # Paro en curso de la sesion; si no existia, se formaliza la detencion.
-        self.paro_id = paro_en_curso(self.sesion_id) or iniciar_paro(self.sesion_id)
+        # La maquina estaba corriendo si quedo un paro abierto (normal o de
+        # Primera pieza) o un trabajo en curso (produccion/setup).
+        paro_pendiente = paro_en_curso(self.sesion_id)
+        maquina_al_morir = paro_pendiente is not None or trabajo is not None
+        if maquina_al_morir:
+            self._recuperando = True
+            self._en_paro = True
+            self._paro_idle_triggado = True
+            # Paro en curso de la sesion; si no existia, se formaliza la detencion.
+            self.paro_id = paro_pendiente or iniciar_paro(self.sesion_id)
+            self._refrescar_operador()
+            self._refrescar_estado_maquina()
+            self._estado(
+                "Sesion interrumpida detectada. Maquina EN PARO: autoriza "
+                "para reanudar o usa el boton de sesion del header para "
+                "cerrarla.",
+                "procesando",
+            )
+            log.info("Sesion interrumpida %s recuperada EN PARO (operador "
+                     "%s, cortes %s)", self.sesion_id, self.operador_nombre,
+                     sesion["total_cortes"])
+            QTimer.singleShot(
+                600, lambda: self._abrir_paro_autorizacion(recuperacion=True)
+            )
+            return
+        # Sesion viva con maquina detenida: nada que autorizar.
+        self._recuperando = False
         self._refrescar_operador()
         self._refrescar_estado_maquina()
         self._estado(
-            "Sesion interrumpida detectada. Maquina EN PARO: autoriza para "
-            "reanudar o pulsa poder para cerrar la sesion.",
-            "procesando",
+            "Sesion interrumpida recuperada; la maquina esta detenida. "
+            "Enciende cuando estes listo.", "info",
         )
-        log.info("Sesion interrumpida %s recuperada (operador %s, cortes %s)",
-                 self.sesion_id, self.operador_nombre, sesion["total_cortes"])
-        QTimer.singleShot(
-            600, lambda: self._abrir_paro_autorizacion(recuperacion=True)
-        )
+        log.info("Sesion interrumpida %s recuperada sin paro (operador %s, "
+                 "maquina detenida al cerrar)", self.sesion_id,
+                 self.operador_nombre)
 
     def _abrir_huella_cierre(self):
         """Cierre de sesion: requiere autorizacion del operador de la sesion
@@ -523,8 +699,8 @@ class InicioView(QWidget):
 
         if recuperacion:
             on_cancelar = lambda: self._estado(  # noqa: E731
-                "Recuperacion cancelada. Autoriza para reanudar o pulsa "
-                "poder para cerrar la sesion.", "info"
+                "Recuperacion cancelada. Autoriza para reanudar o usa el "
+                "boton de sesion del header para cerrarla.", "info"
             )
         else:
             on_cancelar = lambda: self._estado(  # noqa: E731
@@ -592,60 +768,53 @@ class InicioView(QWidget):
         self._verificar_rafaga_arranque()
         self._verificar_meta_trabajo()
         self._refrescar_estado_maquina()
-        self._refrescar_enlace_modbus()
         self._verificar_inactividad()
         QTimer.singleShot(config.REFRESCO_CONTADOR_MS, self._refrescar_contador)
 
     def _refrescar_labels_cortes(self):
-        """Tablero: el LED grande es el contador del TRABAJO (piezas hechas
-        de la orden, ancho fijo a 4 digitos); la etiqueta lleva folio y
-        meta; el total de sesion y el setup van en la linea inferior."""
-        total = self.controlador.cortes_totales()
-        setup = self.controlador.cortes_excluidos()
+        """Tablero simplificado (marcador LED): NUMERO DE PARTE arriba,
+        digitos al centro y CANTIDAD/META abajo. El resto de los datos
+        (sesion, folio, ciclos totales, setup) vive en la linea de resumen
+        inferior (`_refrescar_resumen`)."""
         if self._trabajo is None:
-            # Espera de trabajo: guiones en el display y totales abajo para
-            # que el operador vea la actividad del modo Primera pieza.
             self.lbl_cortes.setText("SIN TRABAJO")
             self.display_trabajo.set_valor("----")
-            self.lbl_cortes_trabajo.setText(
-                f"TOTAL {total}  |  SETUP {setup}"
-            )
+            self.lbl_cortes_trabajo.setText("CANTIDAD: ----")
+            self._refrescar_resumen()
             return
         # Nunca se muestra mas alla de la meta (aunque un delta tarde llegue
         # a pasarla, el trabajo ya se cerro en la verificacion de meta).
         hecho = min(self._cortes_trabajo(), self._trabajo["cantidad_total"])
-        self.lbl_cortes.setText(
-            f"TRABAJO {self._trabajo['folio']} - "
-            f"{self._trabajo['num_part']}  |  META "
-            f"{self._trabajo['cantidad_total']}"
-        )
+        self.lbl_cortes.setText(str(self._trabajo["num_part"]))
         self.display_trabajo.set_valor(f"{hecho:04d}")
-        texto = f"TOTAL SESION {total}"
-        if self._primera_pieza:
-            # Trabajo CARGADO en espera: ademas se ven los cortes de setup
-            # que se descartan al salir del modo.
-            texto += f"  |  SETUP {setup}"
-        self.lbl_cortes_trabajo.setText(texto)
+        # Debajo de los digitos SOLO la meta del folio con su etiqueta
+        # ("CANTIDAD: 200"): lo llevado hecho ya lo muestran los digitos;
+        # nada de "0/---".
+        self.lbl_cortes_trabajo.setText(
+            f"CANTIDAD: {self._trabajo['cantidad_total']}"
+        )
+        self._refrescar_resumen()
 
-    def _refrescar_enlace_modbus(self):
-        """Alerta visual si el enlace Modbus se cae (sin crashear la UI).
-
-        Solo aplica al controlador Modbus (configurado con MODBUS_HOST); en
-        modo simulacion o con SimulacionController no hay alerta.
-        """
-        en_simulacion = getattr(self.controlador, "en_simulacion", lambda: True)()
-        conectado = getattr(self.controlador, "conectado", None)
-        if en_simulacion or conectado is None:
-            self.lbl_detalle.setText("")
-            aplicar_estado(self.lbl_detalle, "info")
-        elif not conectado():
-            self.lbl_detalle.setText(
-                "Error de comunicacion con el modulo Modbus. Reintentando..."
-            )
-            aplicar_estado(self.lbl_detalle, "error")
-        else:
-            self.lbl_detalle.setText("")
-            aplicar_estado(self.lbl_detalle, "info")
+    def _refrescar_resumen(self):
+        """Linea inferior de ESTADO: sesion, folio, numero de parte,
+        cantidad hecha, meta del folio, ciclos totales de la sesion y
+        piezas de setup (excluidas). Sin trabajo los campos del folio van
+        en guion; los ciclos y el setup siempre son visibles."""
+        t = self._trabajo
+        partes = [
+            f"SESION {self.operador_nombre or '-'}",
+            f"FOLIO {t['folio'] if t else '-'}",
+            f"PARTE {t['num_part'] if t else '-'}",
+            (
+                f"CANTIDAD "
+                f"{min(self._cortes_trabajo(), t['cantidad_total'])}"
+                if t else "CANTIDAD -"
+            ),
+            f"META {t['cantidad_total'] if t else '-'}",
+            f"CICLOS TOTALES {self.controlador.cortes_totales()}",
+            f"SETUP {self.controlador.cortes_excluidos()}",
+        ]
+        self.lbl_resumen.setText("  |  ".join(partes))
 
     def _checkpoint_cortes(self):
         """Guarda periodicamente el total de cortes de la sesion activa.
@@ -731,8 +900,8 @@ class InicioView(QWidget):
                 and not self._primera_pieza):
             self._fijar_switch(False)
             self._estado(
-                f"Hay un trabajo abierto ({self._trabajo['folio']}); usa "
-                "FINALIZAR TRABAJO para cambiar de modo.", "error"
+                f"Hay un trabajo abierto ({self._trabajo['folio']}); usa el "
+                "boton de maquina para guardarlo y detener.", "error"
             )
             return
         self._abrir_huella_primera_pieza(activo)
@@ -799,8 +968,8 @@ class InicioView(QWidget):
             # Salida del modo con trabajo cargado: aqui ARRANCA el conteo
             # del folio (los cortes de setup quedaron descartados).
             self._estado(
-                f"Contando para el trabajo {self._trabajo['folio']} "
-                f"({self._trabajo['num_part']}).", "exito"
+                f"Iniciando trabajo {self._trabajo['folio']} "
+                f"({self._trabajo['num_part']})...", "exito"
             )
             log.info("Salida de Primera pieza por %s: inicia conteo del "
                      "trabajo %s", nombre, self._trabajo["folio"])
@@ -958,9 +1127,8 @@ class InicioView(QWidget):
         self._refrescar_labels_cortes()
         self._estado(
             f"Trabajo {res['folio']} ({res['num_part']}) cargado por "
-            f"{nombre} ({guardada}/{res['cantidad_total']} ya hechas). Sal "
-            "del modo Primera pieza con tu huella para empezar a contar.",
-            "exito",
+            f"{nombre} ({guardada}/{res['cantidad_total']}). Sal del modo "
+            "Primera pieza con tu huella para empezar.", "exito",
         )
         log.info("Trabajo %s (%s) cargado en espera por %s a la sesion %s "
                  "(retoma %s/%s)", res["folio"], res["num_part"], nombre,
@@ -998,54 +1166,6 @@ class InicioView(QWidget):
         self._entrar_primera_pieza("meta alcanzada")
         self._estado(f"Trabajo {folio} completado ({real}/{meta}). "
                      "Escanea el siguiente trabajo.", "procesando")
-        self._abrir_modal_trabajo()
-
-    def _boton_finalizar_trabajo(self):
-        """FINALIZAR TRABAJO: guarda el conteo parcial y pasa al siguiente."""
-        if self._modal_abierto or self.sesion_id is None:
-            return
-        if self._trabajo is None:
-            self._estado("No hay trabajo abierto que finalizar.", "error")
-            return
-        modal = HuellaModal(
-            self.controller,
-            self.biometrico,
-            titulo="FINALIZAR TRABAJO",
-            mensaje=(
-                f"Se guardara el trabajo {self._trabajo['folio']} "
-                f"({self._trabajo['num_part']}) con "
-                f"{self._cortes_trabajo()} piezas. Coloca tu huella."
-            ),
-            validador=self._validar_autorizacion_paro,
-            on_autenticado=self._trabajo_finalizado_manual,
-            on_cancelar=lambda: self._estado(
-                "Finalizacion cancelada; el trabajo sigue abierto.", "info"
-            ),
-            mostrar_cancelar=True,
-        )
-        modal.exec()
-
-    def _trabajo_finalizado_manual(self, id_operador, nombre, causa_id=None):
-        """FINALIZAR TRABAJO: guarda el parcial SIN cerrar el trabajo.
-
-        'Cerrado' es SOLO para trabajos que alcanzan su cantidad_total; un
-        parcial queda 'Abierto' (con fecha_fin) y se retoma re-escaneando el
-        mismo folio desde lo ya cortado.
-        """
-        folio = self._trabajo["folio"]
-        real = self._cortes_trabajo()
-        pausar_trabajo(folio, real)
-        self._trabajo = None
-        self._baseline_trabajo = 0
-        log.info("Trabajo %s pausado por %s con %s piezas (sigue Abierto)",
-                 folio, nombre, real)
-        # De vuelta a Primera pieza esperando el siguiente QR.
-        self._entrar_primera_pieza(nombre)
-        self._estado(
-            f"Trabajo {folio} guardado por {nombre} con {real} piezas "
-            "(queda Abierto; re-escanear para continuar).",
-            "exito",
-        )
         self._abrir_modal_trabajo()
 
     def _boton_escanear_trabajo(self):
@@ -1218,52 +1338,76 @@ class InicioView(QWidget):
                  "(%s previos descartados como prueba)",
                  nombre, n_excluidos, self._excluidos_previos_rafaga)
 
-    def _refrescar_estado_maquina(self):
-        estilo = self.style()
+    def _estado_actual(self):
+        """Fuente UNICA del estado sesion/maquina.
+
+        Devuelve un dict con: clave, texto y badge del indicador, iconos
+        (tablero y boton de maquina), estilo del boton y si esta habilitado.
+        Los consumidores (`_refrescar_estado_maquina`, futuros badges)
+        leen de aqui; nunca derivan el estado por su cuenta.
+
+        Estados: sin_sesion / en_paro / detenida (sesion activa, relevo
+        apagado) / espera_trabajo (en marcha, modo Primera pieza) / lista
+        (en marcha, produccion).
+        """
+        sp = QStyle.StandardPixmap
         if self.sesion_id is None:
-            self.lbl_estado_maquina.setText("Maquina: EN ESPERA")
-            aplicar_estado(self.lbl_estado_maquina, "pendiente")
-            self._icono_estado(estilo, QStyle.StandardPixmap.SP_MediaPause)
-            self.btn_poder.setIcon(
-                estilo.standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
+            return dict(
+                clave="sin_sesion", texto="Maquina: EN ESPERA",
+                badge="pendiente", icono=sp.SP_MediaPause,
+                btn_icono=sp.SP_MediaPlay, btn_estilo="PowerOn", btn_on=False,
+                tooltip="Inicia sesion para encender la maquina",
             )
-            aplicar_estilo_boton(self.btn_poder, "PowerOn")
-        elif self._en_paro:
-            self.lbl_estado_maquina.setText("Maquina: EN PARO")
-            aplicar_estado(self.lbl_estado_maquina, "procesando")
-            self._icono_estado(estilo, QStyle.StandardPixmap.SP_MediaPause)
-            self.btn_poder.setIcon(
-                estilo.standardIcon(QStyle.StandardPixmap.SP_MediaStop)
+        if self._en_paro:
+            return dict(
+                clave="en_paro", texto="Maquina: EN PARO",
+                badge="procesando", icono=sp.SP_MediaPause,
+                btn_icono=sp.SP_MediaStop, btn_estilo="Power", btn_on=False,
+                tooltip="Resuelve el paro para habilitar la maquina",
             )
-            aplicar_estilo_boton(self.btn_poder, "Power")
-        elif self._primera_pieza:
-            self.lbl_estado_maquina.setText("Maquina: ESPERA TRABAJO")
-            aplicar_estado(self.lbl_estado_maquina, "procesando")
-            self._icono_estado(estilo, QStyle.StandardPixmap.SP_MediaPlay)
-            self.btn_poder.setIcon(
-                estilo.standardIcon(QStyle.StandardPixmap.SP_MediaStop)
+        if not self._maquina_en_marcha():
+            return dict(
+                clave="detenida", texto="Maquina: DETENIDA",
+                badge="info", icono=sp.SP_MediaPause,
+                btn_icono=sp.SP_MediaPlay, btn_estilo="PowerOn", btn_on=True,
+                tooltip="Encender maquina",
             )
-            aplicar_estilo_boton(self.btn_poder, "Power")
-        else:
-            self.lbl_estado_maquina.setText("Maquina: LISTA")
-            aplicar_estado(self.lbl_estado_maquina, "exito")
-            self._icono_estado(estilo, QStyle.StandardPixmap.SP_MediaPlay)
-            self.btn_poder.setIcon(
-                estilo.standardIcon(QStyle.StandardPixmap.SP_MediaStop)
+        if self._primera_pieza:
+            return dict(
+                clave="espera_trabajo", texto="Maquina: ESPERA TRABAJO",
+                badge="procesando", icono=sp.SP_MediaPlay,
+                btn_icono=sp.SP_MediaStop, btn_estilo="Power", btn_on=True,
+                tooltip="Apagar maquina (con trabajo: lo guarda y detiene)",
             )
-            aplicar_estilo_boton(self.btn_poder, "Power")
+        return dict(
+            clave="lista", texto="Maquina: LISTA",
+            badge="exito", icono=sp.SP_MediaPlay,
+            btn_icono=sp.SP_MediaStop, btn_estilo="Power", btn_on=True,
+            tooltip="Apagar maquina (con trabajo: lo guarda y detiene)",
+        )
+
+    def _refrescar_estado_maquina(self):
+        """Pinta el estado desde `_estado_actual` (fuente unica)."""
+        e = self._estado_actual()
+        estilo = self.style()
+        self.lbl_estado_maquina.setText(e["texto"])
+        aplicar_estado(self.lbl_estado_maquina, e["badge"])
+        self._icono_estado(estilo, e["icono"])
+        self.btn_maquina.setIcon(estilo.standardIcon(e["btn_icono"]))
+        aplicar_estilo_boton(self.btn_maquina, e["btn_estilo"])
+        self.btn_maquina.setEnabled(e["btn_on"])
+        self.btn_maquina.setToolTip(e["tooltip"])
         self._fila_switch.setVisible(
-            self.sesion_id is not None and not self._en_paro
+            self.sesion_id is not None
+            and not self._en_paro
+            and self._maquina_en_marcha()
         )
-        # Botones de trabajo: finalizar solo hay algo abierto; escanear solo
-        # si no hay trabajo cargado. El switch manual queda habilitado con
-        # sesion activa: apagarlo con un trabajo EN ESPERA es la salida del
-        # modo (huella) que arranca el conteo.
-        self.btn_finalizar_trabajo.setVisible(
-            self.sesion_id is not None and self._trabajo is not None
-        )
+        # ESCANEAR TRABAJO solo con sesion, sin trabajo cargado y maquina en
+        # marcha (el modal QR tambien sale solo al encender).
         self.btn_escanear.setVisible(
-            self.sesion_id is not None and self._trabajo is None
+            self.sesion_id is not None
+            and self._trabajo is None
+            and self._maquina_en_marcha()
         )
         self.switch_primera_pieza.setEnabled(self.sesion_id is not None)
 
@@ -1275,8 +1419,22 @@ class InicioView(QWidget):
     # ------------------------------------------------------------------
 
     def _refrescar_operador(self):
-        texto = self.operador_nombre if self.operador_nombre else "Sin sesion"
-        self.lbl_operador.setText(f"Operador: {texto}")
+        """Publica la identidad en el header (nombre + icono segun rol).
+
+        Emite `sesion_cambiada(nombre, rol)`: nombre vacio = sin sesion. La
+        App pinta el nombre junto al boton y elige persona (rol operador o
+        sin rol) o engranaje (cualquier otro rol).
+        """
+        nombre = self.operador_nombre or ""
+        rol = ""
+        if self.operador_id is not None:
+            try:
+                rol = obtener_rol_operador(self.operador_id) or ""
+            except Exception:  # noqa: BLE001 - el header no debe fallar
+                log.warning("No se pudo consultar el rol del operador %s",
+                            self.operador_id, exc_info=True)
+                rol = ""
+        self.sesion_cambiada.emit(nombre, rol)
 
     def _estado(self, texto="", estado="info"):
         self.lbl_estado.setText(texto)

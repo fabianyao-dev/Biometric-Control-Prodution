@@ -17,7 +17,8 @@ import logging
 import os
 import sys
 
-from PySide6.QtCore import QTimer
+import qtawesome as qta
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -49,35 +50,15 @@ from src.gui.inicio_view import InicioView
 from src.gui.notificaciones import IndicadorAdvertencias
 from src.gui.sessions_view import SessionsView
 from src.gui import style
-from src.gui.util import icono_svg
 from src.hardware.biometric_service import BiometricService
 from src.hardware.modbus_controller import ModbusController
 from src.hardware.simulacion_controller import SimulacionController
 
 log = logging.getLogger(__name__)
 
-# Icono "light_mode" de Material Symbols (path oficial,
-# google/material-design-icons): sol, para pasar a tema claro.
-SVG_TEMA_CLARO = """\
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="22" height="22">\
-<path fill="{color}" d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 \
-13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 \
-1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 \
-1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 \
-.45-1 1zM5.99 4.58c-.39-.39-1.03-.39-1.41 0-.39.39-.39 1.03 0 1.41l1.06 1.06c.39.39 \
-1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37c-.39-.39-1.03-.39-1.41 \
-0-.39.39-.39 1.03 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0 .39-.39.39-1.03 0-1.41l-1.06-1.06zm1.06-10.96c.39-.39 \
-.39-1.03 0-1.41-.39-.39-1.03-.39-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 \
-1.41 0l1.06-1.06zM7.05 18.36c.39-.39.39-1.03 0-1.41-.39-.39-1.03-.39-1.41 \
-0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06z"/></svg>
-"""
-
-# Icono "dark_mode" de Material Symbols: luna, para pasar a tema oscuro.
-SVG_TEMA_OSCURO = """\
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="22" height="22">\
-<path fill="{color}" d="M12.01 12c0-3.57 2.2-6.62 5.31-7.87.89-.36.75-1.69-.19-1.9-1.56-.35-3.23-.33-4.88.06C8.01 \
-3.16 4.79 6.54 4.11 10.8c-.98 6.09 3.76 11.44 9.81 11.44 1.85 0 3.66-.51 5.23-1.47.82-.5.67-1.77-.29-2.05-4.02-1.17-6.85-4.9-6.85-9.22z"/></svg>
-"""
+# Iconos del header via qtawesome (fuentes incluidas en el paquete; ver
+# requirements.txt). GOTCHA de empaquetado PyInstaller: incluir qtawesome
+# con --collect-all (fuentes + charmap) o los iconos salen vacios en el exe.
 
 def _ruta_recurso(nombre):
     """Ruta a un recurso empaquetado. Con PyInstaller los assets viven en
@@ -125,6 +106,11 @@ class App(QMainWindow):
         self.biometrico = BiometricService()
         self.controlador = crear_controlador()
 
+        # Identidad mostrada en el header (la publica InicioView via la
+        # senal `sesion_cambiada`): nombre y rol del operador de la sesion.
+        self._sesion_nombre = ""
+        self._rol_header = ""
+
         self.vistas = {}
         self.vista_actual = None
         self.btn_sidebar = {}
@@ -160,9 +146,15 @@ class App(QMainWindow):
         lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(8)
 
-        self.btn_hamburguesa = QPushButton("\u2630", self.header)
-        self.btn_hamburguesa.setObjectName("Nav")
-        self.btn_hamburguesa.setFixedWidth(44)
+        # Botones de ICONO del header: cuadrados (44x44) con el glifo
+        # centrado; el estilo "Nav" del sidebar es para texto y descentraria
+        # los iconos (padding asimetrico + text-align left).
+        self.btn_hamburguesa = QPushButton(self.header)
+        self.btn_hamburguesa.setObjectName("NavIcono")
+        self.btn_hamburguesa.setFixedSize(44, 44)
+        self.btn_hamburguesa.setIconSize(QSize(22, 22))
+        self._refrescar_boton_menu()
+        self.btn_hamburguesa.setToolTip("Mostrar/ocultar menu")
         self.btn_hamburguesa.clicked.connect(self._toggle_sidebar)
         lay.addWidget(self.btn_hamburguesa)
 
@@ -171,13 +163,25 @@ class App(QMainWindow):
         lay.addWidget(titulo)
         lay.addStretch(1)
 
+        # Sesion (esquina superior derecha): UN solo boton con icono +
+        # texto; el texto alterna entre "Iniciar sesion" y el nombre del
+        # operador, y el icono es persona (rol operador) o engranaje
+        # (cualquier otro rol).
+        self.btn_sesion = QPushButton("Iniciar sesion", self.header)
+        self.btn_sesion.setObjectName("NavSesion")
+        self.btn_sesion.setIconSize(QSize(20, 20))
+        self.btn_sesion.clicked.connect(self._toggle_sesion_header)
+        self._refrescar_boton_sesion()
+        lay.addWidget(self.btn_sesion)
+
         self.btn_advertencias = IndicadorAdvertencias(self.header)
         lay.addWidget(self.btn_advertencias)
 
         # Tema claro/oscuro: cambia en caliente y persiste en config.json.
         self.btn_tema = QPushButton(self.header)
-        self.btn_tema.setObjectName("Nav")
-        self.btn_tema.setFixedWidth(44)
+        self.btn_tema.setObjectName("NavIcono")
+        self.btn_tema.setFixedSize(44, 44)
+        self.btn_tema.setIconSize(QSize(20, 20))
         self.btn_tema.clicked.connect(self._alternar_tema)
         self._refrescar_boton_tema()
         lay.addWidget(self.btn_tema)
@@ -200,21 +204,77 @@ class App(QMainWindow):
             log.warning("No se pudo guardar el tema en config.json",
                         exc_info=True)
         self._refrescar_boton_tema()
-        # Regenera de inmediato los iconos SVG del indicador de avisos con
-        # los colores del tema nuevo (si no, esperarian al siguiente poll).
+        # Regenera de inmediato los iconos SVG con los colores del tema
+        # nuevo (menu, indicador de avisos y boton de sesion).
+        self._refrescar_boton_menu()
         self._revisar_avisos()
+        self._refrescar_boton_sesion()
+
+    def _refrescar_boton_menu(self):
+        """Icono de la hamburguesa con el color del tema activo."""
+        self.btn_hamburguesa.setIcon(
+            qta.icon("mdi6.menu", color=style.color("texto_sec"))
+        )
 
     def _refrescar_boton_tema(self):
-        # Iconos SVG (Material Symbols), nunca emojis: el glifo Unicode sale
-        # distinto segun la fuente del sistema.
+        # Iconos por nombre (qtawesome); nunca emojis ni glifos Unicode:
+        # salen distintos/rotos segun la fuente del sistema.
         if style.tema_activo == "oscuro":
-            self.btn_tema.setIcon(icono_svg(SVG_TEMA_CLARO,
-                                            style.color("texto_sec")))
+            self.btn_tema.setIcon(qta.icon(
+                "mdi6.weather-sunny", color=style.color("texto_sec")
+            ))
             self.btn_tema.setToolTip("Cambiar a tema claro")
         else:
-            self.btn_tema.setIcon(icono_svg(SVG_TEMA_OSCURO,
-                                            style.color("texto")))
+            self.btn_tema.setIcon(qta.icon(
+                "mdi6.weather-night", color=style.color("texto")
+            ))
             self.btn_tema.setToolTip("Cambiar a tema oscuro")
+
+    # ------------------------------------------------------------------
+    # Sesion (header): nombre + icono persona/engranaje segun rol
+    # ------------------------------------------------------------------
+
+    def _toggle_sesion_header(self):
+        """Delega el toggle de sesion al InicioView (toda la logica vive
+        alla: modal de huella, guards de maquina en marcha, etc.)."""
+        vista = self.vistas.get("inicio")
+        if vista is None:
+            return
+        vista.toggle_sesion()
+
+    def _sesion_cambiada(self, nombre, rol):
+        """Slot de InicioView.sesion_cambiada(nombre, rol).
+
+        El texto del boton alterna: "Iniciar sesion" sin sesion, el nombre
+        del operador con sesion. El icono: persona para el rol 'operador',
+        engranaje para cualquier otro.
+        """
+        self._sesion_nombre = nombre or ""
+        self._rol_header = rol or ""
+        self.btn_sesion.setText(
+            self._sesion_nombre if self._sesion_nombre else "Iniciar sesion"
+        )
+        self._refrescar_boton_sesion()
+
+    def _refrescar_boton_sesion(self):
+        if self._sesion_nombre:
+            es_operador = (
+                (self._rol_header or "").strip().lower() == "operador"
+            )
+            nombre_icono = "mdi6.account" if es_operador else "mdi6.cog"
+            color = style.color("texto")
+            rol_txt = self._rol_header or "sin rol"
+            self.btn_sesion.setToolTip(
+                f"Sesion de {self._sesion_nombre} ({rol_txt}) - clic para "
+                "cerrar"
+            )
+        else:
+            nombre_icono = "mdi6.account"
+            color = style.color("texto_sec")
+            self.btn_sesion.setToolTip("Iniciar sesion")
+        self.btn_sesion.setIcon(
+            qta.icon(nombre_icono, color=color)
+        )
 
     # ------------------------------------------------------------------
     # Advertencias del sistema (lector, HAL, operadores)
@@ -402,6 +462,12 @@ class App(QMainWindow):
         if vista is None:
             if nombre == "inicio":
                 vista = InicioView(self.content, self, self.biometrico, self.controlador)
+                # El header refleja la identidad de la sesion (nombre +
+                # icono persona/engranaje) via esta senal. Se re-publica el
+                # estado actual porque la recuperacion de sesion interrumpida
+                # corre DENTRO del constructor (antes de esta conexion).
+                vista.sesion_cambiada.connect(self._sesion_cambiada)
+                vista._refrescar_operador()
             elif nombre == "sesiones":
                 vista = SessionsView(self.content, self)
             elif nombre == "admin":
