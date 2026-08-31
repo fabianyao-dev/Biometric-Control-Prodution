@@ -1771,9 +1771,12 @@ class InicioView(QWidget):
         if not ventana or ventana <= 0 or umbral <= 0:
             return
         # En Primera pieza, si el operador de la sesion tiene el permiso
-        # `iniciar_primera_pieza` la corrida sin folio esta AUTORIZADA: el
-        # anti-corrida no aplica. En MANTENIMIENTO nunca se suprime.
-        if self._primera_pieza and self._tiene_permiso_iniciar_primera_pieza():
+        # `iniciar_primera_pieza` la corrida SIN folio esta AUTORIZADA: el
+        # anti-corrida no aplica. Con TRABAJO cargado el anti-corrida SI
+        # corre para detectar la corrida y salir del modo (el conteo del
+        # folio arranca al confirmar). En MANTENIMIENTO nunca se suprime.
+        if (self._primera_pieza and self._trabajo is None
+                and self._tiene_permiso_iniciar_primera_pieza()):
             self._muestras_rafaga.clear()
             self._ultimo_excluidos = 0
             self._rafaga_en_curso = False
