@@ -17,8 +17,11 @@ MAQUINA (boton central grande): enciende/apaga el relevo DENTRO de la
     TRABAJO") abriendo el pedido de trabajo; la espera de trabajo queda asi
     atada al ENCENDIDO, no al login. Apagar SIN trabajo detiene el relevo
     (seguro anti-corte mediante). Apagar CON trabajo cargado hace el cierre
-    completo: pide huella, guarda el parcial (Abierto/retomable) y DETIENE
-    la maquina, quedando en espera de trabajo.
+    completo (#5): primero elige la MODALIDAD de cierre (produccion normal
+    topada a la meta / produccion parcial con confirmacion o correccion del
+    conteo / modificacion de folio con el nuevo total), luego pide la huella
+    y DETIENE la maquina, quedando en espera de trabajo. El estado final del
+    trabajo (Cerrado si alcanza la meta, Abierto si no) lo decide la BD.
 
 Modo "Primera pieza": con la sesion abierta y la maquina en marcha, registra
 el evento como un paro con la causa fija 'Primera pieza'; durante el modo la
@@ -57,9 +60,10 @@ marcador muestra NUMERO DE PARTE arriba, los digitos al centro y CANTIDAD/
 META abajo; la linea inferior de estado resume sesion, folio, parte,
 cantidad, meta, ciclos totales y setup. 'Cerrado' SOLO
 al alcanzar la cantidad_total: ahi suena la alarma, se guarda la cantidad
-REAL y vuelve a Primera pieza para el siguiente QR. Lo mismo al cerrar
-sesion: el parcial queda Abierto. Tras un apagon se recupera el trabajo
-Abierto en curso desde su checkpoint.
+TOPADA a la meta (min(real, meta)) y vuelve a Primera pieza para el siguiente
+QR. El cierre por el boton de MAQUINA con trabajo carga la modalidad de
+cierre (#5). Lo mismo al cerrar sesion: el parcial queda Abierto. Tras un
+apagon se recupera el trabajo Abierto en curso desde su checkpoint.
 
 RECUPERACION TRAS CIERRE ABRUPTO: si la app se cerro con una sesion 'Activa'
 (apagon, crash, cierre de ventana), al reiniciar se detecta en
@@ -80,6 +84,7 @@ from collections import deque
 
 from PySide6.QtCore import Qt, QSize, QTimer, Signal
 from PySide6.QtWidgets import (
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -97,6 +102,7 @@ from src.database import (
     actualizar_cantidad_cortada,
     actualizar_cortes_sesion,
     cerrar_sesion,
+    cerrar_trabajo_modalidad,
     completar_trabajo,
     finalizar_paro,
     iniciar_paro,
@@ -111,6 +117,12 @@ from src.database import (
 )
 from src.gui.huella_modal import HuellaModal
 from src.gui.marcador import DisplaySieteSegmentos
+from src.gui.modalidades_cierre import (
+    MODALIDAD_FOLIO,
+    MODALIDAD_NORMAL,
+    MODALIDAD_PARCIAL,
+    ModalidadCierreDialog,
+)
 from src.gui.resplandor import Resplandor
 from src.gui.style import aplicar_estado, aplicar_estilo_boton
 from src.gui.switch import Switch
@@ -472,27 +484,56 @@ class InicioView(QWidget):
     def _apagar_maquina_en_marcha(self):
         """Apaga la maquina manteniendo la sesion abierta.
 
-        Con un trabajo cargado hace el CIERRE COMPLETO: pide huella, guarda
-        el parcial (Abierto/retomable) y detiene el relevo, quedando en
-        espera de trabajo. Sin trabajo detiene directo (saliendo del modo
-        Primera pieza si estuviera activo). La sesion sigue abierta: solo se
-        cierra desde el header con la maquina ya detenida.
+        Con un trabajo cargado hace el CIERRE COMPLETO (#5): elige la
+        modalidad de cierre (normal topada / parcial / modificacion de
+        folio), pide la huella, guarda la cantidad segun la eleccion y
+        detiene el relevo, quedando en espera de trabajo. Sin trabajo
+        detiene directo (saliendo del modo Primera pieza si estuviera
+        activo). La sesion sigue abierta: solo se cierra desde el header con
+        la maquina ya detenida.
         """
         if self._trabajo is not None:
             self._modal_abierto = True
             try:
+                # 1) Modalidad de cierre (#5): el operador elige como se
+                # refleja la cantidad final (normal topada / parcial / folio).
+                folio = self._trabajo["folio"]
+                num_part = self._trabajo["num_part"]
+                cortado = self._cortes_trabajo()
+                meta = self._trabajo["cantidad_total"]
+                dlg = ModalidadCierreDialog(
+                    self, folio, num_part, cortado, meta,
+                )
+                if dlg.exec() != QDialog.Accepted:
+                    self._estado(
+                        "Apagado cancelado; el trabajo sigue abierto.", "info",
+                    )
+                    return
+                modalidad = dlg.resultado_modalidad
+                cantidad_final = dlg.resultado_cantidad
+                nuevo_total = dlg.resultado_nuevo_total
+                if modalidad == MODALIDAD_FOLIO:
+                    etiqueta = f"Modificacion de folio (nuevo total {nuevo_total})"
+                elif modalidad == MODALIDAD_PARCIAL:
+                    etiqueta = "Produccion parcial"
+                else:
+                    etiqueta = "Produccion normal"
+                # 2) Huella del autorizador para el cierre completo.
                 modal = HuellaModal(
                     self.controller,
                     self.biometrico,
                     titulo="FINALIZAR TRABAJO Y APAGAR",
                     mensaje=(
-                        f"Se guardara el trabajo {self._trabajo['folio']} "
-                        f"({self._trabajo['num_part']}) con "
-                        f"{self._cortes_trabajo()} piezas y la maquina se "
+                        f"Trabajo {folio} ({num_part}): {etiqueta}. Se "
+                        f"guardara {cantidad_final} piezas y la maquina se "
                         "detendra. Coloca tu huella."
                     ),
                     validador=self._validar_autorizacion_paro,
-                    on_autenticado=self._apagado_con_trabajo_autenticado,
+                    on_autenticado=lambda op_id, nombre_op, _c:
+                        self._apagado_con_trabajo_autenticado(
+                            op_id, nombre_op, modalidad, cantidad_final,
+                            nuevo_total,
+                        ),
                     on_cancelar=lambda: self._estado(
                         "Apagado cancelado; el trabajo sigue abierto.",
                         "info",
@@ -517,28 +558,41 @@ class InicioView(QWidget):
                  self.operador_nombre, self.sesion_id)
 
     def _apagado_con_trabajo_autenticado(self, id_operador, nombre,
-                                         causa_id=None):
-        """Cierre completo autorizado: guarda el parcial y DETIENE la maquina.
+                                         modalidad, cantidad_final,
+                                         nuevo_total=None, causa_id=None):
+        """Cierre completo autorizado (modalidad #5): guarda la cantidad
+        segun la eleccion y DETIENE la maquina.
 
-        El trabajo queda 'Abierto' (retomable re-escaneando el folio); la
-        sesion sigue abierta con la maquina detenida.
+        La cantidad final ya viene TOPADA por la modalidad (min); la capa de
+        BD decide el estado del trabajo: reaches la meta -> 'Cerrado', no ->
+        'Abierto' (retomable re-escaneando el folio). La sesion sigue abierta
+        con la maquina detenida.
         """
         folio = self._trabajo["folio"]
-        real = self._cortes_trabajo()
+        meta = self._trabajo["cantidad_total"]
         self.controlador.maquina_pausada()
         self._finalizar_primera_pieza_si_activa(id_operador)
         self._fijar_switch(False)
-        pausar_trabajo(folio, real)
+        ok, resultado = cerrar_trabajo_modalidad(
+            folio, cantidad_final, meta, nuevo_total,
+        )
         self._trabajo = None
         self._baseline_trabajo = 0
         self._refrescar_estado_maquina()
         self._refrescar_labels_cortes()
+        if not ok:
+            self._estado(
+                f"No se pudo guardar el trabajo {folio}: {resultado}.",
+                "error",
+            )
+            return
         self._estado(
-            f"Trabajo {folio} guardado por {nombre} con {real} piezas y "
-            "maquina detenida.", "exito",
+            f"Trabajo {folio} guardado por {nombre} con {cantidad_final} "
+            f"piezas ({resultado}) y maquina detenida.", "exito",
         )
-        log.info("Trabajo %s pausado y maquina apagada por %s con %s piezas "
-                 "(sesion %s continua)", folio, nombre, real, self.sesion_id)
+        log.info("Trabajo %s guardado (modalidad %s, %s piezas, estado %s) "
+                 "y maquina apagada por %s (sesion %s continua)", folio,
+                 modalidad, cantidad_final, resultado, nombre, self.sesion_id)
 
     def aplicacion_puede_cerrarse(self):
         """Guard del boton Salir del header y de cualquier cierre de ventana.
@@ -1637,10 +1691,15 @@ class InicioView(QWidget):
         folio = self._trabajo["folio"]
         meta = self._trabajo["cantidad_total"]
         real = self._cortes_trabajo()
-        completar_trabajo(folio, real)
+        # Cierre automatico por meta = modalidad "Produccion normal": TOPADO a
+        # la meta (si se contaron 202 de 200 se guardan 200; el exceso se
+        # descarta). El estado 'Cerrado' lo da alcanzar la meta.
+        guardado = min(real, meta)
+        completar_trabajo(folio, guardado)
         self._trabajo = None
         self._baseline_trabajo = 0
-        log.info("Trabajo %s COMPLETADO (Cerrado): %s/%s", folio, real, meta)
+        log.info("Trabajo %s COMPLETADO (Cerrado): %s/%s (guardado %s)",
+                 folio, real, meta, guardado)
         # Punto 3: al terminar la maquina queda APAGADA (latch PAUSE) en
         # espera de trabajo; no queda energizada sin trabajo cargado y NO se
         # re-entra a Primera pieza ni se abre el modal del siguiente trabajo

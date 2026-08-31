@@ -217,30 +217,35 @@ class BiometricSDK:
     def _ruta_dll(self, nombre):
         """Ruta completa a un DLL de DigitalPersona.
 
-        En desarrollo se carga por nombre (System32 / PATH, SDK instalado en
-        el sistema). Empaquetado con PyInstaller onedir, los DLLs viven en
-        `_internal` (`sys._MEIPASS`) y NO estan en el buscador por defecto,
-        asi que se carga la ruta absoluta y se registra su carpeta para que
-        las dependencias entre DLLs (dpfpdd -> dpfpdd5000, dpdevctlx64, ...)
-        tambien se resuelvan.
+        Se usa la carpeta donde viven los DLLs del proyecto y, solo si no
+        esta (p. ej. ilegible o ausente), se cae a cargar por nombre.
+        - Empaquetado (PyInstaller onedir): los DLLs viven en `_internal`
+          (`sys._MEIPASS`) y NO estan en el buscador por defecto, asi que se
+          carga la ruta absoluta.
+        - Desarrollo: se usa tambien `sdk/vendor/dpf/` del repo (los mismos
+          DLLs que se empaquetan) en vez de exigir el SDK instalado en el
+          sistema.
+        En ambos casos se registra la carpeta con `os.add_dll_directory`
+        para que las dependencias entre DLLs (dpfpdd -> dpfpdd5000,
+        dpdevctlx64, ...) tambien se resuelvan.
         """
         frozen = getattr(sys, "frozen", False)
         if frozen:
             base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-            ruta = os.path.join(base, nombre)
-            log.info(
-                "biometrico empaquetado (frozen): buscando %s en %s (existe=%s)",
-                nombre, base, os.path.exists(ruta),
-            )
-            if os.path.exists(ruta):
-                try:
-                    os.add_dll_directory(base)
-                except (OSError, AttributeError) as e:
-                    log.warning("os.add_dll_directory(%s) fallo: %s", base, e)
-                return ruta
-            log.warning("DLL %s NO existe en %s; se intenta carga por nombre.", nombre, base)
         else:
-            log.debug("biometrico en desarrollo: %s por nombre (System32/PATH).", nombre)
+            base = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(
+                    os.path.abspath(__file__)))),
+                "sdk", "vendor", "dpf",
+            )
+        ruta = os.path.join(base, nombre)
+        if os.path.exists(ruta):
+            try:
+                os.add_dll_directory(base)
+            except (OSError, AttributeError) as e:
+                log.warning("os.add_dll_directory(%s) fallo: %s", base, e)
+            return ruta
+        log.debug("DLL %s no existe en %s; se carga por nombre.", nombre, base)
         return nombre
 
     @property

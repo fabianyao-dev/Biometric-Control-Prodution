@@ -1133,9 +1133,10 @@ def _vincular_trabajo_sesion(conn, folio, sesion_id, base):
 def completar_trabajo(folio: int, cantidad_cortada: int):
     """Marca 'Cerrado' un trabajo al ALCANZAR su cantidad_total.
 
-    Solo la meta alcanzada cierra un trabajo; guarda la cantidad REAL
-    cortada aunque se haya pasado (p. ej. 202/200). Cierra tambien el
-    segmento de `trabajos_sesiones` con los cortes de ESTA sesion.
+    Solo la meta alcanzada cierra un trabajo; recibe la cantidad YA topada
+    (`min(real, meta)`, calculada por la vista #5) para que el exceso sobre
+    la meta se descarte (se contaron 202 de 200 -> se guardan 200). Cierra
+    tambien el segmento de `trabajos_sesiones` con los cortes de ESTA sesion.
     """
     conn = obtener_conexion()
     conn.execute(
@@ -1175,6 +1176,62 @@ def pausar_trabajo(folio: int, cantidad_cortada: int):
     )
     conn.commit()
     conn.close()
+
+
+def cerrar_trabajo_modalidad(folio: int, cantidad_final: int,
+                             meta: int, nuevo_total: int | None = None):
+    """Cierra un trabajo segun la modalidad de cierre elegida (#5).
+
+    Esta funcion define la CANTIDAD final que se guarda; el ESTADO lo decide
+    si esa cantidad alcanza la meta: si la alcanza queda 'Cerrado', si no
+    'Abierto' (retomable re-escaneando el folio), igual que el cierre por
+    meta.
+
+    `cantidad_final` ya llega TOPADA (min) desde la vista segun la modalidad:
+    - produccion normal: min(cortado, meta)
+    - produccion parcial: el conteo confirmado/corregido por el operador
+    - modificacion de folio: min(cortado, nuevo_total)
+
+    Si se pasa `nuevo_total` (modificacion de folio) se actualiza
+    `cantidad_total` antes de evaluar el estado, y la meta comparada pasa a
+    ser ese total modificado. Devuelve (ok, estado|mensaje).
+    """
+    folio = int(folio)
+    cantidad_final = int(cantidad_final)
+    meta = int(meta)
+    estado_meta = meta
+    conn = obtener_conexion()
+    if nuevo_total is not None:
+        nuevo_total = int(nuevo_total)
+        if nuevo_total <= 0:
+            conn.close()
+            return False, "El total modificado debe ser mayor que cero."
+        conn.execute(
+            "UPDATE trabajos SET cantidad_total=? WHERE folio=?",
+            (nuevo_total, folio),
+        )
+        estado_meta = nuevo_total
+    estado = ESTADO_CERRADO if cantidad_final >= estado_meta else ESTADO_ABIERTO
+    if estado == ESTADO_CERRADO:
+        conn.execute(
+            "UPDATE trabajos SET estado=?, fecha_fin=?, cantidad_cortada=? "
+            "WHERE folio=?",
+            (estado, ahora_local(), cantidad_final, folio),
+        )
+    else:
+        conn.execute(
+            "UPDATE trabajos SET fecha_fin=?, cantidad_cortada=? "
+            "WHERE folio=? AND estado=?",
+            (ahora_local(), cantidad_final, folio, ESTADO_ABIERTO),
+        )
+    conn.execute(
+        "UPDATE trabajos_sesiones SET cantidad=?-base, fecha_fin=? "
+        "WHERE folio=? AND fecha_fin IS NULL",
+        (cantidad_final, ahora_local(), folio),
+    )
+    conn.commit()
+    conn.close()
+    return True, estado
 
 
 def actualizar_cantidad_cortada(folio: int, cantidad_cortada: int):
