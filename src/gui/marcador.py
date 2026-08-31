@@ -36,11 +36,16 @@ SEGMENTOS = {
 class DisplaySieteSegmentos(QWidget):
     """Contador LED de N digitos. `set_valor(str)` acepta 0-9, '-' y ' '."""
 
-    def __init__(self, parent=None, alto=110):
+    def __init__(self, parent=None, alto=110, digitos=6):
         super().__init__(parent)
         self._texto = "0000"
         self._alto_digito = float(alto)
-        self.set_valor("0000")
+        # Numero de digitos para el que se reserva espacio FIJO: el display
+        # no cambia de tamano al variar el contenido (evita que el tablero
+        # se desajuste cuando un contador pasa de 9999 a 5+ digitos).
+        self._digitos = max(1, int(digitos))
+        self._texto = " " * self._digitos
+        self.set_valor("0" * self._digitos)
 
     # ------------------------------------------------------------------
     # API publica
@@ -70,7 +75,7 @@ class DisplaySieteSegmentos(QWidget):
         w, _t, sep = self._medidas()
         pad_x = self._alto_digito * 0.30
         inclinacion = self._alto_digito * 0.10
-        n = len(self._texto)
+        n = self._digitos
         ancho = n * w + (n - 1) * sep + 2 * pad_x + inclinacion
         alto = self._alto_digito * 1.36
         return ancho, alto

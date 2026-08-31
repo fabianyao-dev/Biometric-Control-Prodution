@@ -98,10 +98,13 @@ class SessionsView(QWidget):
         col_trabajos.addWidget(self.lbl_trabajos)
         self.tree_trabajos = QTableWidget(0, 7, self)
         self.tree_trabajos.setHorizontalHeaderLabels(
-            ["Folio", "Num Part", "Cantidad", "Cortados (sesion)",
-             "Inicio", "Fin", "Estado"]
+            ["Folio", "Parte", "Meta", "Cortados", "Fin", "Modalidad",
+             "Estado"]
         )
-        # Num Part se estira; el resto al contenido.
+        # Encabezados cortos para que TODO entre en el panel derecho; parte
+        # se estira y el resto al contenido. Si el panel es muy angosto, las
+        # columnas de la derecha se recorren por scroll lateral (nunca quedan
+        # inaccesibles como con ResizeToContents sin cabida).
         self._config_tabla(self.tree_trabajos, col_stretch=(1,))
         col_trabajos.addWidget(self.tree_trabajos, stretch=2)
         fila_detalle.addLayout(col_trabajos, stretch=1)
@@ -166,18 +169,27 @@ class SessionsView(QWidget):
         self._recargar_trabajos(sesion_id)
 
     def _recargar_trabajos(self, sesion_id):
-        """Trabajos de la sesion POR SEGMENTO (folio x sesion): 'Cortados
-        (sesion)' es lo cortado en ESTA sesion para ese folio."""
+        """Trabajos de la sesion POR SEGMENTO (folio x sesion): 'Cortados'
+        es lo cortado en ESTA sesion para ese folio y 'Modalidad' el tipo de
+        cierre de ese segmento (normal / parcial / folio / en curso)."""
+        modalidad_nombre = {
+            "normal": "Normal", "parcial": "Parcial", "folio": "Folio",
+        }
         self.tree_trabajos.setRowCount(0)
         for t in listar_trabajos_de_sesion(sesion_id):
             fila = self.tree_trabajos.rowCount()
             self.tree_trabajos.insertRow(fila)
+            en_curso = not t["fecha_fin"]
+            modalidad = (
+                modalidad_nombre.get(t["modalidad"], t["modalidad"])
+                if not en_curso else "En curso"
+            )
             valores = (
                 t["folio"], t["num_part"], t["cantidad_total"],
                 t["cantidad_sesion"],
-                t["fecha_inicio"],
                 t["fecha_fin"] or ("En curso" if t["estado"] == "Abierto"
                                    else "Sin registro"),
+                modalidad,
                 t["estado"],
             )
             for col, valor in enumerate(valores):

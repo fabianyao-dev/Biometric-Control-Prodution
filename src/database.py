@@ -13,6 +13,9 @@ Esquema relacional:
                            'Cerrado' SOLO al alcanzar cantidad_total; un
                            parcial (FINALIZAR TRABAJO / cierre de sesion) queda
                            'Abierto' con fecha_fin y es retomable.
+    trabajos_sesiones      Desglose por segmento (folio x sesion): cuantos cortes
+                           aporto cada sesion a cada folio y la `modalidad` de
+                           cierre de ese segmento ('normal'/'parcial'/'folio').
     paros_produccion       Paros vinculados a una sesion (FK a sesion_id).
 
 Politicas:
@@ -185,7 +188,8 @@ def init_db():
             base INTEGER NOT NULL DEFAULT 0,
             cantidad INTEGER NOT NULL DEFAULT 0,
             fecha_inicio TIMESTAMP DEFAULT (ahora_monterrey()),
-            fecha_fin TIMESTAMP
+            fecha_fin TIMESTAMP,
+            modalidad TEXT NOT NULL DEFAULT 'normal'
         );
 
         CREATE TABLE IF NOT EXISTS zonas_maquina (
@@ -438,6 +442,19 @@ def init_db():
             "UPDATE zonas_maquina SET activo=0 "
             "WHERE nombre=? AND activo=1",
             (nombre_viejo,),
+        )
+
+    # Modalidad de cierre por segmento (punto 5): en BD antiguas
+    # `trabajos_sesiones` no la tiene; se agrega con default 'normal' para que
+    # los segmentos historicos sigan siendo validos (no perdieron su dato).
+    cols_ts = [
+        r[1]
+        for r in cur.execute("PRAGMA table_info(trabajos_sesiones)").fetchall()
+    ]
+    if "modalidad" not in cols_ts:
+        cur.execute(
+            "ALTER TABLE trabajos_sesiones "
+            "ADD COLUMN modalidad TEXT NOT NULL DEFAULT 'normal'"
         )
 
     conn.commit()
@@ -1170,8 +1187,8 @@ def pausar_trabajo(folio: int, cantidad_cortada: int):
         (ahora_local(), int(cantidad_cortada), int(folio), ESTADO_ABIERTO),
     )
     conn.execute(
-        "UPDATE trabajos_sesiones SET cantidad=?-base, fecha_fin=? "
-        "WHERE folio=? AND fecha_fin IS NULL",
+        "UPDATE trabajos_sesiones SET cantidad=?-base, fecha_fin=?, "
+        "modalidad='parcial' WHERE folio=? AND fecha_fin IS NULL",
         (int(cantidad_cortada), ahora_local(), int(folio)),
     )
     conn.commit()
@@ -1179,7 +1196,8 @@ def pausar_trabajo(folio: int, cantidad_cortada: int):
 
 
 def cerrar_trabajo_modalidad(folio: int, cantidad_final: int,
-                             meta: int, nuevo_total: int | None = None):
+                             meta: int, nuevo_total: int | None = None,
+                             modalidad: str = "normal"):
     """Cierra un trabajo segun la modalidad de cierre elegida (#5).
 
     Esta funcion define la CANTIDAD final que se guarda; el ESTADO lo decide
@@ -1194,7 +1212,10 @@ def cerrar_trabajo_modalidad(folio: int, cantidad_final: int,
 
     Si se pasa `nuevo_total` (modificacion de folio) se actualiza
     `cantidad_total` antes de evaluar el estado, y la meta comparada pasa a
-    ser ese total modificado. Devuelve (ok, estado|mensaje).
+    ser ese total modificado. `modalidad` es la etiqueta de cierre ('normal' /
+    'parcial' / 'folio') que se persiste en el segmento de `trabajos_sesiones`
+    para poder reconstruir despues que tipo de cierre tuvo cada sesion.
+    Devuelve (ok, estado|mensaje).
     """
     folio = int(folio)
     cantidad_final = int(cantidad_final)
@@ -1225,9 +1246,9 @@ def cerrar_trabajo_modalidad(folio: int, cantidad_final: int,
             (ahora_local(), cantidad_final, folio, ESTADO_ABIERTO),
         )
     conn.execute(
-        "UPDATE trabajos_sesiones SET cantidad=?-base, fecha_fin=? "
-        "WHERE folio=? AND fecha_fin IS NULL",
-        (cantidad_final, ahora_local(), folio),
+        "UPDATE trabajos_sesiones SET cantidad=?-base, fecha_fin=?, "
+        "modalidad=? WHERE folio=? AND fecha_fin IS NULL",
+        (cantidad_final, ahora_local(), str(modalidad), folio),
     )
     conn.commit()
     conn.close()
@@ -1295,6 +1316,7 @@ def listar_trabajos_de_sesion(sesion_id: int):
         "       t.cantidad_cortada AS cantidad_cortada, "
         "       ts.cantidad AS cantidad_sesion, "
         "       ts.fecha_inicio AS fecha_inicio, ts.fecha_fin AS fecha_fin, "
+        "       ts.modalidad AS modalidad, "
         "       t.estado AS estado "
         "FROM trabajos_sesiones ts JOIN trabajos t ON t.folio=ts.folio "
         "WHERE ts.sesion_id=? ORDER BY ts.fecha_inicio",

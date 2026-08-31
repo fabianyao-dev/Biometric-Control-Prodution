@@ -20,8 +20,10 @@ _ATAQUE_HASTA = 0.16  # subida rapida 0 -> 1
 _CAIDA_HASTA = 0.68   # caida lenta 1 -> 0
 
 # El halo nunca se apaga del todo y alcanza su maximo en el latido.
+# Se satura a 255 en el pico para que el gradiente nunca exceda el rango
+# valido de QColor.setAlpha (0..255).
 _ALFA_BASE = 120
-_ALFA_PICO = 210
+_ALFA_PICO = 130
 
 
 class Resplandor(QWidget):
@@ -37,6 +39,7 @@ class Resplandor(QWidget):
         self._radio_extra = max(4, radio_extra)
         self._clave = None  # clave de color activo; None = sin halo
         self._fase = 0.0    # posicion en el ciclo [0, 1)
+        self._widget = None # widget envuelto (el halo se centra en el)
         self._timer = QTimer(self)
         self._timer.setInterval(30)
         self._timer.timeout.connect(self._latido)
@@ -66,6 +69,7 @@ class Resplandor(QWidget):
         self.set_resplandor(None)
 
     def add_widget(self, widget):
+        self._widget = widget
         self._layout.addWidget(widget)
         self._layout.addStretch(1)
 
@@ -90,12 +94,23 @@ class Resplandor(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         color = QColor(style.color(self._clave))
-        cx = max(1, self.width() // 2)
-        cy = max(1, self.height() // 2)
-        radio = max(cx, cy)
+        # El halo se centra en el WIDGET ENVUELTO (no en el conjunto del
+        # contenedor), para que quede SIEMPRE detras del boton aun si el
+        # Resplandor se estira o redimensiona por el layout.
+        cx = cy = max(1, self.width(), self.height())
+        if self._widget is not None and self._widget.isVisible():
+            # geometry() del hijo ya esta en coordenadas del Resplandor.
+            pr = self._widget.geometry()
+            cx = pr.center().x()
+            cy = pr.center().y()
+        cx = max(1, int(cx))
+        cy = max(1, int(cy))
+        # Radio hasta el borde mas lejano para que el halo cubra todo el
+        # contenedor con el foco en el boton.
+        radio = max(cx, self.width() - cx, cy, self.height() - cy)
         grad = QRadialGradient(cx, cy, radio)
         intensidad = self._intensidad()
-        alfa = round(_ALFA_BASE + _ALFA_PICO * intensidad)
+        alfa = min(255, _ALFA_BASE + _ALFA_PICO * intensidad)
         for stop, fraccion in ((0.0, 1.0), (0.45, 0.72), (0.8, 0.32)):
             c = QColor(color)
             c.setAlpha(round(alfa * fraccion))

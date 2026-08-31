@@ -54,12 +54,14 @@ class ModalidadCierreDialog(QDialog):
         - `resultado_nuevo_total`: int (solo MODALIDAD_FOLIO) o None
     """
 
-    def __init__(self, parent, folio, num_part, cortado, meta):
+    def __init__(self, parent, folio, num_part, cortado, meta,
+                 cancelable=True):
         super().__init__(parent)
         self.folio = folio
         self.num_part = num_part
         self.cortado = cortado
         self.meta = meta
+        self.cancelable = cancelable
 
         self.resultado_modalidad = None
         self.resultado_cantidad = None
@@ -104,11 +106,15 @@ class ModalidadCierreDialog(QDialog):
         btn_folio.clicked.connect(self._elegir_folio)
         lay.addWidget(btn_folio)
 
-        btn_cancelar = QPushButton("Cancelar", self)
-        btn_cancelar.setAutoDefault(False)
-        btn_cancelar.setDefault(False)
-        btn_cancelar.clicked.connect(self.reject)
-        lay.addWidget(btn_cancelar)
+        # En el cierre por META (`cancelable=False`) no se permite cancelar:
+        # el operador debe elegir modalidad y autorizar; no puede dejar el
+        # trabajo Abierto con la cantidad_total ya cumplida.
+        if self.cancelable:
+            btn_cancelar = QPushButton("Cancelar", self)
+            btn_cancelar.setAutoDefault(False)
+            btn_cancelar.setDefault(False)
+            btn_cancelar.clicked.connect(self.reject)
+            lay.addWidget(btn_cancelar)
 
     def _elegir_normal(self):
         """Produccion normal: se guarda el cortado, TOPADO a la meta."""
