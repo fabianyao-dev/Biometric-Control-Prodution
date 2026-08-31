@@ -45,19 +45,40 @@ PERMISOS_SISTEMA = [
     ("acceso_sesiones", "Ver la vista de Sesiones.", 2),
     ("acceso_admin", "Acceder a Administracion (incluye la gestion de permisos).", 3),
     ("actualizar_app", "Buscar y aplicar actualizaciones de la aplicacion.", 4),
+    ("iniciar_primera_pieza", "Entrar a modo Primera pieza sin escanear un trabajo.", 5),
+    ("autorizar_mantenimiento", "Validar la entrada/salida del modo Mantenimiento (junto al operador).", 6),
 ]
 
 # Permisos por defecto de los roles clasicos. Se aplican en el primer arranque
 # (tabla permisos_roles vacia) y a cualquier rol de estos que no tenga ningun
 # permiso asignado (p. ej. un rol recien creado en una BD existente).
 PERMISOS_POR_DEFECTO = {
-    "admin": ["autorizar_paro", "acceso_sesiones", "acceso_admin", "actualizar_app"],
+    "admin": ["autorizar_paro", "acceso_sesiones", "acceso_admin",
+              "actualizar_app", "iniciar_primera_pieza", "autorizar_mantenimiento"],
     "supervisor": ["autorizar_paro", "acceso_sesiones"],
-    "mantenimiento": ["autorizar_paro"],
+    "mantenimiento": ["autorizar_paro", "iniciar_primera_pieza",
+                      "autorizar_mantenimiento"],
 }
 
 # Causas de paro que se crean por defecto (modo "Primera pieza").
-CAUSAS_PARO_POR_DEFECTO = ["Primera pieza"]
+CAUSAS_PARO_POR_DEFECTO = ["Primera pieza", "mantenimiento"]
+
+# Zonas de la maquina (croquis del punto 7). Se siembran en la tabla
+# `zonas_maquina` (soft-delete) con su posicion de orden e icono por defecto.
+# Las ZONAS son editables (icono/tamano/orden) desde Administracion; las
+# causas de paro NO se editan visualmente (solo descripcion + alta).
+# Los botones "Brazo" y "Banda" se FUSIONARON con "Zona de cable" en una sola
+# zona (ver migracion en init_db): ya no forman parte del listado por defecto.
+# Las estaciones "Etiquetadora 1/2" (impresora de etiquetas) pasaron a
+# "Tinta 1/2" (ver migracion de renombrado en init_db): es la misma zona, su
+# FK en paros_produccion no cambia.
+ZONAS_POR_DEFECTO = [
+    ("Tinta 1", "mdi6.water"),
+    ("Tinta 2", "mdi6.water"),
+    ("Prensa 1", "mdi6.factory"),
+    ("Prensa 2", "mdi6.factory"),
+    ("Zona de cable", "mdi6.cable-data"),
+]
 
 # Permiso que protege el acceso a Administracion; nunca puede quedarse sin
 # ningun rol activo con el (evita quedarse fuera del sistema).
@@ -167,10 +188,24 @@ def init_db():
             fecha_fin TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS zonas_maquina (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL,
+            activo INTEGER NOT NULL DEFAULT 1,
+            posicion INTEGER NOT NULL DEFAULT 0,
+            icono TEXT,
+            x REAL NOT NULL DEFAULT 0.0,
+            y REAL NOT NULL DEFAULT 0.0,
+            w REAL NOT NULL DEFAULT 0.28,
+            h REAL NOT NULL DEFAULT 0.16,
+            icono_frac REAL NOT NULL DEFAULT 0.5
+        );
+
         CREATE TABLE IF NOT EXISTS paros_produccion (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sesion_id INTEGER NOT NULL REFERENCES sesiones_produccion(id),
             causa_id INTEGER REFERENCES causas_paro(id),
+            zona_id INTEGER REFERENCES zonas_maquina(id),
             inicio_paro TIMESTAMP DEFAULT (ahora_monterrey()),
             fin_paro TIMESTAMP,
             autorizado_por_operador_id INTEGER REFERENCES operadores(id)
@@ -255,6 +290,155 @@ def init_db():
                 "INSERT INTO causas_paro (descripcion) VALUES (?)",
                 (descripcion,),
             )
+
+    # Migracion punto 7: la configuracion visual (icono/tamano/posicion) es de
+    # las ZONAS, no de las causas. Si una migracion anterior dejo esas columnas
+    # en causas_paro, se eliminan (SQLite 3.35+ soporta DROP COLUMN). La causa
+    # conserva solo `requiere_zona` como regla de negocio (no editada en la UI).
+    cols_causa = [
+        r[1] for r in cur.execute("PRAGMA table_info(causas_paro)").fetchall()
+    ]
+    for col_visual in ("icono", "tamano", "posicion"):
+        if col_visual in cols_causa:
+            cur.execute(f"ALTER TABLE causas_paro DROP COLUMN {col_visual}")
+    cols_causa = [
+        r[1] for r in cur.execute("PRAGMA table_info(causas_paro)").fetchall()
+    ]
+    if "requiere_zona" not in cols_causa:
+        cur.execute(
+            "ALTER TABLE causas_paro ADD COLUMN requiere_zona INTEGER NOT NULL DEFAULT 0"
+        )
+
+    # Migracion punto 7: zona_id en paros_produccion (croquis de zonas).
+    cols_paros = [
+        r[1] for r in cur.execute("PRAGMA table_info(paros_produccion)").fetchall()
+    ]
+    if "zona_id" not in cols_paros:
+        cur.execute(
+            "ALTER TABLE paros_produccion ADD COLUMN zona_id INTEGER "
+            "REFERENCES zonas_maquina(id)"
+        )
+
+    # Zonas de la maquina (croquis): asegura que existan las zonas definidas,
+    # les asigna el icono por defecto SOLO si aun no tienen ninguno, y NO toca
+    # ni el orden (posicion) ni el tamano que el usuario haya configurado.
+    cols_zona = [
+        r[1] for r in cur.execute("PRAGMA table_info(zonas_maquina)").fetchall()
+    ]
+    if "icono" not in cols_zona:
+        cur.execute("ALTER TABLE zonas_maquina ADD COLUMN icono TEXT")
+    if "tamano" not in cols_zona:
+        cur.execute(
+            "ALTER TABLE zonas_maquina ADD COLUMN tamano INTEGER NOT NULL DEFAULT 44"
+        )
+    for col_geo, default in (
+        ("x", 0.0), ("y", 0.0), ("w", 0.28), ("h", 0.16), ("icono_frac", 0.5),
+    ):
+        if col_geo not in cols_zona:
+            cur.execute(
+                f"ALTER TABLE zonas_maquina ADD COLUMN {col_geo} "
+                f"REAL NOT NULL DEFAULT {default}"
+            )
+    cols_zona = [
+        r[1] for r in cur.execute("PRAGMA table_info(zonas_maquina)").fetchall()
+    ]
+    # Geometria libre (posicion/tamano como fraccion 0..1 del lienzo): las BD
+    # con el layout en grid (fila/col) o sin posicion espacial (x,y == 0) se
+    # siembran con un acomodo por defecto de 2 columnas.
+    columnas_grid = ("fila", "col") if "fila" in cols_zona else None
+    filas_existentes = "tamano" in cols_zona and "ancho" in cols_zona
+    for z in cur.execute("SELECT * FROM zonas_maquina").fetchall():
+        if z["x"] != 0.0 or z["y"] != 0.0:
+            continue
+        if columnas_grid is not None:
+            fx, fy = int(z["col"]), int(z["fila"])
+        else:
+            fx, fy = int(z["posicion"]) % 2, int(z["posicion"]) // 2
+        w = 0.28
+        h = 0.16
+        if filas_existentes and z["tamano"]:
+            h = max(0.12, min(1.0, int(z["tamano"]) / 260.0))
+        if filas_existentes and z["ancho"]:
+            w = max(0.12, min(1.0, int(z["ancho"]) / 420.0))
+        cur.execute(
+            "UPDATE zonas_maquina SET x=?, y=?, w=?, h=? WHERE id=?",
+            (
+                0.12 + fx * 0.45,
+                0.15 + fy * 0.18,
+                w,
+                h,
+                z["id"],
+            ),
+        )
+    for col_legacy in ("fila", "col", "tamano", "ancho", "tamano_icono"):
+        if col_legacy in cols_zona:
+            cur.execute(f"ALTER TABLE zonas_maquina DROP COLUMN {col_legacy}")
+
+    # Renombrado de la maquina (punto 7 busca de impresora a Tinta): las
+    # estaciones "Etiquetadora 1/2" (la impresora de etiquetas) ahora son
+    # "Tinta 1/2". Idempotente: tras el primer arranque ya no existe fila con
+    # el nombre viejo. Los paros conservan su FK (solo cambia el nombre).
+    # El icono de impresora/etiqueta queda fuera de lugar en Tinta: se cambia
+    # a la gota de tinta SOLO en esas estaciones.
+    for nombre_viejo, nombre_nuevo in (
+        ("Etiquetadora 1", "Tinta 1"),
+        ("Etiquetadora 2", "Tinta 2"),
+    ):
+        cur.execute(
+            "UPDATE zonas_maquina SET nombre=? WHERE nombre=?",
+            (nombre_nuevo, nombre_viejo),
+        )
+        cur.execute(
+            "UPDATE zonas_maquina SET icono='mdi6.water' "
+            "WHERE nombre=? AND icono IN ('mdi.printer-3d-nozzle', "
+            "'mdi6.label-outline', 'mdi6.label-multiple-outline')",
+            (nombre_nuevo,),
+        )
+
+    for nombre, icono_def in ZONAS_POR_DEFECTO:
+        zona = cur.execute(
+            "SELECT id, activo, icono FROM zonas_maquina WHERE nombre=?",
+            (nombre,),
+        ).fetchone()
+        if zona is not None:
+            if not zona["activo"]:
+                cur.execute(
+                    "UPDATE zonas_maquina SET activo=1 WHERE id=?", (zona["id"],)
+                )
+            if not zona["icono"]:
+                cur.execute(
+                    "UPDATE zonas_maquina SET icono=? WHERE id=?",
+                    (icono_def, zona["id"]),
+                )
+        else:
+            pos = cur.execute(
+                "SELECT COALESCE(MAX(posicion), -1) + 1 AS siguiente "
+                "FROM zonas_maquina"
+            ).fetchone()["siguiente"]
+            cur.execute(
+                "INSERT INTO zonas_maquina " "(nombre, activo, posicion, icono, x, y, w, h, icono_frac) "
+                "VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    nombre,
+                    pos,
+                    icono_def,
+                    0.12 + (pos % 2) * 0.45,
+                    0.15 + (pos // 2) * 0.18,
+                    0.28,
+                    0.16,
+                    0.5,
+                ),
+            )
+
+    # Fusion de zonas (punto 7): "Brazo" y "Banda" pasaron a ser parte de la
+    # zona "Zona de cable" (una sola). Se desactivan (soft-delete) para que los
+    # paros ya registrados con esas zonas conserven su FK valida.
+    for nombre_viejo in ("Brazo", "Banda"):
+        cur.execute(
+            "UPDATE zonas_maquina SET activo=0 "
+            "WHERE nombre=? AND activo=1",
+            (nombre_viejo,),
+        )
 
     conn.commit()
     conn.close()
@@ -680,21 +864,40 @@ def obtener_rol_operador(operador_id: int):
 # ---------------------------------------------------------------------------
 
 def listar_causas_paro(activas_solo=True):
-    """Devuelve lista de filas (id, descripcion[, activo])."""
+    """Devuelve lista de filas de causas (id, descripcion, requiere_zona[, activo]).
+
+    Las causas NO se editan visualmente (icono/tamano/orden son de las zonas);
+    se listan por id para conservar el orden de alta.
+    """
     conn = obtener_conexion()
     if activas_solo:
         rows = conn.execute(
-            "SELECT id, descripcion FROM causas_paro WHERE activo=1 ORDER BY id"
+            "SELECT id, descripcion, requiere_zona "
+            "FROM causas_paro WHERE activo=1 ORDER BY id"
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT id, descripcion, activo FROM causas_paro ORDER BY id"
+            "SELECT id, descripcion, requiere_zona, activo "
+            "FROM causas_paro ORDER BY id"
         ).fetchall()
     conn.close()
     return rows
 
 
-def agregar_causa_paro(descripcion: str) -> bool:
+def guardar_causa_paro(causa_id: int, descripcion: str,
+                       requiere_zona: bool = False):
+    """Actualiza la descripcion y la regla de negocio `requiere_zona` de una
+    causa. El icono/tamano/orden NO pertenecen a la causa (son de las zonas)."""
+    conn = obtener_conexion()
+    conn.execute(
+        "UPDATE causas_paro SET descripcion=?, requiere_zona=? WHERE id=?",
+        (descripcion.strip(), 1 if requiere_zona else 0, causa_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def agregar_causa_paro(descripcion: str, requiere_zona: bool = False) -> bool:
     """Agrega una causa. Si ya existe (inactiva), solo la reactiva."""
     descripcion = descripcion.strip()
     if not descripcion:
@@ -712,7 +915,8 @@ def agregar_causa_paro(descripcion: str) -> bool:
         conn.close()
         return True
     conn.execute(
-        "INSERT INTO causas_paro (descripcion) VALUES (?)", (descripcion,)
+        "INSERT INTO causas_paro (descripcion, requiere_zona) VALUES (?, ?)",
+        (descripcion, 1 if requiere_zona else 0),
     )
     conn.commit()
     conn.close()
@@ -1061,13 +1265,79 @@ def iniciar_paro(sesion_id: int) -> int:
     return nuevo_id
 
 
-def finalizar_paro(paro_id: int, causa_id: int, operador_id: int):
+def finalizar_paro(paro_id: int, causa_id: int, operador_id: int,
+                   zona_id=None):
     conn = obtener_conexion()
     conn.execute(
-        "UPDATE paros_produccion SET causa_id=?, fin_paro=?, "
+        "UPDATE paros_produccion SET causa_id=?, zona_id=?, fin_paro=?, "
         "autorizado_por_operador_id=? WHERE id=?",
-        (causa_id, ahora_local(), operador_id, paro_id),
+        (causa_id, zona_id, ahora_local(), operador_id, paro_id),
     )
+    conn.commit()
+    conn.close()
+
+
+def listar_zonas_maquina(activas_solo=True):
+    """Zonas del croquis (punto 7) con su geometria libre.
+
+    Cada zona guarda `x`/`y`/`w`/`h` como FRACCION 0..1 del lienzo del
+    croquis (posicion y tamano editados por arrastre en Administracion) e
+    `icono_frac` (tamano del icono como fraccion del boton).
+    """
+    conn = obtener_conexion()
+    if activas_solo:
+        rows = conn.execute(
+            "SELECT id, nombre, posicion, icono, x, y, w, h, icono_frac "
+            "FROM zonas_maquina WHERE activo=1 ORDER BY y, x, id"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, nombre, activo, posicion, icono, x, y, w, h, icono_frac "
+            "FROM zonas_maquina ORDER BY y, x, id"
+        ).fetchall()
+    conn.close()
+    return rows
+
+
+def guardar_zona(
+    zona_id: int,
+    icono: str = "",
+    x: float = 0.12,
+    y: float = 0.15,
+    w: float = 0.28,
+    h: float = 0.16,
+    icono_frac: float = 0.5,
+):
+    """Actualiza la geometria libre (fracciones 0..1) e icono de una zona.
+
+    Re-sincroniza `posicion` como orden de lectura (top-left -> bottom-right)
+    para cualquier codigo que aun lo use de respaldo.
+    """
+    x = max(0.0, min(1.0, float(x)))
+    y = max(0.0, min(1.0, float(y)))
+    w = max(0.12, min(1.0, float(w)))
+    h = max(0.12, min(1.0, float(h)))
+    # El boton no puede salirse del lienzo: limita a 1-pos y, si el minimo
+    # 0.12 lo exige, retrocede la posicion para que quepa.
+    w = min(w, 1.0 - x)
+    h = min(h, 1.0 - y)
+    w = max(w, 0.12)
+    x = min(x, 1.0 - w)
+    h = max(h, 0.12)
+    y = min(y, 1.0 - h)
+    icono_frac = max(0.1, min(0.9, float(icono_frac)))
+    conn = obtener_conexion()
+    conn.execute(
+        "UPDATE zonas_maquina SET icono=?, x=?, y=?, w=?, h=?, icono_frac=? "
+        "WHERE id=?",
+        (icono or "", x, y, w, h, icono_frac, zona_id),
+    )
+    for i, z in enumerate(conn.execute(
+        "SELECT id FROM zonas_maquina WHERE activo=1 ORDER BY y, x, id"
+    ).fetchall()):
+        conn.execute(
+            "UPDATE zonas_maquina SET posicion=? WHERE id=?", (i, z["id"])
+        )
     conn.commit()
     conn.close()
 
@@ -1085,13 +1355,14 @@ def paro_en_curso(sesion_id: int):
 
 
 def obtener_paros_de_sesion(sesion_id: int):
-    """Paros de la sesion con causa y nombre del autorizador, para reportes."""
+    """Paros de la sesion con causa, zona y autorizador, para reportes."""
     conn = obtener_conexion()
     rows = conn.execute(
         "SELECT p.id, c.descripcion, p.inicio_paro, p.fin_paro, "
-        "       a.nombre AS autorizador "
+        "       z.nombre AS zona, a.nombre AS autorizador "
         "FROM paros_produccion p "
         "LEFT JOIN causas_paro c ON c.id=p.causa_id "
+        "LEFT JOIN zonas_maquina z ON z.id=p.zona_id "
         "LEFT JOIN operadores a ON a.id=p.autorizado_por_operador_id "
         "WHERE p.sesion_id=? ORDER BY p.id",
         (sesion_id,),

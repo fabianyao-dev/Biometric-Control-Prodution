@@ -65,12 +65,15 @@ class _IconoAdvertencia(QWidget):
         svg = SVG_ADVERTENCIA.replace("{color}", self._color)
         if self._renderer.load(svg.encode("utf-8")):
             self._renderer.render(p, self.rect())
-            return
-        # Respaldo por si QtSvg no pudiera cargar el icono.
-        p.setPen(QPen(QColor(self._color), 2, Qt.SolidLine, Qt.RoundCap))
-        cx = self.width() // 2
-        p.drawLine(cx, 4, cx, self.height() - 7)
-        p.drawPoint(cx, self.height() - 3)
+        else:
+            # Respaldo por si QtSvg no pudiera cargar el icono.
+            p.setPen(QPen(QColor(self._color), 2, Qt.SolidLine, Qt.RoundCap))
+            cx = self.width() // 2
+            p.drawLine(cx, 4, cx, self.height() - 7)
+            p.drawPoint(cx, self.height() - 3)
+        # SIEMPRE cerrar el painter (un return sin end deja el painter activo
+        # e inunda de "QBackingStore::endPaint" todo repintado posterior).
+        p.end()
 
 
 class PanelAdvertencias(QFrame):

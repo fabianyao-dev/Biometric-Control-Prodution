@@ -8,7 +8,13 @@ animacion corta; `fijar()` permite cambiarlo por codigo sin disparar
 handlers extra (quien lo usa maneja el guard propio).
 """
 
-from PySide6.QtCore import Property, QPropertyAnimation, QRectF, Qt
+from PySide6.QtCore import (
+    Property,
+    QAbstractAnimation,
+    QPropertyAnimation,
+    QRectF,
+    Qt,
+)
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QAbstractButton
 
@@ -42,6 +48,11 @@ class Switch(QAbstractButton):
             self._anim.setEndValue(destino)
             self._anim.start()
         else:
+            # Si hay una animacion en curso (p. ej. la del toggled del
+            # usuario) hay que detenerla, o seguira sobrescribiendo
+            # `_progreso` hacia el valor viejo aunque el estado ya sea el
+            # nuevo (la perilla volveria al lado equivocado).
+            self._anim.stop()
             self.set_progreso(destino)
 
     # Posicion de la perilla como 0..1 (animable por QPropertyAnimation).
@@ -59,20 +70,53 @@ class Switch(QAbstractButton):
         p.setRenderHint(QPainter.Antialiasing)
 
         w, h = self.width(), self.height()
+        deshabilitado = not self.isEnabled()
+        checked = self.isChecked()
 
-        # Pista (track) redondeada. Colores del tema ACTIVO (consultados
-        # aqui para que el cambio de tema repinte sin reiniciar).
-        p.setPen(QPen(QColor(style.color("borde")), 1))
-        if self.isChecked():
-            p.setBrush(QColor(style.color("accento")))
+        # Colores del tema consultados AQUI (convencion del proyecto) para
+        # que el repintado por tema no requiera reconstruir el widget.
+        if deshabilitado:
+            color_track = QColor(style.color("deshabilitado_bg"))
+            color_knob = QColor(style.color("deshabilitado_texto"))
+        elif checked:
+            if self.isDown():
+                color_track = QColor(style.color("accento_pressed"))
+            elif self.underMouse():
+                color_track = QColor(style.color("accento_hover"))
+            else:
+                color_track = QColor(style.color("accento"))
+            color_knob = QColor(style.color("texto"))
         else:
-            p.setBrush(QColor(style.color("deshabilitado_bg")))
+            if self.isDown():
+                color_track = QColor(style.color("deshabilitado_bg")).darker(110)
+            elif self.underMouse():
+                color_track = QColor(style.color("deshabilitado_bg")).lighter(108)
+            else:
+                color_track = QColor(style.color("deshabilitado_bg"))
+            color_knob = QColor(style.color("texto"))
+
+        # Pista (track) redondeada.
+        p.setPen(QPen(QColor(style.color("borde")), 1))
+        p.setBrush(color_track)
         p.drawRoundedRect(QRectF(1, 1, w - 2, h - 2), h / 2.0, h / 2.0)
 
-        # Perilla (knob) blanca que se desliza.
+        # Perilla (knob). Se le anade un borde sutil del color del tema para
+        # que destaque (contraste) tanto sobre la pista clara como sobre la
+        # azul del modo encendido, en ambos temas.
         margen = 2
         diam = h - 2 * margen
-        x = margen + self._progreso * (w - diam - 2 * margen)
+        rango = w - diam - 2 * margen
+        if self._anim.state() == QAbstractAnimation.Running:
+            x = margen + self._progreso * rango
+        else:
+            # Sin animacion en curso la bolita coincide con el estado real
+            # (`checked`), aunque `_progreso` haya quedado desincronizado
+            # (p. ej. al cancelar la salida del modo). Asi nunca queda a la
+            # izquierda estando encendida.
+            x = margen + (1.0 if checked else 0.0) * rango
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(style.color("texto")))
+        p.setBrush(color_knob)
+        p.drawEllipse(QRectF(x, margen, diam, diam))
+        p.setPen(QPen(QColor(style.color("borde")), 1))
+        p.setBrush(Qt.NoBrush)
         p.drawEllipse(QRectF(x, margen, diam, diam))

@@ -75,12 +75,19 @@ class SessionsView(QWidget):
         self.lbl_paros = QLabel("Paros de la sesion:", self)
         self.lbl_paros.setObjectName("HeaderLabel")
         col_paros.addWidget(self.lbl_paros)
-        self.tree_paros = QTableWidget(0, 4, self)
+        self.tree_paros = QTableWidget(0, 5, self)
         self.tree_paros.setHorizontalHeaderLabels(
-            ["Causa", "Inicio", "Fin", "Autorizó"]
+            ["Causa", "Zona", "Inicio", "Fin", "Autorizó"]
         )
-        # La causa se estira; inicio/fin/autorizador al contenido.
-        self._config_tabla(self.tree_paros, col_stretch=(0,))
+        # La causa recibe un ancho fijo AMPLIO (más espacio para leerla) y deja
+        # desplazamiento lateral si el total excede el panel; inicio/fin/
+        # autorizador al contenido. `Stretch` se adapta al ancho disponible y
+        # recorta la causa sin poder desplazarse, por eso se usa Interactive.
+        self._config_tabla(self.tree_paros, col_stretch=())
+        header_paros = self.tree_paros.horizontalHeader()
+        header_paros.setSectionResizeMode(0, QHeaderView.Interactive)
+        self.tree_paros.setColumnWidth(0, 150)
+        self.tree_paros.setColumnWidth(1, 110)
         col_paros.addWidget(self.tree_paros, stretch=2)
         fila_detalle.addLayout(col_paros, stretch=1)
 
@@ -188,12 +195,14 @@ class SessionsView(QWidget):
             autorizador = p["autorizador"] or (
                 "Sin autorizar" if en_curso else "(sin registro)"
             )
+            zona = p["zona"] if p["zona"] else ""
             self.tree_paros.setItem(fila, 0, QTableWidgetItem(causa))
-            self.tree_paros.setItem(fila, 1, QTableWidgetItem(p["inicio_paro"]))
+            self.tree_paros.setItem(fila, 1, QTableWidgetItem(zona))
+            self.tree_paros.setItem(fila, 2, QTableWidgetItem(p["inicio_paro"]))
             self.tree_paros.setItem(
-                fila, 2, QTableWidgetItem("En curso" if en_curso else p["fin_paro"])
+                fila, 3, QTableWidgetItem("En curso" if en_curso else p["fin_paro"])
             )
-            self.tree_paros.setItem(fila, 3, QTableWidgetItem(autorizador))
+            self.tree_paros.setItem(fila, 4, QTableWidgetItem(autorizador))
 
     def _limpiar_paros(self):
         self.tree_paros.setRowCount(0)

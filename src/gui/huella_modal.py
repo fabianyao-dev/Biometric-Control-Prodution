@@ -40,9 +40,9 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QDialog, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from src.gui import style
-from src.gui.selector_causas import SelectorCausas
+from src.gui.selector_causas import SelectorCausaZona
 from src.gui.style import aplicar_estado
-from src.gui.util import centrar_y_ajustar
+from src.gui.util import centrar_y_ajustar, desplazamiento_tactil
 
 log = logging.getLogger(__name__)
 
@@ -112,12 +112,15 @@ class HuellaWidget(QWidget):
         rect = self.rect().adjusted(margen, margen, -margen, -margen)
         if self._renderer.load(self._svg_con_color().encode("utf-8")):
             self._renderer.render(p, rect)
-            return
-
-        # Respaldo por si QtSvg no pudiera cargar el icono.
-        p.setPen(QPen(QColor(style.color("exito")), 3, Qt.SolidLine,
-                      Qt.RoundCap))
-        p.drawEllipse(rect)
+        else:
+            # Respaldo por si QtSvg no pudiera cargar el icono.
+            p.setPen(QPen(QColor(style.color("exito")), 3, Qt.SolidLine,
+                          Qt.RoundCap))
+            p.drawEllipse(rect)
+        # SIEMPRE cerrar el painter: un return sin `p.end()` deja el painter
+        # activo y Qt inunda con "QBackingStore::endPaint() called with active
+        # painter" en TODO repintado posterior (cascada).
+        p.end()
 
 
 class HuellaModal(QDialog):
@@ -125,17 +128,25 @@ class HuellaModal(QDialog):
                  on_autenticado=None, on_cancelar=None,
                  mostrar_cancelar=True, cerrable=True, pedir_causa=False,
                  validador=None, pedir_trabajo=False, qr_solo=False,
-                 on_trabajo_escaneado=None):
+                 on_trabajo_escaneado=None, permitir_sin_trabajo=False,
+                 on_confirmado=None):
         super().__init__(parent)
         self.biometrico = biometrico
         self.titulo = titulo
         self.mensaje = mensaje
         self.on_autenticado = on_autenticado
         self.on_cancelar = on_cancelar
+        self.on_confirmado = on_confirmado
         self.mostrar_cancelar = mostrar_cancelar
         self.cerrable = cerrable
         self.validador = validador
         self.pedir_trabajo = pedir_trabajo
+        self.pedir_causa = pedir_causa
+        # Permite CONFIRMAR con la huella aunque no se haya escaneado ningun
+        # QR. El callback on_autenticado recibe folio/num_part/cantidad como
+        # None para distinguirlo de una carga con trabajo. El autorizador de
+        # ese caso (permiso) se valida en el callback, fuera del modal.
+        self.permitir_sin_trabajo = permitir_sin_trabajo
         # Modo SOLO QR: no pide huella; al leer un QR valido acepta y
         # notifica via on_trabajo_escaneado(folio, num_part, cantidad).
         self.qr_solo = qr_solo
@@ -146,6 +157,12 @@ class HuellaModal(QDialog):
 
         self._autenticado = False
         self._abierto = True
+        # La captura de huella ya fue iniciada (evita relanzar el hilo con
+        # pulsaciones repetidas del boton Confirmar).
+        self._emprendido = False
+        # Evita notificar on_cancelar dos veces si se cancela por mas de una
+        # via (boton Cancelar -> reject, o ESC -> reject directo).
+        self._cancel_notificado = False
         # (operador_id, nombre, causa_id) del exito pendiente de notificar
         # una vez cerrado el modal.
         self._datos_exito = None
@@ -159,13 +176,24 @@ class HuellaModal(QDialog):
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
 
         self._crear_interfaz(pedir_causa)
+        # El modal corre en el kiosco touch: scroll con el dedo en la lista de
+        # causas (QScrollArea) sin que el arrastre vaya a la ventana nativa.
+        desplazamiento_tactil(self)
+        if self.pedir_causa:
+            # Tamano base del modal de causa/zona: suficientemente amplio para
+            # que el croquis (y su letra proporcional) se vea grande, pero sin
+            # desbordar pantallas pequenas (1280x720): `centrar_y_ajustar`
+            # recorta el minimo al tamano de la pantalla si no cabe.
+            self.setMinimumSize(1100, 640)
         centrar_y_ajustar(self, parent)
 
         self._timer_cola = QTimer(self)
         self._timer_cola.setInterval(60)
         self._timer_cola.timeout.connect(self._revisar_cola)
         self._timer_cola.start()
-        if not self.qr_solo:
+        # En un paro con causa (pedir_causa) la captura de huella arranca
+        # hasta pulsar Confirmar (el operador primero elige causa + zona).
+        if not self.qr_solo and not self.pedir_causa:
             self._empezar()
 
         # El escaner USB tipo teclado escribe aqui y manda Enter.
@@ -177,9 +205,11 @@ class HuellaModal(QDialog):
     # ------------------------------------------------------------------
 
     def closeEvent(self, evento):
-        # La ventana de paro NO puede cerrarse (X/ESC) hasta autenticar.
-        # En modo qr_solo no hay huella: siempre se puede cerrar.
-        if not self._autenticado and not self.qr_solo:
+        # La ventana de paro (huella) NO puede cerrarse (X/ESC) hasta
+        # autenticar. En qr_solo no hay huella. En pedir_causa (solo elige
+        # causa+zona, sin huella aun) el cierre lo decide `cerrable` via
+        # `reject`: se deja pasar aqui.
+        if not self.pedir_causa and not self._autenticado and not self.qr_solo:
             self._estado("No se puede cerrar. Identifica tu huella.", "error")
             evento.ignore()
             return
@@ -189,6 +219,15 @@ class HuellaModal(QDialog):
         if not self.cerrable and not self._autenticado:
             self._estado("No se puede cerrar. Identifica tu huella.", "error")
             return
+        # Cierre sin autenticar (ESC u otra via de `reject`): equivale a
+        # pulsar Cancelar, notificando on_cancelar UNA sola vez. Sin esto,
+        # el ESC cerraba el modal sin avisar y la ventana quedaba en un
+        # estado intermedio (p. ej. el modo Primera pieza quedaba activo sin
+        # la validacion de permisos correspondiente).
+        if not self._autenticado and not self._cancel_notificado:
+            self._cancel_notificado = True
+            if self.on_cancelar:
+                self.on_cancelar()
         super().reject()
 
     def done(self, result):
@@ -213,8 +252,11 @@ class HuellaModal(QDialog):
         lbl_titulo.setAlignment(Qt.AlignCenter)
         layout.addWidget(lbl_titulo)
 
-        self.huella = HuellaWidget(self)
-        layout.addWidget(self.huella, alignment=Qt.AlignHCenter)
+        # En el modo selector (pedir_causa) NO hay captura de huella aun: es
+        # el PRIMER paso del flujo de 2 modales (zona+causa -> reanudacion).
+        if not pedir_causa:
+            self.huella = HuellaWidget(self)
+            layout.addWidget(self.huella, alignment=Qt.AlignHCenter)
 
         lbl_mensaje = QLabel(self.mensaje, self)
         lbl_mensaje.setObjectName("EstadoInfo")
@@ -223,8 +265,10 @@ class HuellaModal(QDialog):
         layout.addWidget(lbl_mensaje)
 
         if pedir_causa:
-            self.selector_causas = SelectorCausas(self)
-            layout.addWidget(self.selector_causas)
+            self.selector_causas = SelectorCausaZona(
+                self, on_cambio=self._actualizar_confirmar
+            )
+            layout.addWidget(self.selector_causas, stretch=1)
 
         if self.pedir_trabajo:
             self.input_qr = QLineEdit(self)
@@ -240,11 +284,17 @@ class HuellaModal(QDialog):
             self.lbl_trabajo.setWordWrap(True)
             layout.addWidget(self.lbl_trabajo)
 
-        self.lbl_estado = QLabel(
-            "Escanea el QR del trabajo..." if self.qr_solo
-            else "Coloca tu huella...",
-            self,
-        )
+        if self.pedir_causa:
+            texto_estado = (
+                "Selecciona la causa del paro (y la zona si la requiere) "
+                "y pulsa CONFIRMAR."
+            )
+        else:
+            texto_estado = (
+                "Escanea el QR del trabajo..." if self.qr_solo
+                else "Coloca tu huella..."
+            )
+        self.lbl_estado = QLabel(texto_estado, self)
         self.lbl_estado.setObjectName("EstadoInfo")
         self.lbl_estado.setAlignment(Qt.AlignCenter)
         self.lbl_estado.setWordWrap(True)
@@ -259,6 +309,15 @@ class HuellaModal(QDialog):
             btn_cancelar.setDefault(False)
             btn_cancelar.clicked.connect(self._cancelar)
             layout.addWidget(btn_cancelar)
+
+        # En un paro con causa, el flujo es: elegir causa (+ zona) -> boton
+        # CONFIRMAR -> huella que autoriza.
+        if pedir_causa:
+            self.btn_confirmar = QPushButton("CONFIRMAR CAUSA", self)
+            self.btn_confirmar.setObjectName("Success")
+            self.btn_confirmar.setEnabled(False)
+            self.btn_confirmar.clicked.connect(self._confirmar)
+            layout.addWidget(self.btn_confirmar)
 
     # ------------------------------------------------------------------
     # Escaneo del QR de trabajo (escaner USB tipo teclado)
@@ -335,7 +394,38 @@ class HuellaModal(QDialog):
     # ------------------------------------------------------------------
 
     def _empezar(self):
+        self._emprendido = True
         threading.Thread(target=self._escanea, daemon=True).start()
+
+    def _actualizar_confirmar(self):
+        """Habilita/deshabilita el boton CONFIRMAR segun causa (+ zona)."""
+        if self.pedir_causa and hasattr(self, "btn_confirmar"):
+            self.btn_confirmar.setEnabled(
+                self.selector_causas.puede_confirmar()
+            )
+
+    def _confirmar(self):
+        """Valida causa+zona, cierra el modal y notifica la seleccion via
+        `on_confirmado` (flujo de 2 modales: aqui SOLO se elige; la huella de
+        reanudacion se pide en el segundo modal, en inicio_view)."""
+        if not self.selector_causas.puede_confirmar():
+            self._estado(
+                "Selecciona la causa del paro (y la zona si la requiere).",
+                "error",
+            )
+            return
+        sel = self.selector_causas
+        resultado = (
+            sel.seleccion_id,
+            sel.seleccion_descripcion,
+            sel.seleccion_zona_id(),
+            sel.seleccion_zona_nombre(),
+        )
+        # Cierra PRIMERO y despues notifica (MISMO patron que
+        # _cerrar_y_notificar), para que el segundo modal no se apile sobre este.
+        self.accept()
+        if self.on_confirmado:
+            self.on_confirmado(*resultado)
 
     def _escanea(self):
         if not getattr(self.biometrico, "disponible", True):
@@ -408,7 +498,8 @@ class HuellaModal(QDialog):
                     )
                     QTimer.singleShot(2500, self._reintentar)
                     return
-            if self.pedir_trabajo and self.trabajo_escaneado is None:
+            if self.pedir_trabajo and self.trabajo_escaneado is None \
+                    and not self.permitir_sin_trabajo:
                 # Misma puerta que la causa: exigir el escaneo antes de
                 # aceptar (evita trabajos sin QR).
                 log.info("Huella %s autentica; falta escanear el trabajo.",
@@ -455,13 +546,26 @@ class HuellaModal(QDialog):
             return
         op_id, nombre, causa_id = self._datos_exito
         if self.pedir_trabajo:
+            # Si no hay QR (solo posible con permitir_sin_trabajo) notificamos
+            # los campos de trabajo como None; el callbacks decide/valida.
+            if self.trabajo_escaneado is None:
+                self.on_autenticado(
+                    op_id, nombre, causa_id, None, None, None
+                )
+                return
             folio, num_part, cantidad_total = self.trabajo_escaneado
             self.on_autenticado(
                 op_id, nombre, causa_id,
                 folio, num_part, cantidad_total,
             )
         else:
-            self.on_autenticado(op_id, nombre, causa_id)
+            zona_id = None
+            if self.selector_causas is not None:
+                zona_id = self.selector_causas.seleccion_zona_id()
+            if zona_id is not None:
+                self.on_autenticado(op_id, nombre, causa_id, zona_id)
+            else:
+                self.on_autenticado(op_id, nombre, causa_id)
 
     def _cerrar_y_notificar_qr(self):
         """Modo qr_solo: cierra y notifica el trabajo escaneado."""
@@ -470,8 +574,10 @@ class HuellaModal(QDialog):
             self.on_trabajo_escaneado(*self._datos_qr)
 
     def _cancelar(self):
-        if self.on_cancelar and not self._autenticado:
-            self.on_cancelar()
+        if not self._autenticado and not self._cancel_notificado:
+            self._cancel_notificado = True
+            if self.on_cancelar:
+                self.on_cancelar()
         self.reject()
 
     def _estado(self, texto, estado):

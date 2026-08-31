@@ -39,6 +39,9 @@ PALETAS = {
         "advertencia": "#fbbf24",
         "advertencia_hover": "#fcd34d",
         "sobre_advertencia": "#14181f",
+        "mantenimiento": "#fb923c",
+        "mantenimiento_hover": "#fdba74",
+        "amarillo": "#fde047",
         "error": "#f87171",
         "error_hover": "#fb8f8f",
         "error_pressed": "#ef5a5a",
@@ -75,6 +78,9 @@ PALETAS = {
         "advertencia": "#b45309",
         "advertencia_hover": "#d97706",
         "sobre_advertencia": "#ffffff",
+        "mantenimiento": "#c2410c",
+        "mantenimiento_hover": "#ea580c",
+        "amarillo": "#ca8a04",
         "error": "#dc2626",
         "error_hover": "#ef4444",
         "error_pressed": "#b91c1c",
@@ -374,6 +380,23 @@ QPushButton#Success:hover {
 }
 QPushButton#Success:pressed {
     background: @exito_pressed@;
+}
+
+/* Accion peligrosa/destructiva (p. ej. "Salir de mantenimiento"). */
+QPushButton#Danger {
+    background: @error@;
+    color: @blanco@;
+    border: none;
+}
+QPushButton#Danger:hover {
+    background: @error_hover@;
+}
+QPushButton#Danger:pressed {
+    background: @error_pressed@;
+}
+QPushButton#Danger:disabled {
+    background: @deshabilitado_bg@;
+    color: @deshabilitado_texto@;
 }
 
 /* Botones de la cuadricula de causas de paro. */

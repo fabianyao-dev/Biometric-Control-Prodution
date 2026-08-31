@@ -15,29 +15,45 @@ principal.
 
 import logging
 import queue
+import re
 import sys
 import threading
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import (
+    QPointF,
+    QRectF,
+    QSize,
+    QSortFilterProxyModel,
+    QStringListModel,
+    Qt,
+    QTimer,
+)
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QSlider,
     QStyle,
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
+
+import qtawesome as qta
 
 from src import config
 from src import update as actualizaciones
@@ -51,7 +67,9 @@ from src.database import (
     eliminar_huella,
     eliminar_operador,
     eliminar_rol,
+    guardar_causa_paro,
     guardar_operador,
+    guardar_zona,
     listar_causas_paro,
     listar_huellas_operador,
     listar_operadores_admin,
@@ -64,8 +82,10 @@ from src.database import (
     sesion_activa_actual,
 )
 from src.gui import style
+from src.gui.checkbox import CheckBox
+from src.gui.croquis_zonas import ZonaCanvas
 from src.gui.style import COLOR_ACCENTE, aplicar_estado
-from src.gui.util import preguntar_texto
+from src.gui.util import centrar_y_ajustar, desplazamiento_tactil, preguntar_texto
 
 log = logging.getLogger(__name__)
 
@@ -171,6 +191,212 @@ class CheckboxListDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+# Iconos qtawesome disponibles para los botones de las ZONAS (punto 7).
+# El buscador lista TODO el catalogo (mdi6, fa5s, fa6, ph, ri, ...) cargado
+# perezosamente; esta cache evita re-enumerar ~10k iconos en cada apertura.
+_CACHE_TODOS_ICONOS = None
+
+
+def _todos_los_iconos():
+    """Lista plana 'prefijo.nombre' de TODOS los iconos qtawesome.
+
+    El charmap del singleton se llena al cargar las fuentes (QApplication en
+    marcha). Si por cualquier motivo no se pudiera enumerar, queda vacio y el
+    buscador solo muestra lo escrito manualmente (no bloquea la GUI).
+    """
+    global _CACHE_TODOS_ICONOS
+    if _CACHE_TODOS_ICONOS is None:
+        try:
+            mapas = qta._instance().charmap
+            _CACHE_TODOS_ICONOS = sorted(
+                f"{prefijo}.{nombre}"
+                for prefijo, iconos in mapas.items()
+                for nombre in iconos
+            )
+        except Exception:  # noqa: BLE001
+            _CACHE_TODOS_ICONOS = []
+    return _CACHE_TODOS_ICONOS
+
+
+class _ModeloIconos(QStringListModel):
+    """Modelo de iconos: el rol decorativo renderiza el QIcon (solo los items
+    visibles se rasterizan, permitiendo navegar el catalogo completo)."""
+
+    def data(self, index, role):
+        if role == Qt.DecorationRole:
+            nombre = self.data(index, Qt.DisplayRole)
+            try:
+                return qta.icon(nombre, color=style.color("texto"))
+            except Exception:  # noqa: BLE001
+                return qta.icon("mdi6.help-circle", color=style.color("texto"))
+        return super().data(index, role)
+
+
+class CroquisZonasEditor(QFrame):
+    """Editor WYSIWYG de zonas del croquis (punto 7).
+
+    Permite mover libremente cada zona arrastrando su cuerpo y redimensionarla
+    arrastrando la manija de su esquina inferior-derecha. Al soltar se
+    persiste automaticamente la geometria en BD via `guardar_zona`.
+    """
+
+    def __init__(self, parent=None, on_seleccion=None):
+        super().__init__(parent)
+        self.setObjectName("CausasGrid")
+        self._on_seleccion = on_seleccion
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._canvas = ZonaCanvas(
+            self,
+            editable=True,
+            on_seleccion=self._seleccionar,
+            on_geometria=self._persistir_geometria,
+        )
+        layout.addWidget(self._canvas)
+
+    def _cargar(self):
+        self._canvas.cargar()
+
+    def zona_por_id(self, zona_id):
+        return self._canvas.zona_por_id(zona_id)
+
+    @property
+    def _selected_id(self):
+        return self._canvas._seleccionado_id
+
+    def _seleccionar(self, zona_id):
+        if self._on_seleccion and zona_id is not None:
+            self._on_seleccion(zona_id)
+
+    def _persistir_geometria(self, zona_id, x, y, w, h, icono_frac):
+        zona = self.zona_por_id(zona_id)
+        icono = (zona["icono"] if zona else "") or ""
+        guardar_zona(zona_id, icono, x, y, w, h, icono_frac)
+
+
+class SelectorIconoModal(QDialog):
+    """Buscador de iconos qtawesome (TODO el catalogo) para las ZONAS.
+
+    Estilo "qtawesome icon browser": campo de busqueda + combobox de coleccion
+    + cuadricula en IconMode con render perezoso (solo los iconos visibles se
+    rasterizan), asi navegar ~10k iconos no congela la interfaz.
+    """
+
+    def __init__(self, parent, actual=""):
+        super().__init__(parent)
+        self.icono_elegido = actual
+        self.setWindowTitle("Buscador de iconos")
+        self.setModal(True)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+
+        nombres = _todos_los_iconos()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+
+        barra = QHBoxLayout()
+        self.cmb_fuente = QComboBox(self)
+        self.cmb_fuente.addItem("Todas las colecciones", "")
+        for fuente in sorted({n.split(".", 1)[0] for n in nombres}):
+            self.cmb_fuente.addItem(fuente, fuente)
+        self.cmb_fuente.setToolTip("Filtrar por coleccion (mdi6, fa5s, ...)")
+        barra.addWidget(self.cmb_fuente)
+
+        self.txt_buscar = QLineEdit(self)
+        self.txt_buscar.setPlaceholderText("Buscar icono por nombre...")
+        self.txt_buscar.setClearButtonEnabled(True)
+        barra.addWidget(self.txt_buscar, stretch=1)
+
+        self.lbl_resumen = QLabel("", self)
+        self.lbl_resumen.setObjectName("EstadoInfo")
+        barra.addWidget(self.lbl_resumen)
+        layout.addLayout(barra)
+
+        self.modelo = _ModeloIconos(nombres, self)
+        self.proxy = QSortFilterProxyModel(self)
+        self.proxy.setSourceModel(self.modelo)
+        self.proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
+
+        self.lista = QListView(self)
+        self.lista.setModel(self.proxy)
+        self.lista.setViewMode(QListView.IconMode)
+        self.lista.setUniformItemSizes(True)
+        self.lista.setWordWrap(True)
+        self.lista.setGridSize(QSize(100, 100))
+        self.lista.setIconSize(QSize(48, 48))
+        self.lista.setSpacing(6)
+        self.lista.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.lista.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.lista.doubleClicked.connect(self._aceptar)
+        layout.addWidget(self.lista, stretch=1)
+        desplazamiento_tactil(self.lista)
+
+        barra2 = QWidget(self)
+        h2 = QHBoxLayout(barra2)
+        h2.setContentsMargins(0, 0, 0, 0)
+        h2.setSpacing(8)
+        btn_sin = QPushButton("Sin icono", barra2)
+        btn_sin.clicked.connect(lambda: self._elegir(""))
+        h2.addWidget(btn_sin)
+        h2.addStretch(1)
+        btn_aceptar = QPushButton("Aceptar", barra2)
+        btn_aceptar.setObjectName("Success")
+        btn_aceptar.setEnabled(False)
+        btn_aceptar.clicked.connect(self._aceptar)
+        h2.addWidget(btn_aceptar)
+        btn_cancelar = QPushButton("Cancelar", barra2)
+        btn_cancelar.clicked.connect(self.reject)
+        h2.addWidget(btn_cancelar)
+        layout.addWidget(barra2)
+
+        self._btn_aceptar = btn_aceptar
+        self.cmb_fuente.currentIndexChanged.connect(self._actualizar_filtro)
+        self.txt_buscar.textChanged.connect(self._actualizar_filtro)
+        self.lista.selectionModel().selectionChanged.connect(
+            self._al_cambiar_seleccion
+        )
+
+        self.setMinimumSize(560, 440)
+        centrar_y_ajustar(self, parent)
+
+        if actual:
+            try:
+                fila = nombres.index(actual)
+            except ValueError:
+                fila = -1
+            if fila >= 0:
+                self.lista.setCurrentIndex(self.proxy.mapFromSource(
+                    self.modelo.index(fila)))
+        self._actualizar_filtro()
+        self._al_cambiar_seleccion()
+        self.txt_buscar.setFocus()
+
+    def _actualizar_filtro(self):
+        prefijo = self.cmb_fuente.currentData()
+        texto = self.txt_buscar.text()
+        patron = ""
+        if prefijo:
+            patron += rf"^{re.escape(prefijo)}\."
+        if texto:
+            patron += rf".*{re.escape(texto)}.*"
+        self.proxy.setFilterRegularExpression(patron or ".*")
+        self.lbl_resumen.setText(f"{self.proxy.rowCount()} iconos")
+
+    def _al_cambiar_seleccion(self):
+        self._btn_aceptar.setEnabled(self.lista.currentIndex().isValid())
+
+    def _aceptar(self):
+        idx = self.lista.currentIndex()
+        if idx.isValid():
+            self.icono_elegido = idx.data(Qt.DisplayRole)
+        self.accept()
+
+    def _elegir(self, nombre):
+        self.icono_elegido = nombre
+        self.accept()
+
+
 class AdminView(QWidget):
     def __init__(self, parent, controller, biometrico):
         super().__init__(parent)
@@ -199,15 +425,18 @@ class AdminView(QWidget):
 
         self.tab_operadores = QWidget()
         self.tab_causas = QWidget()
+        self.tab_zonas = QWidget()
         self.tab_roles = QWidget()
         self.tab_sistema = QWidget()
         self.notebook.addTab(self.tab_operadores, "Operadores")
         self.notebook.addTab(self.tab_causas, "Causas de Paro")
+        self.notebook.addTab(self.tab_zonas, "Zonas")
         self.notebook.addTab(self.tab_roles, "Roles")
         self.notebook.addTab(self.tab_sistema, "Sistema")
 
         self._crear_tab_operadores()
         self._crear_tab_causas()
+        self._crear_tab_zonas()
         self._crear_tab_roles()
         self._crear_tab_sistema()
 
@@ -647,43 +876,149 @@ class AdminView(QWidget):
         titulo.setObjectName("Title")
         layout.addWidget(titulo, alignment=Qt.AlignHCenter)
 
-        self.entry_causa = QLineEdit(self.tab_causas)
+        # Fila: agregar causa nueva (con su regla de zona, visible desde el alta).
+        fila_nueva = QWidget(self.tab_causas)
+        hn = QHBoxLayout(fila_nueva)
+        hn.setContentsMargins(0, 0, 0, 0)
+        hn.setSpacing(6)
+        self.entry_causa = QLineEdit(fila_nueva)
         self.entry_causa.setPlaceholderText("Descripcion de la causa")
-        self.entry_causa.setFixedWidth(320)
-        layout.addWidget(self.entry_causa, alignment=Qt.AlignHCenter)
-
-        btn_agregar = QPushButton("Agregar Causa", self.tab_causas)
+        self.entry_causa.setFixedWidth(290)
+        hn.addWidget(self.entry_causa)
+        self.check_causa_nueva = CheckBox("Requiere zona", fila_nueva)
+        self.check_causa_nueva.setToolTip(
+            "Si está marcada, al detenerse con esta causa se exige elegir "
+            "una zona del croquis."
+        )
+        hn.addWidget(self.check_causa_nueva)
+        btn_agregar = QPushButton("Agregar Causa", fila_nueva)
         btn_agregar.clicked.connect(self._agregar_causa)
-        layout.addWidget(btn_agregar, alignment=Qt.AlignHCenter)
+        hn.addWidget(btn_agregar)
+        layout.addWidget(fila_nueva, alignment=Qt.AlignHCenter)
 
         self.lbl_causa_msg = QLabel("", self.tab_causas)
         aplicar_estado(self.lbl_causa_msg, "info")
         layout.addWidget(self.lbl_causa_msg, alignment=Qt.AlignHCenter)
 
-        self.lista_causas = QTableWidget(0, 2, self.tab_causas)
-        self.lista_causas.setHorizontalHeaderLabels(["ID", "Descripcion"])
+        # Las causas NO se editan visualmente (icono/tamano/orden son de las
+        # ZONAS); solo descripcion + la regla `requiere_zona` (si exige elegir
+        # zona del croquis al detenerse).
+        self.lista_causas = QTableWidget(0, 4, self.tab_causas)
+        self.lista_causas.setHorizontalHeaderLabels(
+            ["ID", "Descripcion", "Requiere zona", "Estado"]
+        )
         self._config_tabla(self.lista_causas)
-        self.lista_causas.setColumnWidth(0, 60)
-        self.lista_causas.setColumnWidth(1, 320)
+        self.lista_causas.setColumnWidth(0, 45)
+        self.lista_causas.setColumnWidth(1, 300)
+        self.lista_causas.setColumnWidth(2, 110)
+        self.lista_causas.itemSelectionChanged.connect(self._seleccionar_causa)
         layout.addWidget(self.lista_causas, stretch=1)
 
-        btn_eliminar = QPushButton("Eliminar Causa", self.tab_causas)
-        btn_eliminar.clicked.connect(self._eliminar_causa)
-        layout.addWidget(btn_eliminar, alignment=Qt.AlignHCenter)
+        lbl_edicion = QLabel("Editar causa seleccionada:", self.tab_causas)
+        lbl_edicion.setObjectName("HeaderLabel")
+        layout.addWidget(lbl_edicion, alignment=Qt.AlignLeft)
 
+        panel = QFrame(self.tab_causas)
+        gp = QGridLayout(panel)
+        gp.setContentsMargins(10, 8, 10, 8)
+        gp.setSpacing(6)
+
+        gp.addWidget(QLabel("Descripcion:"), 0, 0)
+        self.edit_causa_desc = QLineEdit(panel)
+        self.edit_causa_desc.setFixedWidth(280)
+        gp.addWidget(self.edit_causa_desc, 0, 1)
+
+        gp.addWidget(QLabel("Zona del croquis:"), 1, 0)
+        self.check_causa_zona = CheckBox(
+            "Exigir elegir zona al detenerse", panel
+        )
+        gp.addWidget(self.check_causa_zona, 1, 1)
+
+        botones = QWidget(panel)
+        hb = QHBoxLayout(botones)
+        hb.setContentsMargins(0, 0, 0, 0)
+        hb.setSpacing(6)
+        btn_guardar = QPushButton("Guardar cambios", botones)
+        btn_guardar.setObjectName("Success")
+        btn_guardar.clicked.connect(self._guardar_causa)
+        hb.addWidget(btn_guardar)
+        btn_eliminar = QPushButton("Eliminar Causa", botones)
+        btn_eliminar.clicked.connect(self._eliminar_causa)
+        hb.addWidget(btn_eliminar)
+        hb.addStretch(1)
+        gp.addWidget(botones, 2, 0, 1, 2)
+
+        layout.addWidget(panel)
+
+        self._causa_seleccionada_id = None
         self._recargar_causas()
+
+    # ------------------------------------------------------------------
+    # Causas: logica (solo descripcion + requiere_zona: fijas, sin edicion
+    # visual de icono/tamano/orden, que pertenece a las ZONAS)
+    # ------------------------------------------------------------------
 
     def _agregar_causa(self):
         desc = self.entry_causa.text().strip()
         if not desc:
             self._lbl_causa("Escribe una descripcion.", "error")
             return
-        if agregar_causa_paro(desc):
+        if agregar_causa_paro(
+            desc, requiere_zona=self.check_causa_nueva.isChecked()
+        ):
             self.entry_causa.clear()
+            self.check_causa_nueva.setChecked(False)
             self._lbl_causa("Causa agregada.", "exito")
             self._recargar_causas()
         else:
             self._lbl_causa("Descripcion vacia.", "error")
+
+    def _recargar_causas(self):
+        self.lista_causas.setRowCount(0)
+        por_id = {}
+        for causa in listar_causas_paro(activas_solo=True):
+            fila = self.lista_causas.rowCount()
+            self.lista_causas.insertRow(fila)
+            self.lista_causas.setItem(fila, 0, QTableWidgetItem(str(causa["id"])))
+            self.lista_causas.setItem(
+                fila, 1, QTableWidgetItem(causa["descripcion"])
+            )
+            self.lista_causas.setItem(
+                fila, 2,
+                QTableWidgetItem("Si" if causa["requiere_zona"] else "No"),
+            )
+            self.lista_causas.setItem(fila, 3, QTableWidgetItem("Activa"))
+            por_id[causa["id"]] = causa
+        self._causas_por_id = por_id
+        if self._causa_seleccionada_id is not None:
+            self._cargar_formulario_causa(self._causa_seleccionada_id)
+
+    def _seleccionar_causa(self):
+        fila = self.lista_causas.currentRow()
+        if fila < 0:
+            return
+        causa_id = int(self.lista_causas.item(fila, 0).text())
+        self._cargar_formulario_causa(causa_id)
+
+    def _cargar_formulario_causa(self, causa_id):
+        causa = self._causas_por_id.get(causa_id)
+        if causa is None:
+            return
+        self._causa_seleccionada_id = causa_id
+        self.edit_causa_desc.setText(causa["descripcion"])
+        self.check_causa_zona.setChecked(bool(causa["requiere_zona"]))
+
+    def _guardar_causa(self):
+        if self._causa_seleccionada_id is None:
+            self._lbl_causa("Selecciona una causa de la lista.", "error")
+            return
+        guardar_causa_paro(
+            self._causa_seleccionada_id,
+            self.edit_causa_desc.text(),
+            self.check_causa_zona.isChecked(),
+        )
+        self._lbl_causa("Cambios guardados.", "exito")
+        self._recargar_causas()
 
     def _eliminar_causa(self):
         fila = self.lista_causas.currentRow()
@@ -692,16 +1027,154 @@ class AdminView(QWidget):
             return
         causa_id = int(self.lista_causas.item(fila, 0).text())
         eliminar_causa_paro(causa_id)
+        self._causa_seleccionada_id = None
         self._lbl_causa("Causa eliminada (desactivada).", "exito")
         self._recargar_causas()
 
-    def _recargar_causas(self):
-        self.lista_causas.setRowCount(0)
-        for causa in listar_causas_paro(activas_solo=True):
-            fila = self.lista_causas.rowCount()
-            self.lista_causas.insertRow(fila)
-            self.lista_causas.setItem(fila, 0, QTableWidgetItem(str(causa["id"])))
-            self.lista_causas.setItem(fila, 1, QTableWidgetItem(causa["descripcion"]))
+    # ------------------------------------------------------------------
+    # Zonas del croquis: editor WYSIWYG (arrastre + icono/tamanios)
+    # ------------------------------------------------------------------
+
+    def _crear_tab_zonas(self):
+        layout = QVBoxLayout(self.tab_zonas)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+
+        titulo = QLabel("Zonas de la Maquina", self.tab_zonas)
+        titulo.setObjectName("Title")
+        layout.addWidget(titulo, alignment=Qt.AlignHCenter)
+
+        texto = QLabel(
+            "Croquis del modal de paro. Haz clic en una zona para editarla; "
+            "ARRASTRA su cuerpo para moverla libremente y la esquina "
+            "inferior-derecha para cambiar su tamano. La posicion y el tamano "
+            "se guardan solos al soltar.",
+            self.tab_zonas,
+        )
+        texto.setWordWrap(True)
+        aplicar_estado(texto, "info")
+        layout.addWidget(texto, alignment=Qt.AlignHCenter)
+
+        self._editor_zonas = CroquisZonasEditor(
+            self.tab_zonas, on_seleccion=self._cargar_formulario_zona
+        )
+        self._editor_zonas.setMinimumHeight(280)
+        layout.addWidget(self._editor_zonas, stretch=1)
+
+        lbl_edicion = QLabel("Editar zona seleccionada:", self.tab_zonas)
+        lbl_edicion.setObjectName("HeaderLabel")
+        layout.addWidget(lbl_edicion, alignment=Qt.AlignLeft)
+
+        panel = QFrame(self.tab_zonas)
+        gp = QGridLayout(panel)
+        gp.setContentsMargins(10, 8, 10, 8)
+        gp.setSpacing(6)
+
+        gp.addWidget(QLabel("Icono:"), 0, 0)
+        ic_fila = QWidget(panel)
+        hic = QHBoxLayout(ic_fila)
+        hic.setContentsMargins(0, 0, 0, 0)
+        hic.setSpacing(6)
+        self.lbl_zona_icono_preview = QLabel(panel)
+        hic.addWidget(self.lbl_zona_icono_preview)
+        self.btn_zona_icono = QPushButton("Seleccionar icono...", panel)
+        self.btn_zona_icono.clicked.connect(self._abrir_selector_icono_zona)
+        hic.addWidget(self.btn_zona_icono)
+        hic.addStretch(1)
+        gp.addWidget(ic_fila, 0, 1)
+
+        gp.addWidget(QLabel("Tamano del icono:"), 1, 0)
+        ic_tam_fila = QWidget(panel)
+        hit = QHBoxLayout(ic_tam_fila)
+        hit.setContentsMargins(0, 0, 0, 0)
+        hit.setSpacing(6)
+        self.slider_zona_icono = QSlider(Qt.Horizontal, panel)
+        self.slider_zona_icono.setRange(10, 90)
+        self.slider_zona_icono.setValue(50)
+        self.slider_zona_icono.setFixedWidth(220)
+        self.lbl_zona_icono_pct = QLabel("50%", panel)
+        self.slider_zona_icono.valueChanged.connect(
+            lambda v: self.lbl_zona_icono_pct.setText(f"{v}%")
+        )
+        hit.addWidget(self.slider_zona_icono)
+        hit.addWidget(self.lbl_zona_icono_pct)
+        hit.addStretch(1)
+        gp.addWidget(ic_tam_fila, 1, 1)
+
+        botones = QWidget(panel)
+        hb = QHBoxLayout(botones)
+        hb.setContentsMargins(0, 0, 0, 0)
+        hb.setSpacing(6)
+        btn_guardar = QPushButton("Guardar cambios", botones)
+        btn_guardar.setObjectName("Success")
+        btn_guardar.clicked.connect(self._guardar_zona)
+        hb.addWidget(btn_guardar)
+        hb.addStretch(1)
+        gp.addWidget(botones, 4, 0, 1, 2)
+
+        layout.addWidget(panel)
+
+        self._zona_seleccionada_id = None
+        self._zona_icono_actual = ""
+        if self._editor_zonas._selected_id is not None:
+            self._cargar_formulario_zona(self._editor_zonas._selected_id)
+
+    def _cargar_formulario_zona(self, zona_id):
+        if not hasattr(self, "slider_zona_icono"):
+            return
+        zona = self._editor_zonas.zona_por_id(int(zona_id))
+        if zona is None:
+            return
+        self._zona_seleccionada_id = int(zona_id)
+        pct = max(10, min(90, int(round(float(zona["icono_frac"]) * 100))))
+        self.slider_zona_icono.setValue(pct)
+        self.lbl_zona_icono_pct.setText(f"{pct}%")
+        self._set_icono_zona(zona["icono"] or "")
+
+    def _set_icono_zona(self, icono):
+        self._zona_icono_actual = icono or ""
+        if self._zona_icono_actual:
+            try:
+                self.lbl_zona_icono_preview.setPixmap(
+                    qta.icon(self._zona_icono_actual,
+                             color=style.color("accento")).pixmap(22, 22)
+                )
+            except Exception:  # noqa: BLE001  (icono invalido)
+                self.lbl_zona_icono_preview.setPixmap(
+                    qta.icon("mdi6.help-circle",
+                             color=style.color("accento")).pixmap(22, 22)
+                )
+        else:
+            self.lbl_zona_icono_preview.setPixmap(
+                qta.icon("mdi6.image-off",
+                         color=style.color("texto_sec")).pixmap(22, 22)
+            )
+
+    def _abrir_selector_icono_zona(self):
+        modal = SelectorIconoModal(self, self._zona_icono_actual)
+        if modal.exec():
+            self._set_icono_zona(modal.icono_elegido)
+
+    def _guardar_zona(self):
+        if self._zona_seleccionada_id is None:
+            self._lbl_causa("Selecciona una zona del croquis.", "error")
+            return
+        zona = self._editor_zonas.zona_por_id(self._zona_seleccionada_id)
+        if zona is None:
+            self._lbl_causa("Selecciona una zona del croquis.", "error")
+            return
+        guardar_zona(
+            self._zona_seleccionada_id,
+            self._zona_icono_actual,
+            zona["x"],
+            zona["y"],
+            zona["w"],
+            zona["h"],
+            self.slider_zona_icono.value() / 100.0,
+        )
+        self._lbl_causa("Cambios guardados.", "exito")
+        self._editor_zonas._cargar()
+        self._cargar_formulario_zona(self._zona_seleccionada_id)
 
     # ------------------------------------------------------------------
     # Tab Roles

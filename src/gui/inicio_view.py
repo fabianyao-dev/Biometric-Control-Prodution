@@ -26,6 +26,16 @@ maquina sigue en marcha y NO se aplica el auto-paro por inactividad. Al salir
 del modo (switch + huella) la gracia del auto-paro se reinicia. El boton PARO
 queda deshabilitado mientras este activo.
 
+Modo "MANTENIMIENTO": al parar y elegir la causa 'mantenimiento', hace falta
+una validacion DOBLE, PRIMERO huella de personal de mantenimiento (permiso
+'autorizar_mantenimiento') y LUEGO la del operador de la sesion. La maquina
+SIGUE EN MARCHA con el conteo suspendido (los cortes van a excluidos, con la
+misma logica de rafagas que Primera pieza). El boton PARO pasa a "SALIR DE
+MANTENIMIENTO" (rojo) y el boton central brilla en ambar; para salir se pide
+otra vez la doble validacion (mantenimiento + operador) y se finaliza el paro
+con la causa 'mantenimiento'. El boton central brilla en amarillo durante
+Primera pieza y en verde al producir.
+
 SEGURO ANTI-CORRIDA: durante el modo los cortes van a un acumulado temporal.
 Si se detecta una rafaga (mas de SEGURO_RAFAGA_CORTES cortes dentro de
 SEGURO_RAFAGA_SEGUNDOS, ver .env), suena una alarma y se pregunta si la
@@ -101,6 +111,7 @@ from src.database import (
 )
 from src.gui.huella_modal import HuellaModal
 from src.gui.marcador import DisplaySieteSegmentos
+from src.gui.resplandor import Resplandor
 from src.gui.style import aplicar_estado, aplicar_estilo_boton
 from src.gui.switch import Switch
 
@@ -128,7 +139,20 @@ class InicioView(QWidget):
         self._recuperando = False
         self._primera_pieza = False
         self._primera_pieza_paro_id = None
+        # Timestamp de entrada al modo Primera pieza (para el timeout de
+        # autorizacion del punto 2). Se conserva al re-entrar idempotente.
+        self._primera_pieza_inicio = None
+        self._aviso_timeout_primera_pieza_hecho = False
         self._ajustando_switch = False
+        # Modo MANTENIMIENTO: la maquina SIGUE EN MARCHA con el conteo
+        # suspendido (los cortes van a excluidos, como en Primera pieza).
+        # El paro abierto (PARO) queda como paro del modo y se finaliza al
+        # salir con la causa fija 'mantenimiento'. Requiere validacion DOBLE:
+        # PRIMERO huella de mantenimiento y LUEGO la del operador.
+        self._modo_mantenimiento = False
+        self._mantenimiento_zona_id = None
+        # Estado actual del boton PARO (PARO vs SALIR DE MANTENIMIENTO rojo).
+        self._boton_paro_mantenimiento = False
         # Seguro anti-corrida en Primera pieza: ventana movil de cortes
         # excluidos para detectar una corrida no autorizada.
         self._muestras_rafaga = deque()
@@ -212,12 +236,16 @@ class InicioView(QWidget):
         layout.addWidget(self.lbl_estado)
 
         # --- Boton de MAQUINA (centro): encender/apagar el relevo dentro
-        # de la sesion. La sesion se abre/cierra desde el header. ---
-        self.btn_maquina = QPushButton(self)
+        # de la sesion. La sesion se abre/cierra desde el header. El boton
+        # va envuelto en un Resplandor (halo pulsante) para resaltar el
+        # estado: verde en produccion, ambar en Mantenimiento. ---
+        self.resplandor_maquina = Resplandor(radio_extra=48, parent=self)
+        self.btn_maquina = QPushButton(self.resplandor_maquina)
         self.btn_maquina.setObjectName("PowerOn")
         self.btn_maquina.setIconSize(QSize(56, 56))
         self.btn_maquina.clicked.connect(self._toggle_maquina)
-        layout.addWidget(self.btn_maquina, alignment=Qt.AlignHCenter)
+        self.resplandor_maquina.add_widget(self.btn_maquina)
+        layout.addWidget(self.resplandor_maquina, alignment=Qt.AlignHCenter)
 
         self.btn_paro = QPushButton("PARO", self)
         self.btn_paro.setMinimumWidth(180)
@@ -379,6 +407,9 @@ class InicioView(QWidget):
         self._paro_idle_triggado = False
         self._primera_pieza = False
         self._primera_pieza_paro_id = None
+        self._primera_pieza_inicio = None
+        self._modo_mantenimiento = False
+        self._mantenimiento_zona_id = None
         self._fijar_switch(False)
         self._refrescar_operador()
         self._refrescar_estado_maquina()
@@ -402,6 +433,11 @@ class InicioView(QWidget):
             # La salida del paro es por el modal de autorizacion (boton
             # PARO); el boton de maquina queda deshabilitado mientras tanto.
             return
+        if self._modo_mantenimiento:
+            # El boton central (glow ambar) tambien sale del modo con la
+            # doble validacion; nunca apaga ni desprotege la maquina.
+            self._salir_modo_mantenimiento()
+            return
         if self._maquina_en_marcha():
             if self._seguro_paro_segundos() is not None:
                 self._estado(
@@ -415,21 +451,22 @@ class InicioView(QWidget):
             self._encender_maquina()
 
     def _encender_maquina(self):
-        """Enciende la maquina dentro de la sesion activa (sin huella extra).
+        """Entra a espera de trabajo (Primera pieza) DENTRO de la sesion.
 
-        Entra al modo Primera pieza y abre el pedido de trabajo: la espera
-        de trabajo queda atada al ENCENDIDO de la maquina, no al login.
+        La maquina fisicamente queda APAGADA (punto 3): solo se enciende al
+        CARGAR un trabajo (`_trabajo_cargado` -> `maquina_lista()`), para
+        hacer los cortes de setup. Asi nunca queda energizada sin trabajo
+        cargado. Abre el pedido de trabajo (modal QR).
         """
-        if self.controlador.maquina_detenida():
-            self.controlador.maquina_lista()
         self._entrar_primera_pieza(self.operador_nombre)
         self._refrescar_estado_maquina()
         self._estado(
-            "Maquina en marcha: escanea el trabajo o haz piezas de prueba.",
-            "exito",
+            "En espera de trabajo: escanea un trabajo para encender la "
+            "maquina y hacer el setup.", "exito",
         )
-        log.info("Maquina encendida por %s (sesion %s)",
-                 self.operador_nombre, self.sesion_id)
+        log.info("Espera de trabajo por %s (sesion %s): la maquina queda "
+                 "apagada hasta cargar un trabajo.", self.operador_nombre,
+                 self.sesion_id)
         self._abrir_modal_trabajo()
 
     def _apagar_maquina_en_marcha(self):
@@ -574,10 +611,13 @@ class InicioView(QWidget):
             log.info("Trabajo %s (%s) recuperado con %s/%s piezas",
                      trabajo["folio"], trabajo["num_part"],
                      trabajo["cantidad_cortada"], trabajo["cantidad_total"])
-        # La maquina estaba corriendo si quedo un paro abierto (normal o de
-        # Primera pieza) o un trabajo en curso (produccion/setup).
+        # La maquina estaba corriendo si hay un trabajo EN CURSO (setup o
+        # produccion). En el nuevo modelo la maquina solo queda ENCENDIDA con
+        # un trabajo cargado; una espera de trabajo con la maquina APAGADA
+        # (sin trabajo, paro 'Primera pieza' abierto) NO es evidencia de
+        # marcha al morir la app (punto 3).
         paro_pendiente = paro_en_curso(self.sesion_id)
-        maquina_al_morir = paro_pendiente is not None or trabajo is not None
+        maquina_al_morir = trabajo is not None
         if maquina_al_morir:
             self._recuperando = True
             self._en_paro = True
@@ -599,6 +639,20 @@ class InicioView(QWidget):
                 600, lambda: self._abrir_paro_autorizacion(recuperacion=True)
             )
             return
+        # Maquina estaba DETENIDA al morir la app (espera de trabajo apagada
+        # u ocio): NADA que autorizar. Si quedo un paro en curso (p. ej. el
+        # 'Primera pieza' de una espera de trabajo), se cierra como detencion
+        # sin causa para no dejar filas eternas sobre la sesion recuperada.
+        if paro_pendiente is not None:
+            try:
+                finalizar_paro(paro_pendiente, None, self.operador_id)
+                log.info("Paro %s de espera de trabajo cerrado al recuperar "
+                         "la sesion %s (maquina detenida)",
+                         paro_pendiente, self.sesion_id)
+            except Exception:  # noqa: BLE001 - no debe frenar la recuperacion
+                log.warning("No se pudo cerrar el paro %s al recuperar la "
+                            "sesion", paro_pendiente, exc_info=True)
+            self.paro_id = None
         # Sesion viva con maquina detenida: nada que autorizar.
         self._recuperando = False
         self._refrescar_operador()
@@ -656,6 +710,10 @@ class InicioView(QWidget):
             return
         if self._modal_abierto:
             return
+        if self._modo_mantenimiento:
+            # El boton PARO pasa a SALIR DE MANTENIMIENTO (rojo).
+            self._salir_modo_mantenimiento()
+            return
         if self._primera_pieza:
             self._estado(
                 "Modo Primera pieza activo: finaliza la Primera pieza para "
@@ -697,6 +755,25 @@ class InicioView(QWidget):
             self._estado("Sin causas de paro; maquina detenida.", "error")
             return
 
+        # Flujo de 2 modales (decision de diseno): PRIMERO se elige causa (+
+        # zona si la requiere) en un selector; al CONFIRMAR se abre el SEGUNDO
+        # modal que pide la huella de reanudacion/autorizacion.
+        def _on_confirmado(causa_id, causa_desc, zona_id, zona_nombre):
+            if self._es_causa_mantenimiento(causa_id):
+                # Flujo Mantenimiento: PRIMERO huella del personal de
+                # mantenimiento y LUEGO la reanudacion del operador.
+                self._pedir_huella_mantenimiento(
+                    lambda id_mant, nombre_mant, causa=None:
+                        self._mantenimiento_entrada_paso_operador(
+                            id_mant, nombre_mant, causa_id, zona_id,
+                            causa_desc, zona_nombre
+                        )
+                )
+            else:
+                self._pedir_huella_reanudacion(
+                    recuperacion, causa_id, zona_id, causa_desc, zona_nombre
+                )
+
         if recuperacion:
             on_cancelar = lambda: self._estado(  # noqa: E731
                 "Recuperacion cancelada. Autoriza para reanudar o usa el "
@@ -712,19 +789,76 @@ class InicioView(QWidget):
             modal = HuellaModal(
                 self.controller,
                 self.biometrico,
-                titulo="AUTORIZAR REANUDACION",
+                titulo="PARO - CAUSA Y ZONA",
                 mensaje=(
-                    "Sesion interrumpida. Maquina EN PARO. Coloca tu huella."
+                    "Sesion interrumpida. Indica la causa del paro (y la zona)."
                     if recuperacion else
-                    "Maquina en PARO. Coloca tu huella."
+                    "Maquina en PARO. Indica la causa del paro (y la zona)."
                 ),
+                # En recuperacion el modal se puede cancelar (para cerrar la
+                # sesion); en un paro normal no, hasta confirmar la causa.
+                mostrar_cancelar=recuperacion,
+                cerrable=recuperacion,
+                pedir_causa=True,
+                on_confirmado=_on_confirmado,
+                on_cancelar=on_cancelar,
+            )
+            modal.exec()
+        finally:
+            self._modal_abierto = False
+
+    def _pedir_huella_reanudacion(self, recuperacion, causa_id=None,
+                                  zona_id=None, causa_desc=None,
+                                  zona_nombre=None, titulo="AUTORIZAR REANUDACION",
+                                  mensaje=None, on_autorizado=None):
+        """SEGUNDO modal del flujo de paro: pide la huella que autoriza la
+        reanudacion, ya con la causa (+ zona) elegida en el primer modal.
+
+        En el flujo de Mantenimiento es el paso del OPERADOR (el personal de
+        mantenimiento ya se valido primero): `on_autorizado` recibe el
+        id/nombre del operador y `titulo`/`mensaje` van personalizados.
+        """
+        if recuperacion:
+            on_cancelar = lambda: self._estado(  # noqa: E731
+                "Recuperacion cancelada. Autoriza para reanudar o usa el "
+                "boton de sesion del header para cerrarla.", "info"
+            )
+        else:
+            on_cancelar = lambda: self._estado(  # noqa: E731
+                "Paro NO autorizado; maquina detenida.", "error"
+            )
+
+        if mensaje is None:
+            detalle = causa_desc or "(sin causa)"
+            if zona_nombre:
+                detalle += f" - {zona_nombre}"
+            mensaje = (
+                ("Sesion interrumpida. " if recuperacion else
+                 "Maquina en PARO. ")
+                + f"Causa: {detalle}. Coloca tu huella."
+            )
+
+        # La causa/zona ya elegidas se pasan como `causa_id`/`zona_id` al
+        # autorizador; el validador (permiso) no necesita la causa.
+        def _autorizado(id_operador, nombre, causa=None):
+            if on_autorizado is not None:
+                on_autorizado(id_operador, nombre, causa)
+            else:
+                self._autorizado_autenticado(id_operador, nombre, causa_id, zona_id)
+
+        self._modal_abierto = True
+        try:
+            modal = HuellaModal(
+                self.controller,
+                self.biometrico,
+                titulo=titulo,
+                mensaje=mensaje,
                 # En recuperacion el modal se puede cancelar (para cerrar la
                 # sesion); en un paro normal no, hasta autorizar.
                 mostrar_cancelar=recuperacion,
                 cerrable=recuperacion,
-                pedir_causa=True,
                 validador=self._validar_autorizacion_paro,
-                on_autenticado=self._autorizado_autenticado,
+                on_autenticado=_autorizado,
                 on_cancelar=on_cancelar,
             )
             modal.exec()
@@ -750,14 +884,188 @@ class InicioView(QWidget):
             + (f" (tu rol: {rol})." if rol else " (sin rol asignado).")
         )
 
-    def _autorizado_autenticado(self, id_operador, nombre, causa_id=None):
-        finalizar_paro(self.paro_id, causa_id, id_operador)
+    def _autorizado_autenticado(self, id_operador, nombre, causa_id=None,
+                                zona_id=None):
+        finalizar_paro(self.paro_id, causa_id, id_operador, zona_id)
         self.controlador.reprisar_maquina()
         self._en_paro = False
         self._paro_idle_triggado = False
         self._recuperando = False
         self._refrescar_estado_maquina()
         self._estado(f"Paro autorizado por {nombre}. Maquina reanudada.", "exito")
+
+    def _es_causa_mantenimiento(self, causa_id) -> bool:
+        return (causa_id is not None
+                and causa_id == self._causa_mantenimiento_id())
+
+    def _causa_mantenimiento_id(self):
+        for causa in listar_causas_paro(activas_solo=True):
+            if str(causa["descripcion"]).strip().lower() == "mantenimiento":
+                return causa["id"]
+        return None
+
+    def _validar_mantenimiento(self, id_operador, nombre, causa_id=None):
+        """Solo personal de mantenimiento autorizado valida la entrada, la
+        salida y la confirmacion de corrida del modo."""
+        if rol_tiene_permiso_operador(id_operador, "autorizar_mantenimiento"):
+            return True, None
+        return False, (
+            "No eres personal de mantenimiento: solo personal autorizado "
+            "puede validar esta accion."
+        )
+
+    def _pedir_huella_mantenimiento(self, on_autenticado):
+        """PRIMER modal del flujo de Mantenimiento: huella del personal
+        autorizado. El `on_autenticado` recibe (id_mant, nombre_mant,
+        causa_id)."""
+        self._modal_abierto = True
+        try:
+            modal = HuellaModal(
+                self.controller,
+                self.biometrico,
+                titulo="AUTORIZACION MANTENIMIENTO",
+                mensaje=(
+                    "Coloca la huella de PERSONAL DE MANTENIMIENTO "
+                    "para validar."
+                ),
+                validador=self._validar_mantenimiento,
+                on_autenticado=on_autenticado,
+                on_cancelar=lambda: self._estado(
+                    "Autorizacion de mantenimiento cancelada.", "info"
+                ),
+                mostrar_cancelar=True,
+            )
+            modal.exec()
+        finally:
+            self._modal_abierto = False
+
+    def _mantenimiento_entrada_paso_operador(self, id_mant, nombre_mant,
+                                             causa_id, zona_id, causa_desc,
+                                             zona_nombre):
+        """Tras la huella de mantenimiento: la del OPERADOR REANUDA el paro y
+        arranca el modo Mantenimiento (la maquina sigue en marcha)."""
+        self._pedir_huella_reanudacion(
+            False, causa_id, zona_id, causa_desc, zona_nombre,
+            titulo="REANUDACION",
+            mensaje=(
+                "Mantenimiento autorizado. Coloca tu huella "
+                "(operador) para reanudar y entrar en Mantenimiento."
+            ),
+            on_autorizado=lambda id_op, nop, causa=None:
+                self._modo_mantenimiento_iniciado(
+                    id_op, nop, id_mant, nombre_mant, causa_id, zona_id
+                )
+        )
+
+    def _modo_mantenimiento_iniciado(self, id_operador, nombre_operador,
+                                     id_mant, nombre_mant, causa_id, zona_id):
+        """Entra al modo Mantenimiento.
+
+        El paro abierto (PARO) queda ABIERTO como paro del modo y se
+        finaliza al salir con la causa fija 'mantenimiento'. La maquina se
+        REACTIVA (sigue en marcha) y el conteo se suspende: los cortes van a
+        excluidos (solo memoria), como en Primera pieza.
+        """
+        self.controlador.reprisar_maquina()
+        self.controlador.suspender_conteo()
+        self._mantenimiento_zona_id = zona_id
+        self._en_paro = False
+        self._paro_idle_triggado = False
+        self._recuperando = False
+        self._modo_mantenimiento = True
+        self._fijar_switch(False)
+        # Baseline nuevo del seguro anti-corrida (descarta muestras de un
+        # modo anterior).
+        self._muestras_rafaga.clear()
+        self._ultimo_excluidos = self.controlador.cortes_excluidos()
+        self._refrescar_estado_maquina()
+        self._estado(
+            f"Modo Mantenimiento autorizado por {nombre_operador} y "
+            f"{nombre_mant}. La maquina sigue en marcha; los cortes NO "
+            "cuentan. Pulsa SALIR DE MANTENIMIENTO al terminar.",
+            "procesando",
+        )
+        log.info("Modo Mantenimiento iniciado (paro %s) validado por %s y %s "
+                 "en la sesion %s", self.paro_id, nombre_operador, nombre_mant,
+                 self.sesion_id)
+
+    def _salir_modo_mantenimiento(self):
+        """Salida del modo: doble validacion con PRIMERO la huella del
+        personal de mantenimiento y LUEGO la del operador que reanuda. La
+        maquina SIGUE EN MARCHA; solo se cierra el paro del modo y el conteo
+        vuelve a la sesion.
+        """
+        if self._modal_abierto:
+            return
+        self._pedir_huella_mantenimiento(
+            self._salir_mantenimiento_paso_operador
+        )
+
+    def _salir_mantenimiento_paso_operador(self, id_mant, nombre_mant,
+                                           causa_id=None):
+        """2da huella de la salida: el OPERADOR reanuda la produccion."""
+        self._pedir_huella_reanudacion(
+            False,
+            titulo="REANUDACION",
+            mensaje=(
+                "Mantenimiento autorizado. La maquina seguira EN MARCHA; "
+                "coloca tu huella (operador) para reanudar."
+            ),
+            on_autorizado=lambda id_op, nop, causa=None:
+                self._mantenimiento_finalizado(
+                    id_mant, nombre_mant, id_op, nop
+                )
+        )
+
+    def _mantenimiento_finalizado(self, id_mant, nombre_mant,
+                                  id_operador, nombre_operador):
+        """Salida del modo Mantenimiento: cierra el paro con causa fija y
+        REANUDA el conteo; la maquina sigue en marcha produciendo."""
+        self._finalizar_modo_mantenimiento(id_operador, id_mant,
+                                           incorporar=False)
+        self._refrescar_estado_maquina()
+        self._refrescar_labels_cortes()
+        self._estado(
+            f"Fin de Mantenimiento autorizado por {nombre_mant} y "
+            f"{nombre_operador}. La maquina sigue en marcha.",
+            "exito",
+        )
+        log.info("Salida de Mantenimiento por %s y %s (sesion %s)",
+                 nombre_mant, nombre_operador, self.sesion_id)
+
+    def _finalizar_modo_mantenimiento(self, id_operador, id_mant,
+                                      incorporar=False, cantidad=None):
+        """Cierra el paro del modo Mantenimiento (causa fija + autorizador de
+        mantenimiento).
+
+        Con `incorporar=False` los cortes del modo se descartan y el conteo
+        normal se REANUDA. Con `incorporar=True` se confirman como
+        produccion de la sesion. Devuelve cuantos cortes se incorporaron.
+        """
+        if not self._modo_mantenimiento:
+            return 0
+        causa_id = self._causa_mantenimiento_id()
+        if causa_id is None:
+            log.warning("Causa 'mantenimiento' inactiva; paro %s sin causa",
+                        self.paro_id)
+        excluidos = self.controlador.cortes_excluidos() if incorporar else 0
+        finalizar_paro(self.paro_id, causa_id, id_mant,
+                       self._mantenimiento_zona_id)
+        self.paro_id = None
+        self._modo_mantenimiento = False
+        self._mantenimiento_zona_id = None
+        if incorporar:
+            self.controlador.incorporar_excluidos(cantidad)
+            incorporados = (
+                excluidos if cantidad is None
+                else min(max(int(cantidad), 0), excluidos)
+            )
+        else:
+            incorporados = 0
+            self.controlador.retomar_conteo()
+        self.controlador.reiniciar_gracia_inactividad()
+        self._fijar_switch(False)
+        return incorporados
 
     # ------------------------------------------------------------------
     # Inactividad -> auto paro
@@ -769,7 +1077,28 @@ class InicioView(QWidget):
         self._verificar_meta_trabajo()
         self._refrescar_estado_maquina()
         self._verificar_inactividad()
+        self._verificar_timeout_primera_pieza()
         QTimer.singleShot(config.REFRESCO_CONTADOR_MS, self._refrescar_contador)
+
+    def _verificar_timeout_primera_pieza(self):
+        """Aviso informativo (una sola vez) al superar el timeout del modo."""
+        if not self._primera_pieza or not self._timeout_primera_pieza_superado():
+            self._aviso_timeout_primera_pieza_hecho = False
+            return
+        if self._aviso_timeout_primera_pieza_hecho:
+            return
+        self._aviso_timeout_primera_pieza_hecho = True
+        permitidos = " o ".join(roles_con_permiso("autorizar_paro")) or (
+            "un rol autorizado"
+        )
+        self._estado(
+            f"Primera pieza lleva mas de "
+            f"{config.PRIMERA_PIEZA_TIMEOUT_S // 60} min: la salida requiere "
+            f"{permitidos}.", "procesando",
+        )
+        log.warning("Primera pieza supero %s s; la salida exigira "
+                    "autorizacion de %s", config.PRIMERA_PIEZA_TIMEOUT_S,
+                    permitidos)
 
     def _refrescar_labels_cortes(self):
         """Tablero simplificado (marcador LED): NUMERO DE PARTE arriba,
@@ -838,7 +1167,7 @@ class InicioView(QWidget):
             return
         if (self.sesion_id is None or self._paro_idle_triggado
                 or self._modal_abierto or self._en_paro
-                or self._primera_pieza):
+                or self._primera_pieza or self._modo_mantenimiento):
             return
         if not self._maquina_en_marcha():
             return
@@ -911,6 +1240,43 @@ class InicioView(QWidget):
         self.switch_primera_pieza.fijar(activo, animar=False)
         self._ajustando_switch = False
 
+    def _validar_salida_primera_pieza(self):
+        """Validador condicional de SALIDA del modo Primera pieza.
+
+        Si se supero el timeout configurado (`PRIMERA_PIEZA_TIMEOUT_S`), la
+        salida exige autorizacion de un rol con `autorizar_paro`
+        (supervisor/admin), ademas del dueno de la sesion. Fuera del timeout
+        basta el validador normal del paro.
+        """
+        def validador(id_operador, nombre, causa_id=None):
+            if not self._timeout_primera_pieza_superado():
+                return self._validar_autorizacion_paro(
+                    id_operador, nombre, causa_id
+                )
+            # Pasado el timeout, la salida exige SIEMPRE un rol con
+            # `autorizar_paro` (supervisor/admin), incluso para el dueno de la
+            # sesion: un descuido prolongado debe resolverlo la supervision.
+            if rol_tiene_permiso_operador(id_operador, "autorizar_paro"):
+                return True, None
+            permitidos = " o ".join(roles_con_permiso("autorizar_paro")) or (
+                "un rol autorizado"
+            )
+            rol = obtener_rol_operador(id_operador)
+            return False, (
+                f"El modo Primera pieza lleva mas de "
+                f"{config.PRIMERA_PIEZA_TIMEOUT_S // 60} min y debe finalizarlo "
+                f"{permitidos} para iniciar produccion"
+                + (f" (tu rol: {rol})." if rol else " (sin rol asignado).")
+            )
+        return validador
+
+    def _timeout_primera_pieza_superado(self) -> bool:
+        """True si el modo Primera pieza lleva mas del timeout configurado."""
+        timeout = config.PRIMERA_PIEZA_TIMEOUT_S
+        if not timeout or timeout <= 0 or self._primera_pieza_inicio is None:
+            return False
+        return (time.time() - self._primera_pieza_inicio) > timeout
+
     def _abrir_huella_primera_pieza(self, inicio):
         if inicio and self._causa_primera_pieza_id() is None:
             self._fijar_switch(False)
@@ -924,6 +1290,12 @@ class InicioView(QWidget):
             return
         self._modal_abierto = True
         try:
+            # Al SALIR del modo, si se supero el timeout, exigir rol con
+            # `autorizar_paro` (punto 2); el inicio siempre usa el normal.
+            validador = (
+                self._validar_autorizacion_paro if inicio
+                else self._validar_salida_primera_pieza()
+            )
             modal = HuellaModal(
                 self.controller,
                 self.biometrico,
@@ -936,7 +1308,7 @@ class InicioView(QWidget):
                     if inicio else
                     "Coloca tu huella para finalizar el modo Primera pieza."
                 ),
-                validador=self._validar_autorizacion_paro,
+                validador=validador,
                 on_autenticado=(
                     self._primera_pieza_iniciada if inicio
                     else self._primera_pieza_finalizada
@@ -947,6 +1319,10 @@ class InicioView(QWidget):
             modal.exec()
         finally:
             self._modal_abierto = False
+        # El modal pudo cerrarse autenticando, cancelando, X o ESC. El switch
+        # debe reflejar el estado REAL del modo: si seguimos en Primera pieza
+        # (p. ej. la SALIDA fue cancelada) el switch NO debe quedar apagado.
+        self._fijar_switch(self._primera_pieza)
 
     def _cancelar_primera_pieza(self, inicio):
         self._fijar_switch(not inicio)
@@ -966,7 +1342,8 @@ class InicioView(QWidget):
         self._refrescar_estado_maquina()
         if self._trabajo is not None:
             # Salida del modo con trabajo cargado: aqui ARRANCA el conteo
-            # del folio (los cortes de setup quedaron descartados).
+            # del folio (los cortes de setup quedaron descartados) y la
+            # maquina sigue en marcha para producir.
             self._estado(
                 f"Iniciando trabajo {self._trabajo['folio']} "
                 f"({self._trabajo['num_part']})...", "exito"
@@ -974,7 +1351,16 @@ class InicioView(QWidget):
             log.info("Salida de Primera pieza por %s: inicia conteo del "
                      "trabajo %s", nombre, self._trabajo["folio"])
         else:
-            self._estado(f"Primera pieza finalizada por {nombre}.", "exito")
+            # Sin trabajo cargado: al salir del modo la maquina se APAGA
+            # (latch PAUSE) y queda detenida en espera.
+            self.controlador.maquina_pausada()
+            self._refrescar_estado_maquina()
+            self._estado(
+                f"Primera pieza finalizada por {nombre}: la maquina se "
+                "detuvo.", "exito"
+            )
+            log.info("Salida de Primera pieza por %s sin trabajo: la "
+                     "maquina se apago", nombre)
 
     def _finalizar_primera_pieza_si_activa(self, id_operador):
         """Cierra el paro 'Primera pieza' en curso DESCARTANDO sus cortes."""
@@ -1003,6 +1389,7 @@ class InicioView(QWidget):
         finalizar_paro(self._primera_pieza_paro_id, causa_id, id_operador)
         self._primera_pieza_paro_id = None
         self._primera_pieza = False
+        self._primera_pieza_inicio = None
         if incorporar:
             # Corrida confirmada: los cortes confirmados cuentan como
             # produccion de la sesion y el conteo sigue normal.
@@ -1059,6 +1446,9 @@ class InicioView(QWidget):
             return
         self._primera_pieza_paro_id = iniciar_paro(self.sesion_id)
         self._primera_pieza = True
+        # Timestamp de entrada: la cuenta del timeout del modo arranca aqui
+        # (solo la primera vez; la re-entrada idempotente no lo resetea).
+        self._primera_pieza_inicio = time.time()
         # Los cortes de este modo NO cuentan para la sesion ni para ningun
         # trabajo: se acumulan solo en memoria y se pierden al salir.
         self.controlador.suspender_conteo()
@@ -1078,39 +1468,89 @@ class InicioView(QWidget):
         """
         if self.sesion_id is None:
             return
+        sin_trabajo = self._tiene_permiso_iniciar_primera_pieza()
+        mensaje = (
+            "Escanea el QR del trabajo "
+            "(folio|num_part|cantidad_total) y confirma con tu huella. "
+            "El conteo inicia al salir del modo Primera pieza."
+        )
+        if sin_trabajo:
+            mensaje += (
+                " Si dejas el campo vacio y pones tu huella, entras a "
+                "Primera pieza SIN trabajo (permiso concedido)."
+            )
         self._modal_abierto = True
         try:
             modal = HuellaModal(
                 self.controller,
                 self.biometrico,
                 titulo="TRABAJO NUEVO",
-                mensaje=(
-                    "Escanea el QR del trabajo "
-                    "(folio|num_part|cantidad_total) y confirma con tu "
-                    "huella. El conteo inicia al salir del modo Primera "
-                    "pieza."
-                ),
+                mensaje=mensaje,
                 validador=self._validar_autorizacion_paro,
                 pedir_trabajo=True,
+                permitir_sin_trabajo=sin_trabajo,
                 mostrar_cancelar=True,
                 cerrable=True,
                 on_autenticado=self._trabajo_cargado,
-                on_cancelar=lambda: self._estado(
-                    "Escaneo cancelado: la maquina sigue en modo Primera "
-                    "pieza, los cortes no cuentan.", "info"
-                ),
+                on_cancelar=self._cancelar_modal_trabajo,
             )
             modal.exec()
         finally:
             self._modal_abierto = False
 
+    def _tiene_permiso_iniciar_primera_pieza(self) -> bool:
+        """Permiso `iniciar_primera_pieza` del operador de la sesion (punto 4)."""
+        if self.operador_id is None:
+            return False
+        return rol_tiene_permiso_operador(
+            self.operador_id, "iniciar_primera_pieza"
+        )
+
+    def _cancelar_modal_trabajo(self):
+        """QR cancelado/vaCio (punto 4): permanecer en Primera pieza SIN
+        trabajo solo si el operador de la sesion tiene el permiso
+        `iniciar_primera_pieza` (mantenimiento/admin). Si no, el modo se
+        cierra y la maquina queda detenida (espera de trabajo sin permiso
+        no se mantiene)."""
+        if self._tiene_permiso_iniciar_primera_pieza():
+            self._estado(
+                "Primera pieza sin trabajo aprobada (rol autorizado): los "
+                "cortes no cuentan.", "info",
+            )
+            log.info("Primera pieza sin trabajo mantenida por %s (permiso "
+                     "iniciar_primera_pieza)", self.operador_nombre)
+            return
+        self._finalizar_primera_pieza_si_activa(self.operador_id)
+        self._fijar_switch(False)
+        self._refrescar_estado_maquina()
+        self._refrescar_labels_cortes()
+        permitidos = " o ".join(roles_con_permiso("iniciar_primera_pieza")) or (
+            "un rol autorizado"
+        )
+        self._estado(
+            f"Sin trabajo y sin permiso para Primera pieza: la maquina se "
+            f"detuvo. Solo {permitidos} puede iniciarla sin trabajo.",
+            "error",
+        )
+        log.warning("Primera pieza sin trabajo cancelada para %s: "
+                    "no tiene el permiso iniciar_primera_pieza",
+                    self.operador_nombre)
+
     def _trabajo_cargado(self, id_operador, nombre, causa_id,
                          folio, num_part, cantidad_total):
-        """QR + huella aceptados: registra/retoma el folio EN ESPERA.
+        """QR + huella aceptados: registra/retoma el folio EN ESPERA o, si la
+        huella llego SIN QR (permitir_sin_trabajo), entra a Primera pieza
+        SIN trabajo con la maquina ENCENDIDA (exige permiso).
 
-        NO sale del modo Primera pieza: el conteo del trabajo arranca hasta
-        que el operador autorice la salida del modo (switch + huella).
+        En ningun caso sale del modo Primera pieza: el conteo del trabajo
+        arranca hasta que el operador autorice la salida del modo (switch
+        + huella).
         """
+        if folio is None:
+            self._entrar_primera_pieza_sin_trabajo(
+                id_operador, nombre
+            )
+            return
         ok, res = abrir_trabajo(folio, self.sesion_id, num_part,
                                 cantidad_total)
         if not ok:
@@ -1120,6 +1560,13 @@ class InicioView(QWidget):
             return
         self._trabajo = res
         guardada = res["cantidad_cortada"] or 0
+        # Al cargar un trabajo la maquina ENCIENDE para los cortes de setup
+        # (punto 3): estando en espera de trabajo con el relevo apagado,
+        # el arranque real ocurre aqui, no al pulsar PLAY.
+        if self.controlador.maquina_detenida():
+            self.controlador.maquina_lista()
+            log.info("Maquina encendida (setup) al cargar el trabajo %s",
+                     folio)
         # Baseline fijo desde la carga: los cortes de setup siguen
         # excluidos (total congelado), asi que `_cortes_trabajo()` muestra
         # lo ya hecho del folio y al salir del modo empieza a sumar.
@@ -1133,6 +1580,38 @@ class InicioView(QWidget):
         log.info("Trabajo %s (%s) cargado en espera por %s a la sesion %s "
                  "(retoma %s/%s)", res["folio"], res["num_part"], nombre,
                  self.sesion_id, guardada, res["cantidad_total"])
+
+    def _entrar_primera_pieza_sin_trabajo(self, id_operador, nombre):
+        """Huella SIN QR: entra a Primera pieza sin folio con la maquina
+        ENCENDIDA, solo si el operador autenticado tiene el permiso
+        `iniciar_primera_pieza` (mantenimiento/admin). Si no, avisa y reabre
+        el pedido de trabajo para que escanee un folio o cancele."""
+        if not rol_tiene_permiso_operador(
+                id_operador, "iniciar_primera_pieza"):
+            permitidos = " o ".join(
+                roles_con_permiso("iniciar_primera_pieza")
+            ) or ("un rol autorizado")
+            log.warning("%s (%s) intento Primera pieza sin trabajo sin "
+                        "permiso", nombre, id_operador)
+            QMessageBox.warning(
+                self.controller, "Sin permiso",
+                f"Primera pieza sin trabajo requiere el permiso "
+                f"iniciar_primera_pieza. Solo {permitidos} puede. "
+                "Escanea un trabajo o cancela.",
+            )
+            self._abrir_modal_trabajo()
+            return
+        self._entrar_primera_pieza(nombre)
+        if self.controlador.maquina_detenida():
+            self.controlador.maquina_lista()
+            log.info("Maquina ENCENDIDA en Primera pieza sin trabajo por %s "
+                     "(permiso iniciar_primera_pieza)", nombre)
+        self._refrescar_estado_maquina()
+        self._refrescar_labels_cortes()
+        self._estado(
+            "Primera pieza SIN trabajo (permiso): la maquina esta lista, "
+            "los cortes no cuentan hasta salir del modo.", "info",
+        )
 
     def _cortes_trabajo(self):
         """Cortes hechos DENTRO del trabajo abierto (total - baseline)."""
@@ -1162,11 +1641,17 @@ class InicioView(QWidget):
         self._trabajo = None
         self._baseline_trabajo = 0
         log.info("Trabajo %s COMPLETADO (Cerrado): %s/%s", folio, real, meta)
+        # Punto 3: al terminar la maquina queda APAGADA (latch PAUSE) en
+        # espera de trabajo; no queda energizada sin trabajo cargado y NO se
+        # re-entra a Primera pieza ni se abre el modal del siguiente trabajo
+        # automaticamente: el operador pulsa PLAY cuando quiera cargarlo.
+        self.controlador.maquina_pausada()
         self._sonar_alarma()
-        self._entrar_primera_pieza("meta alcanzada")
+        self._refrescar_estado_maquina()
+        self._refrescar_labels_cortes()
         self._estado(f"Trabajo {folio} completado ({real}/{meta}). "
-                     "Escanea el siguiente trabajo.", "procesando")
-        self._abrir_modal_trabajo()
+                     "La maquina se detuvo; pulsa PLAY para cargar el "
+                     "siguiente trabajo.", "procesando")
 
     def _boton_escanear_trabajo(self):
         """Reabre el modal QR + huella cuando no hay trabajo abierto."""
@@ -1202,18 +1687,29 @@ class InicioView(QWidget):
     # ------------------------------------------------------------------
 
     def _verificar_rafaga_arranque(self):
-        """Detecta una corrida no autorizada en modo Primera pieza.
+        """Detecta una corrida no autorizada en Primera pieza o Mantenimiento.
 
         Con el conteo suspendido, si dentro de SEGURO_RAFAGA_SEGUNDOS entran
         mas de SEGURO_RAFAGA_CORTES cortes excluidos, suena una alarma y
         pregunta al operador si la maquina ya empezo a correr; al confirmar
-        y autorizar por huella, lo hecho durante el modo pasa al conteo.
+        y autorizar por huella (doble en Mantenimiento), lo hecho durante el
+        modo pasa al conteo.
         """
         ventana = config.SEGURO_RAFAGA_SEGUNDOS
         umbral = config.SEGURO_RAFAGA_CORTES
         if not ventana or ventana <= 0 or umbral <= 0:
             return
-        if (not self._primera_pieza or self._en_paro
+        # En Primera pieza, si el operador de la sesion tiene el permiso
+        # `iniciar_primera_pieza` la corrida sin folio esta AUTORIZADA: el
+        # anti-corrida no aplica. En MANTENIMIENTO nunca se suprime.
+        if self._primera_pieza and self._tiene_permiso_iniciar_primera_pieza():
+            self._muestras_rafaga.clear()
+            self._ultimo_excluidos = 0
+            self._rafaga_en_curso = False
+            self._excluidos_previos_rafaga = 0
+            return
+        if ((not self._primera_pieza and not self._modo_mantenimiento)
+                or self._en_paro
                 or self.sesion_id is None or not self._maquina_en_marcha()):
             self._muestras_rafaga.clear()
             self._ultimo_excluidos = 0
@@ -1245,9 +1741,10 @@ class InicioView(QWidget):
         # la corrida solo se incorporan los de la ventana en adelante
         # (incluidos los que ocurran mientras el modal esta abierto).
         self._excluidos_previos_rafaga = excluidos - en_ventana
-        log.warning("Rafaga en Primera pieza: %s cortes en %s s "
+        modo = "Mantenimiento" if self._modo_mantenimiento else "Primera pieza"
+        log.warning("Rafaga en %s: %s cortes en %s s "
                     "(%s previos quedan como prueba)",
-                    en_ventana, ventana, self._excluidos_previos_rafaga)
+                    modo, en_ventana, ventana, self._excluidos_previos_rafaga)
         self._sonar_alarma()
         self._preguntar_corrida(en_ventana, ventana)
 
@@ -1271,6 +1768,7 @@ class InicioView(QWidget):
 
     def _preguntar_corrida(self, n_cortes, ventana):
         """Modal '¿Ya empezo a correr?' del seguro anti-corrida."""
+        modo = "Mantenimiento" if self._modo_mantenimiento else "Primera pieza"
         self._modal_abierto = True
         try:
             caja = QMessageBox(self.controller)
@@ -1278,7 +1776,7 @@ class InicioView(QWidget):
             caja.setIcon(QMessageBox.Warning)
             caja.setText(
                 f"Se detectaron {n_cortes} cortes en los ultimos {ventana} "
-                "segundos con el modo Primera pieza activo.\n\n"
+                f"segundos con el modo {modo} activo.\n\n"
                 "¿Ya empezo a correr la maquina?"
             )
             btn_si = caja.addButton("Sí", QMessageBox.YesRole)
@@ -1287,8 +1785,8 @@ class InicioView(QWidget):
             if caja.clickedButton() is btn_si:
                 self._abrir_huella_corrida()
             else:
-                log.info("Corrida descartada por el operador "
-                         "(Primera pieza sigue activa)")
+                log.info("Corrida descartada por el operador (%s sigue activo)",
+                         modo)
                 self._estado(
                     "Corrida descartada: los cortes siguen fuera del conteo.",
                     "info",
@@ -1297,7 +1795,15 @@ class InicioView(QWidget):
             self._modal_abierto = False
 
     def _abrir_huella_corrida(self):
-        """Autorizacion por huella para contar la corrida detectada."""
+        """Autorizacion por huella para contar la corrida detectada.
+
+        En Mantenimiento PRIMERO el personal de mantenimiento y LUEGO el
+        operador; en Primera pieza solo el operador."""
+        if self._modo_mantenimiento:
+            self._pedir_huella_mantenimiento(
+                self._corrida_mantenimiento_paso_operador
+            )
+            return
         modal = HuellaModal(
             self.controller,
             self.biometrico,
@@ -1307,12 +1813,51 @@ class InicioView(QWidget):
             validador=self._validar_autorizacion_paro,
             on_autenticado=self._corrida_confirmada,
             on_cancelar=lambda: self._estado(
-                "Confirmacion cancelada; el modo Primera pieza sigue activo.",
+                "Confirmacion cancelada; el modo se mantiene activo.",
                 "info",
             ),
             mostrar_cancelar=True,
         )
         modal.exec()
+
+    def _corrida_mantenimiento_paso_operador(self, id_mant, nombre_mant,
+                                             causa_id=None):
+        """Tras la huella de mantenimiento: el OPERADOR confirma la corrida."""
+        self._pedir_huella_reanudacion(
+            False,
+            titulo="REANUDACION",
+            mensaje=(
+                "Mantenimiento autorizado. Coloca tu huella (operador) para "
+                "contar los cortes como produccion de la sesion."
+            ),
+            on_autorizado=lambda id_op, nop, causa=None:
+                self._corrida_confirmada_mantenimiento(
+                    id_mant, nombre_mant, id_op, nop
+                )
+        )
+
+    def _corrida_confirmada_mantenimiento(self, id_mant, nombre_mant,
+                                          id_operador, nombre):
+        """Corrida confirmada en Mantenimiento: incorpora SOLO los cortes de
+        la ventana detectada y posteriores (los previos de setup quedan
+        descartados) y FINALIZA el modo; la maquina sigue en marcha."""
+        a_incorporar = max(
+            self.controlador.cortes_excluidos() - self._excluidos_previos_rafaga,
+            0,
+        )
+        n = self._finalizar_modo_mantenimiento(
+            id_operador, id_mant, incorporar=True, cantidad=a_incorporar
+        )
+        self._refrescar_estado_maquina()
+        self._refrescar_labels_cortes()
+        self._estado(
+            f"Corrida confirmada por {nombre_mant} y {nombre}: {n} cortes "
+            "incorporados al conteo. Fin de Mantenimiento.",
+            "exito",
+        )
+        log.info("Corrida en Mantenimiento confirmada por %s y %s: %s cortes "
+                 "incorporados (%s previos descartados como prueba)",
+                 nombre_mant, nombre, n, self._excluidos_previos_rafaga)
 
     def _corrida_confirmada(self, id_operador, nombre, causa_id=None):
         """Cierra el modo Primera pieza INCORPORANDO los cortes de la rafaga.
@@ -1365,19 +1910,39 @@ class InicioView(QWidget):
                 btn_icono=sp.SP_MediaStop, btn_estilo="Power", btn_on=False,
                 tooltip="Resuelve el paro para habilitar la maquina",
             )
+        # Mantenimiento: la maquina SIGUE EN MARCHA con el conteo suspendido.
+        # Salir del modo (boton central o PARO rojo) pide la doble validacion.
+        if self._modo_mantenimiento:
+            return dict(
+                clave="mantenimiento", texto="Maquina: MANTENIMIENTO",
+                badge="procesando", icono=sp.SP_MediaStop,
+                btn_icono=sp.SP_MediaStop, btn_estilo="Power", btn_on=True,
+                tooltip="Salir del modo Mantenimiento",
+            )
+        # Espera de trabajo / Primera pieza: PRIORIDAD antes del chequeo de
+        # marcha, porque puede darse con la maquina APAGADA (aun sin trabajo
+        # cargado, punto 3) o ENCENDIDA (cortes de setup).
+        if self._primera_pieza:
+            if self._maquina_en_marcha():
+                return dict(
+                    clave="espera_trabajo", texto="Maquina: PRIMERA PIEZA",
+                    badge="procesando", icono=sp.SP_MediaPlay,
+                    btn_icono=sp.SP_MediaStop, btn_estilo="Power",
+                    btn_on=True,
+                    tooltip="Apagar maquina (detiene el setup de Primera pieza)",
+                )
+            return dict(
+                clave="espera_trabajo", texto="Maquina: ESPERA TRABAJO",
+                badge="procesando", icono=sp.SP_MediaPause,
+                btn_icono=sp.SP_MediaPlay, btn_estilo="PowerOn", btn_on=True,
+                tooltip="Cargar un trabajo (QR+huella) para encender la maquina",
+            )
         if not self._maquina_en_marcha():
             return dict(
                 clave="detenida", texto="Maquina: DETENIDA",
                 badge="info", icono=sp.SP_MediaPause,
                 btn_icono=sp.SP_MediaPlay, btn_estilo="PowerOn", btn_on=True,
                 tooltip="Encender maquina",
-            )
-        if self._primera_pieza:
-            return dict(
-                clave="espera_trabajo", texto="Maquina: ESPERA TRABAJO",
-                badge="procesando", icono=sp.SP_MediaPlay,
-                btn_icono=sp.SP_MediaStop, btn_estilo="Power", btn_on=True,
-                tooltip="Apagar maquina (con trabajo: lo guarda y detiene)",
             )
         return dict(
             clave="lista", texto="Maquina: LISTA",
@@ -1387,7 +1952,8 @@ class InicioView(QWidget):
         )
 
     def _refrescar_estado_maquina(self):
-        """Pinta el estado desde `_estado_actual` (fuente unica)."""
+        """Pinta el estado desde `_estado_actual` (fuente unica) y
+        actualiza los resplandores y el boton PARO."""
         e = self._estado_actual()
         estilo = self.style()
         self.lbl_estado_maquina.setText(e["texto"])
@@ -1397,19 +1963,48 @@ class InicioView(QWidget):
         aplicar_estilo_boton(self.btn_maquina, e["btn_estilo"])
         self.btn_maquina.setEnabled(e["btn_on"])
         self.btn_maquina.setToolTip(e["tooltip"])
+        # Resplandores en el boton CENTRAL (grande e intenso): AMARILLO en
+        # Primera pieza, AMBAR en Mantenimiento y VERDE al producir.
+        if self._modo_mantenimiento:
+            self.resplandor_maquina.set_resplandor("mantenimiento")
+        elif self._primera_pieza:
+            self.resplandor_maquina.set_resplandor("amarillo")
+        elif e["clave"] == "lista":
+            self.resplandor_maquina.set_resplandor("exito")
+        else:
+            self.resplandor_maquina.detener_resplandor()
         self._fila_switch.setVisible(
             self.sesion_id is not None
             and not self._en_paro
-            and self._maquina_en_marcha()
+            and not self._modo_mantenimiento
+            and (self._maquina_en_marcha() or self._primera_pieza)
         )
-        # ESCANEAR TRABAJO solo con sesion, sin trabajo cargado y maquina en
-        # marcha (el modal QR tambien sale solo al encender).
+        # ESCANEAR TRABAJO visible en espera de trabajo sin trabajo cargado
+        # (con la maquina apagada o ya encendida en setup). Oculto durante
+        # Mantenimiento.
         self.btn_escanear.setVisible(
             self.sesion_id is not None
             and self._trabajo is None
-            and self._maquina_en_marcha()
+            and not self._modo_mantenimiento
+            and (self._maquina_en_marcha() or self._primera_pieza)
         )
-        self.switch_primera_pieza.setEnabled(self.sesion_id is not None)
+        self.switch_primera_pieza.setEnabled(
+            self.sesion_id is not None and not self._modo_mantenimiento
+        )
+        self._actualizar_boton_paro()
+
+    def _actualizar_boton_paro(self):
+        """PARO pasa a 'SALIR DE MANTENIMIENTO' en rojo durante el modo."""
+        en_mantenimiento = self._modo_mantenimiento
+        if en_mantenimiento == self._boton_paro_mantenimiento:
+            return
+        self._boton_paro_mantenimiento = en_mantenimiento
+        if en_mantenimiento:
+            self.btn_paro.setText("SALIR DE MANTENIMIENTO")
+            aplicar_estilo_boton(self.btn_paro, "Danger")
+        else:
+            self.btn_paro.setText("PARO")
+            aplicar_estilo_boton(self.btn_paro, "")
 
     def _icono_estado(self, estilo, sp):
         self.icono_estado.setPixmap(estilo.standardIcon(sp).pixmap(22, 22))

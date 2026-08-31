@@ -203,6 +203,33 @@ def leer_config(clave, por_defecto=None):
     return _leer_json(ruta_config_json()).get(clave, por_defecto)
 
 
+# Claves operativas que en PRODUCCION se leen del config.json (no del .env)
+# y que, si faltan, se siembran con su default para que queden visibles y
+# editables. En desarrollo la configuracion operativa sigue siendo el `.env`
+# de la raiz. `MODBUS_SIMULACION` se omite: es derivado de `MODBUS_HOST`.
+CONFIG_POR_DEFECTO = {
+    "UPDATE_SOURCE": "",
+    "UPDATE_TIMEOUT_S": 8,
+    "MODBUS_HOST": "",
+    "MODBUS_PORT": 502,
+    "MODBUS_UNIT_ID": 1,
+    "MODBUS_START_COIL": 0,
+    "MODBUS_PAUSE_COIL": 1,
+    "MODBUS_COUNTER_REGISTER": 0,
+    "MODBUS_COUNTER_WORDS": 2,
+    "MODBUS_COUNTER_LITTLE_ENDIAN": 1,
+    "MODBUS_POLL_MS": 500,
+    "PULSO_DURACION_MS": 300,
+    "MODBUS_COUNTER_MAX_DELTA": 10000,
+    "MODBUS_START_COIL_INVERTIDO": 0,
+    "MODBUS_PAUSE_COIL_INVERTIDO": 0,
+    "SEGURO_PARO_SEGUNDOS": 3,
+    "SEGURO_RAFAGA_SEGUNDOS": 7,
+    "SEGURO_RAFAGA_CORTES": 5,
+    "PRIMERA_PIEZA_TIMEOUT_S": 900,
+}
+
+
 def _aplicar_config_json():
     """Produccion: carga config.json sobre el entorno del proceso.
 
@@ -228,6 +255,15 @@ def _aplicar_config_json():
         datos = origen
         _escribir_json(ruta, datos)
         log.info("config.json generado desde .env en %s", ruta)
+    # Sembrar con su default las claves operativas que falten (sin pisar las
+    # que ya esten, editadas o heredadas del .env).
+    cambios = False
+    for clave, por_defecto in CONFIG_POR_DEFECTO.items():
+        if clave not in datos:
+            datos[clave] = por_defecto
+            cambios = True
+    if cambios:
+        _escribir_json(ruta, datos)
     for clave, valor in datos.items():
         if clave == VAR_DIR_DATOS:
             continue  # esa decide DONDE esta esta carpeta: solo entorno
@@ -361,6 +397,12 @@ SEGURO_PARO_SEGUNDOS = _env_int("SEGURO_PARO_SEGUNDOS", 3)
 # 0 en cualquiera de los dos = desactivado.
 SEGURO_RAFAGA_SEGUNDOS = _env_int("SEGURO_RAFAGA_SEGUNDOS", 7)
 SEGURO_RAFAGA_CORTES = _env_int("SEGURO_RAFAGA_CORTES", 5)
+
+# Timeout del modo "Primera pieza" (segundos). Pasado este tiempo sin salir
+# del modo, la salida (para iniciar produccion) exige autorizacion de un rol
+# con `autorizar_paro` (supervisor/admin). La maquina NO se apaga ni se sale
+# del modo automaticamente; solo se endurece la autorizacion. 0 = desactivado.
+PRIMERA_PIEZA_TIMEOUT_S = _env_int("PRIMERA_PIEZA_TIMEOUT_S", 900)
 
 # Selector de causa de paro: cuadricula con las causas mas usadas.
 CAUSAS_FRECUENTES_LIMITE = 6

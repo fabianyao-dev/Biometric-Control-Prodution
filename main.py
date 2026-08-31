@@ -50,6 +50,7 @@ from src.gui.inicio_view import InicioView
 from src.gui.notificaciones import IndicadorAdvertencias
 from src.gui.sessions_view import SessionsView
 from src.gui import style
+from src.gui.util import desplazamiento_tactil
 from src.hardware.biometric_service import BiometricService
 from src.hardware.modbus_controller import ModbusController
 from src.hardware.simulacion_controller import SimulacionController
@@ -102,6 +103,12 @@ class App(QMainWindow):
         except Exception as e:
             log.warning("No se pudo cargar el ícono %s: %s", ruta_ico, e)
         self.resize(1152, 648)
+        # Minimo EXPLICITO y modesto: sin el, el layout sube el minimo nativo
+        # al sizeHint de la vista mas grande (Sesiones con tablas anchas => 
+        # MINMAXINFO mintrack ~1375x964) y en pantallas touch verticales/
+        # pequenas Windows clampa y el log se inunda de 
+        # "QWindowsWindow::setGeometry: Unable to set geometry".
+        self.setMinimumSize(360, 240)
 
         self.biometrico = BiometricService()
         self.controlador = crear_controlador()
@@ -476,6 +483,9 @@ class App(QMainWindow):
                 return
             self.vistas[nombre] = vista
             self.content.addWidget(vista)
+            # Scroll por dedo en las tablas/scrollareas de la vista: el kiosco
+            # es touch y sin QScroller el arrastre va a la ventana nativa.
+            desplazamiento_tactil(vista)
 
         self.content.setCurrentWidget(vista)
         self.vista_actual = vista
