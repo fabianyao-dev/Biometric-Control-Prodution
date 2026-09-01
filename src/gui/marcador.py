@@ -36,7 +36,7 @@ SEGMENTOS = {
 class DisplaySieteSegmentos(QWidget):
     """Contador LED de N digitos. `set_valor(str)` acepta 0-9, '-' y ' '."""
 
-    def __init__(self, parent=None, alto=110, digitos=6):
+    def __init__(self, parent=None, alto=64, digitos=4):
         super().__init__(parent)
         self._texto = "0000"
         self._alto_digito = float(alto)
@@ -52,8 +52,15 @@ class DisplaySieteSegmentos(QWidget):
     # ------------------------------------------------------------------
 
     def set_valor(self, texto):
-        """Fija el contenido del display (solo caracteres de SEGMENTOS)."""
+        """Fija el contenido del display (solo caracteres de SEGMENTOS).
+        Rellena a la izquierda con espacios para ocupar siempre _digitos posiciones.
+        """
         limpio = "".join(c if c in SEGMENTOS else " " for c in str(texto))
+        # Rellenar a la izquierda para que siempre ocupe _digitos posiciones
+        if len(limpio) < self._digitos:
+            limpio = limpio.rjust(self._digitos)
+        elif len(limpio) > self._digitos:
+            limpio = limpio[:self._digitos]
         if limpio != self._texto:
             self._texto = limpio
             self.updateGeometry()
@@ -104,7 +111,7 @@ class DisplaySieteSegmentos(QWidget):
 
         w, t, sep = self._medidas()
         h = self._alto_digito
-        n = len(self._texto)
+        n = self._digitos
         total = n * w + (n - 1) * sep
         x0 = (self.width() - total) / 2.0
         y0 = (self.height() - h) / 2.0

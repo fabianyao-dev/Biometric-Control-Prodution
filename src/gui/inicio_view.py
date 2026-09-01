@@ -19,7 +19,7 @@ MAQUINA (boton central grande): enciende/apaga el relevo DENTRO de la
     (seguro anti-corte mediante). Apagar CON trabajo cargado hace el cierre
     completo (#5): primero elige la MODALIDAD de cierre (produccion normal
     topada a la meta / produccion parcial con confirmacion o correccion del
-    conteo / modificacion de folio con el nuevo total), luego pide la huella
+    conteo / Folio modificado con el nuevo total), luego pide la huella
     y DETIENE la maquina, quedando en espera de trabajo. El estado final del
     trabajo (Cerrado si alcanza la meta, Abierto si no) lo decide la BD.
 
@@ -90,6 +90,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QStyle,
     QVBoxLayout,
     QWidget,
@@ -190,30 +191,26 @@ class InicioView(QWidget):
 
     def _crear_interfaz(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 24, 32, 24)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(8)
+
+        # Espacio superior flexible
         layout.addStretch(1)
 
-        # La identidad del operador vive en el HEADER de la App (boton de
-        # sesion + nombre); aqui ya no se repite "Operador: ...".
-
-        # Tablero de contadores (marcador LED de planta): el display rojo
-        # de 7 segmentos muestra DESDE EL INICIO el contador del trabajo
-        # (piezas hechas de la orden); sin trabajo muestra guiones. El total
-        # de la sesion y el setup van en la linea inferior ambar.
+        # Tablero de contadores
         self.tablero = QFrame(self)
         self.tablero.setObjectName("Tablero")
         tab = QVBoxLayout(self.tablero)
-        tab.setContentsMargins(22, 10, 22, 12)
-        tab.setSpacing(4)
+        tab.setContentsMargins(16, 8, 16, 8)
+        tab.setSpacing(3)
 
         self.lbl_cortes = QLabel("SIN TRABAJO", self.tablero)
         self.lbl_cortes.setObjectName("TableroEtiqueta")
         self.lbl_cortes.setAlignment(Qt.AlignCenter)
         tab.addWidget(self.lbl_cortes)
 
-        self.display_trabajo = DisplaySieteSegmentos(self.tablero, alto=84,
-                                                     digitos=7)
+        self.display_trabajo = DisplaySieteSegmentos(self.tablero, alto=64,
+                                                     digitos=4)
         self.display_trabajo.set_valor("----")
         tab.addWidget(self.display_trabajo, alignment=Qt.AlignHCenter)
 
@@ -224,21 +221,20 @@ class InicioView(QWidget):
 
         layout.addWidget(self.tablero, alignment=Qt.AlignHCenter)
 
+        # Estado de máquina
         fila_estado = QWidget(self)
         h = QHBoxLayout(fila_estado)
         h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(8)
+        h.setSpacing(6)
         self.icono_estado = QLabel(fila_estado)
-        self.icono_estado.setFixedSize(24, 24)
+        self.icono_estado.setFixedSize(20, 20)
         h.addWidget(self.icono_estado)
         self.lbl_estado_maquina = QLabel("Maquina: EN ESPERA", fila_estado)
         aplicar_estado(self.lbl_estado_maquina, "pendiente")
         h.addWidget(self.lbl_estado_maquina)
         layout.addWidget(fila_estado, alignment=Qt.AlignHCenter)
 
-        # Mensaje de ACCIONES (al centro, sobre los botones): guia al
-        # operador paso a paso. Los avisos de SISTEMA (Modbus, lector,
-        # biometria) viven en el indicador del header, no aqui.
+        # Mensaje de acciones
         self.lbl_estado = QLabel(
             "Inicia sesion para encender la maquina.", self
         )
@@ -247,36 +243,35 @@ class InicioView(QWidget):
         self.lbl_estado.setWordWrap(True)
         layout.addWidget(self.lbl_estado)
 
-        # --- Boton de MAQUINA (centro): encender/apagar el relevo dentro
-        # de la sesion. La sesion se abre/cierra desde el header. El boton
-        # va envuelto en un Resplandor (halo pulsante) para resaltar el
-        # estado: verde en produccion, ambar en Mantenimiento. ---
-        self.resplandor_maquina = Resplandor(radio_extra=48, parent=self)
+        # Botón MAQUINA
+        self.resplandor_maquina = Resplandor(radio_extra=36, parent=self)
         self.btn_maquina = QPushButton(self.resplandor_maquina)
         self.btn_maquina.setObjectName("PowerOn")
-        self.btn_maquina.setIconSize(QSize(56, 56))
+        self.btn_maquina.setIconSize(QSize(48, 48))
+        self.btn_maquina.setFixedHeight(56)
         self.btn_maquina.clicked.connect(self._toggle_maquina)
         self.resplandor_maquina.add_widget(self.btn_maquina)
         layout.addWidget(self.resplandor_maquina, alignment=Qt.AlignHCenter)
 
+        # Botones PARO y ESCANEAR
         self.btn_paro = QPushButton("PARO", self)
-        self.btn_paro.setMinimumWidth(180)
+        self.btn_paro.setMinimumWidth(140)
+        self.btn_paro.setFixedHeight(40)
         self.btn_paro.clicked.connect(self._boton_paro)
         layout.addWidget(self.btn_paro, alignment=Qt.AlignHCenter)
 
-        # --- Trabajos: reabrir el escaneo del QR; solo sin trabajo cargado
-        # y con la maquina en marcha (el cierre del trabajo vive en el boton
-        # de maquina) ---
         self.btn_escanear = QPushButton("ESCANEAR TRABAJO", self)
-        self.btn_escanear.setMinimumWidth(180)
+        self.btn_escanear.setMinimumWidth(140)
+        self.btn_escanear.setFixedHeight(40)
         self.btn_escanear.clicked.connect(self._boton_escanear_trabajo)
         layout.addWidget(self.btn_escanear, alignment=Qt.AlignHCenter)
         self.btn_escanear.setVisible(False)
 
+        # Switch Primera pieza
         self._fila_switch = QWidget(self)
         fila_h = QHBoxLayout(self._fila_switch)
         fila_h.setContentsMargins(0, 0, 0, 0)
-        fila_h.setSpacing(10)
+        fila_h.setSpacing(8)
         self.switch_primera_pieza = Switch(self._fila_switch)
         self.switch_primera_pieza.toggled.connect(self._switch_primera_pieza)
         fila_h.addWidget(self.switch_primera_pieza)
@@ -285,19 +280,53 @@ class InicioView(QWidget):
         self._fila_switch.setVisible(False)
         layout.addWidget(self._fila_switch, alignment=Qt.AlignHCenter)
 
-        # El estiro ANTES del resumen lo pega al fondo de la pantalla;
-        # sin el, el bloque completo quedaria agrupado con los botones.
+        # Espacio flexible
         layout.addStretch(1)
 
-        # Linea de ESTADO (hasta abajo): dueno de la sesion, folio, parte,
-        # cantidad hecha, meta del folio, ciclos totales y piezas de setup.
-        # Estilo difuminado (texto secundario, sin pastilla): informacion
-        # de consulta, no de accion.
+        # Resumen (abajo)
         self.lbl_resumen = QLabel("", self)
         self.lbl_resumen.setObjectName("ResumenEstado")
         self.lbl_resumen.setAlignment(Qt.AlignCenter)
         self.lbl_resumen.setWordWrap(True)
         layout.addWidget(self.lbl_resumen)
+
+        # Configuración de escalado de fuentes
+        self._base_font_size = 9  # Tamaño base de la app (QFont base)
+        self._base_window_height = 720  # Altura de referencia
+        self._widgets_fuente = [
+            (self.lbl_cortes, 16),      # TableroEtiqueta
+            (self.lbl_cortes_trabajo, 20),  # TableroInfo
+            (self.lbl_estado_maquina, 14),  # Estado maquina
+            (self.lbl_estado, 14),       # Mensaje acciones
+            (self.lbl_resumen, 11),      # ResumenEstado
+            (self.btn_maquina, 15),      # Botones principales
+            (self.btn_paro, 15),
+            (self.btn_escanear, 15),
+        ]
+
+        # Aplicar escala inicial
+        self._aplicar_escala_fuente()
+
+    def resizeEvent(self, event):
+        """Ajusta tamaños y fuentes al redimensionar la ventana."""
+        super().resizeEvent(event)
+        self._actualizar_escalado()
+
+    def _actualizar_escalado(self):
+        """Recalcula tamaños y fuentes proporcionales al tamaño de la ventana."""
+        h = self.height()
+        factor = max(0.6, min(1.5, h / 720.0))
+        self._aplicar_escala_fuente(factor)
+
+    def _aplicar_escala_fuente(self, factor=1.0):
+        """Aplica escala a fuentes de widgets registrados."""
+        from PySide6.QtGui import QFont
+        from src.gui import style
+        for widget, base_size in self._widgets_fuente:
+            if widget is None:
+                continue
+            new_size = max(8, int(base_size * factor))
+            widget.setFont(QFont(style.FAMILIA_FUENTE, new_size))
 
     # ------------------------------------------------------------------
     # Sesion (boton del header): identidad + TOTALES
@@ -317,12 +346,12 @@ class InicioView(QWidget):
             self._abrir_huella_sesion()
             return
         if not self.controlador.maquina_detenida():
-            QMessageBox.warning(
-                self.controller,
-                "No se puede cerrar la sesion",
-                "La maquina esta EN MARCHA.\n\n"
-                "Detenla con el boton de maquina antes de cerrar la sesion.",
-            )
+            caja = QMessageBox(self.controller)
+            caja.setWindowTitle("No se puede cerrar la sesion")
+            caja.setText("La maquina esta EN MARCHA.\n\nDetenla con el boton de maquina antes de cerrar la sesion.")
+            caja.setIcon(QMessageBox.Warning)
+            caja.addButton("Aceptar", QMessageBox.AcceptRole)
+            caja.exec()
             log.warning("Cierre de sesion bloqueado: la maquina esta en "
                         "marcha")
             return
@@ -542,7 +571,9 @@ class InicioView(QWidget):
             cantidad_final = dlg.resultado_cantidad
             nuevo_total = dlg.resultado_nuevo_total
             if modalidad == MODALIDAD_FOLIO:
-                etiqueta = f"Modificacion de folio (nuevo total {nuevo_total})"
+                etiqueta = (
+                    f"Folio modificado (nuevo total {nuevo_total})"
+                )
             elif modalidad == MODALIDAD_PARCIAL:
                 etiqueta = "Produccion parcial"
             else:
@@ -591,11 +622,13 @@ class InicioView(QWidget):
         """
         folio = self._trabajo["folio"]
         meta = self._trabajo["cantidad_total"]
+        # Usar conteo REAL en tiempo real (incluye cortes hechos mientras el modal estaba abierto)
+        cortes_actuales = self._cortes_trabajo()
         self.controlador.maquina_pausada()
         self._finalizar_primera_pieza_si_activa(id_operador)
         self._fijar_switch(False)
-        ok, resultado = cerrar_trabajo_modalidad(
-            folio, cantidad_final, meta, nuevo_total, modalidad,
+        ok, estado, cantidad_final = cerrar_trabajo_modalidad(
+            folio, cortes_actuales, meta, nuevo_total, modalidad,
         )
         self._trabajo = None
         self._baseline_trabajo = 0
@@ -603,26 +636,41 @@ class InicioView(QWidget):
         self._refrescar_labels_cortes()
         if not ok:
             self._estado(
-                f"No se pudo guardar el trabajo {folio}: {resultado}.",
+                f"No se pudo guardar el trabajo {folio}: {estado}.",
                 "error",
             )
             return
         if por_meta:
             self._sonar_alarma()
+            # En meta: cantidad_final ya viene capado a meta
             self._estado(
                 f"Trabajo {folio} completado ({cantidad_final}/{meta}) "
                 f"y maquina detenida. Pulsa PLAY para cargar el siguiente.",
                 "procesando",
             )
         else:
-            self._estado(
-                f"Trabajo {folio} guardado por {nombre} con {cantidad_final} "
-                f"piezas ({resultado}) y maquina detenida.", "exito",
-            )
+            # Mensaje claro segun modalidad
+            if modalidad == "folio":
+                # nuevo_total es el nuevo total del folio
+                self._estado(
+                    f"Trabajo {folio} guardado por {nombre}: "
+                    f"{cantidad_final} piezas (Folio modificado a {nuevo_total}), "
+                    f"maquina detenida.", "exito",
+                )
+            elif modalidad == "parcial":
+                self._estado(
+                    f"Trabajo {folio} guardado por {nombre} con {cantidad_final} "
+                    f"piezas (Produccion parcial, {estado}) y maquina detenida.", "exito",
+                )
+            else:  # normal
+                self._estado(
+                    f"Trabajo {folio} guardado por {nombre} con {cantidad_final} "
+                    f"piezas (Produccion normal, {estado}) y maquina detenida.", "exito",
+                )
         log.info("Trabajo %s guardado (modalidad %s, %s piezas, estado %s) "
                  "y maquina apagada por %s (sesion %s continua%s)", folio,
-                 modalidad, cantidad_final, resultado, nombre, self.sesion_id,
-                 ", por meta" if por_meta else "")
+                 modalidad, cantidad_final, estado, nombre, self.sesion_id,
+                 ", por_meta" if por_meta else "")
 
     def aplicacion_puede_cerrarse(self):
         """Guard del boton Salir del header y de cualquier cierre de ventana.
@@ -640,12 +688,12 @@ class InicioView(QWidget):
         dev basta detener la maquina simulada antes de salir.
         """
         if not self.controlador.maquina_detenida():
-            QMessageBox.warning(
-                self.controller,
-                "No se puede cerrar",
-                "La maquina esta EN MARCHA.\n\n"
-                "Detenla con el boton PARO antes de cerrar el programa.",
-            )
+            caja = QMessageBox(self.controller)
+            caja.setWindowTitle("No se puede cerrar")
+            caja.setText("La maquina esta EN MARCHA.\n\nDetenla con el boton PARO antes de cerrar el programa.")
+            caja.setIcon(QMessageBox.Warning)
+            caja.addButton("Aceptar", QMessageBox.AcceptRole)
+            caja.exec()
             log.warning("Salida de la app bloqueada: la maquina esta en "
                         "marcha.")
             return False
@@ -831,11 +879,12 @@ class InicioView(QWidget):
     def _abrir_paro_autorizacion(self, recuperacion=False):
         causas = listar_causas_paro(activas_solo=True)
         if not causas:
-            QMessageBox.warning(
-                self.controller,
-                "Sin causas",
-                "No hay causas de paro configuradas. Ve a Administracion.",
-            )
+            caja = QMessageBox(self.controller)
+            caja.setWindowTitle("Sin causas")
+            caja.setText("No hay causas de paro configuradas. Ve a Administracion.")
+            caja.setIcon(QMessageBox.Warning)
+            caja.addButton("Aceptar", QMessageBox.AcceptRole)
+            caja.exec()
             self._estado("Sin causas de paro; maquina detenida.", "error")
             return
 
@@ -998,7 +1047,7 @@ class InicioView(QWidget):
             "puede validar esta accion."
         )
 
-    def _pedir_huella_mantenimiento(self, on_autenticado):
+    def _pedir_huella_mantenimiento(self, on_autenticado, titulo="AUTORIZACION MANTENIMIENTO"):
         """PRIMER modal del flujo de Mantenimiento: huella del personal
         autorizado. El `on_autenticado` recibe (id_mant, nombre_mant,
         causa_id)."""
@@ -1007,7 +1056,7 @@ class InicioView(QWidget):
             modal = HuellaModal(
                 self.controller,
                 self.biometrico,
-                titulo="AUTORIZACION MANTENIMIENTO",
+                titulo=titulo,
                 mensaje=(
                     "Coloca la huella de PERSONAL DE MANTENIMIENTO "
                     "para validar."
@@ -1030,7 +1079,7 @@ class InicioView(QWidget):
         arranca el modo Mantenimiento (la maquina sigue en marcha)."""
         self._pedir_huella_reanudacion(
             False, causa_id, zona_id, causa_desc, zona_nombre,
-            titulo="REANUDACION",
+            titulo="AUTORIZACION OPERADOR",
             mensaje=(
                 "Mantenimiento autorizado. Coloca tu huella "
                 "(operador) para reanudar y entrar en Mantenimiento."
@@ -1082,7 +1131,8 @@ class InicioView(QWidget):
         if self._modal_abierto:
             return
         self._pedir_huella_mantenimiento(
-            self._salir_mantenimiento_paso_operador
+            self._salir_mantenimiento_paso_operador,
+            titulo="REANUDACION MANTENIMIENTO"
         )
 
     def _salir_mantenimiento_paso_operador(self, id_mant, nombre_mant,
@@ -1090,10 +1140,10 @@ class InicioView(QWidget):
         """2da huella de la salida: el OPERADOR reanuda la produccion."""
         self._pedir_huella_reanudacion(
             False,
-            titulo="REANUDACION",
+            titulo="REANUDACION OPERADOR",
             mensaje=(
-                "Mantenimiento autorizado. La maquina seguira EN MARCHA; "
-                "coloca tu huella (operador) para reanudar."
+                "Mantenimiento finalizado. Coloca tu huella (operador) "
+                "para reanudar la produccion."
             ),
             on_autorizado=lambda id_op, nop, causa=None:
                 self._mantenimiento_finalizado(
@@ -1364,12 +1414,13 @@ class InicioView(QWidget):
     def _abrir_huella_primera_pieza(self, inicio):
         if inicio and self._causa_primera_pieza_id() is None:
             self._fijar_switch(False)
-            QMessageBox.warning(
-                self.controller,
-                "Causa faltante",
-                "No existe la causa de paro 'Primera pieza'. Agregala en "
-                "Administracion para usar este modo.",
-            )
+            caja = QMessageBox(self.controller)
+            caja.setWindowTitle("Causa faltante")
+            caja.setText("No existe la causa de paro 'Primera pieza'. Agregala en "
+                         "Administracion para usar este modo.")
+            caja.setIcon(QMessageBox.Warning)
+            caja.addButton("Aceptar", QMessageBox.AcceptRole)
+            caja.exec()
             self._estado("Sin causa 'Primera pieza'; modo no disponible.", "error")
             return
         self._modal_abierto = True
@@ -1639,7 +1690,12 @@ class InicioView(QWidget):
                                 cantidad_total)
         if not ok:
             log.warning("Trabajo %s rechazado: %s", folio, res)
-            QMessageBox.warning(self.controller, "Trabajo rechazado", res)
+            caja = QMessageBox(self.controller)
+            caja.setWindowTitle("Trabajo rechazado")
+            caja.setText(str(res))
+            caja.setIcon(QMessageBox.Warning)
+            caja.addButton("Aceptar", QMessageBox.AcceptRole)
+            caja.exec()
             self._abrir_modal_trabajo()
             return
         self._trabajo = res
@@ -1677,12 +1733,13 @@ class InicioView(QWidget):
             ) or ("un rol autorizado")
             log.warning("%s (%s) intento Primera pieza sin trabajo sin "
                         "permiso", nombre, id_operador)
-            QMessageBox.warning(
-                self.controller, "Sin permiso",
-                f"Primera pieza sin trabajo requiere el permiso "
-                f"iniciar_primera_pieza. Solo {permitidos} puede. "
-                "Escanea un trabajo o cancela.",
-            )
+            caja = QMessageBox(self.controller)
+            caja.setWindowTitle("Sin permiso")
+            caja.setText(f"Primera pieza sin trabajo requiere el permiso "
+                         f"iniciar_primera_pieza. Solo {permitidos} puede. ")
+            caja.setIcon(QMessageBox.Warning)
+            caja.addButton("Aceptar", QMessageBox.AcceptRole)
+            caja.exec()
             self._abrir_modal_trabajo()
             return
         self._entrar_primera_pieza(nombre)
@@ -1706,22 +1763,24 @@ class InicioView(QWidget):
         )
 
     def _verificar_meta_trabajo(self):
-        """Meta alcanzada: detiene la maquina y abre el cierre con MODALIDAD.
+        """Meta alcanzada: abre el cierre con MODALIDAD sin detener la maquina.
 
         Llamado desde `_refrescar_contador` (hilo principal). Al llegar a la
-        cantidad_total la maquina ya no puede seguir cortando sin conteo: se
-        DETIENE el relevo y se abre el mismo cierre con modalidad que el
-        boton de MAQUINA (#5) — el operador elige normal/parcial/folio y
-        autoriza con huella. Un trabajo solo pasa a 'Cerrado' aqui (o en el
-        cierre manual) al alcanzarse la meta.
+        cantidad_total se abre el mismo cierre con modalidad que el boton de
+        MAQUINA (#5) — el operador elige normal/parcial/folio y autoriza con
+        huella. La maquina SIGUE EN MARCHA y contando mientras se resuelve el
+        cierre (el operador la detiene al autorizar); el exceso sobre la meta
+        se descarta en la modalidad normal y el conteo del tablero no se
+        congela. Un trabajo solo pasa a 'Cerrado' aqui (o en el cierre
+        manual) al alcanzarse la meta.
         """
         if self._trabajo is None or self._modal_abierto or self._en_paro:
             return
         if self._cortes_trabajo() < self._trabajo["cantidad_total"]:
             return
-        # Detener primero: con la meta cumplida no se deja cortando y el
-        # cierre (modalidad + huella) ocurre con la maquina detenida.
-        self.controlador.maquina_pausada()
+        # No se detiene la maquina: mientras el modal de cierre esta abierto
+        # sigue contando; `_apagado_con_trabajo_autenticado` la detiene al
+        # autorizar el cierre.
         self._abrir_cierre_con_modalidad(por_meta=True)
 
     def _boton_escanear_trabajo(self):
@@ -1875,7 +1934,8 @@ class InicioView(QWidget):
         operador; en Primera pieza solo el operador."""
         if self._modo_mantenimiento:
             self._pedir_huella_mantenimiento(
-                self._corrida_mantenimiento_paso_operador
+                self._corrida_mantenimiento_paso_operador,
+                titulo="REANUDACION MANTENIMIENTO"
             )
             return
         modal = HuellaModal(
@@ -1899,7 +1959,7 @@ class InicioView(QWidget):
         """Tras la huella de mantenimiento: el OPERADOR confirma la corrida."""
         self._pedir_huella_reanudacion(
             False,
-            titulo="REANUDACION",
+            titulo="REANUDACION OPERADOR",
             mensaje=(
                 "Mantenimiento autorizado. Coloca tu huella (operador) para "
                 "contar los cortes como produccion de la sesion."

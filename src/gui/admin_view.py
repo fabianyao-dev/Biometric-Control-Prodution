@@ -1497,15 +1497,16 @@ class AdminView(QWidget):
         )
 
         if not getattr(sys, "frozen", False):
-            QMessageBox.information(
-                self,
-                "Actualización disponible",
-                f"Versión instalada: {instalada}\n"
-                f"Versión disponible: {remota}\n"
-                f"Publicada: {publicada}\n\n"
-                "Estás ejecutando el sistema en modo desarrollo. La "
-                "actualización se aplica en el paquete instalado (.exe).",
-            )
+            caja = QMessageBox(self)
+            caja.setWindowTitle("Actualización disponible")
+            caja.setText(f"Versión instalada: {instalada}\n"
+                         f"Versión disponible: {remota}\n"
+                         f"Publicada: {publicada}\n\n"
+                         "Estás ejecutando el sistema en modo desarrollo. La "
+                         "actualización se aplica en el paquete instalado (.exe).")
+            caja.setIcon(QMessageBox.Information)
+            caja.addButton("Aceptar", QMessageBox.AcceptRole)
+            caja.exec()
             return
 
         caja = QMessageBox(self)

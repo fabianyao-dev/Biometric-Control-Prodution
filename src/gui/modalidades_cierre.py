@@ -5,7 +5,7 @@ Al apagar la maquina con un trabajo cargado, el operador elige como se
 refleja la cantidad final del trabajo:
     - Produccion normal: cantidad = min(cortado, meta) (topada a la meta).
     - Produccion parcial: se confirma el conteo hecho, o se corrige a mano.
-    - Modificacion de folio: se indica a cuanto se modifico el total del
+    - Folio modificado: se indica a cuanto se modifico el total del
       folio y se guarda min(cortado, nuevo_total).
 El estado final (Cerrado/Abierto) lo decide la capa de BD segun si la
 cantidad guardada alcanza la meta; aqui solo se decide la CANTIDAD.
@@ -94,16 +94,21 @@ class ModalidadCierreDialog(QDialog):
         lay.addWidget(resumen)
 
         btn_normal = QPushButton("PRODUCCION NORMAL", self)
-        aplicar_estilo_boton(btn_normal, "Success")
         btn_normal.clicked.connect(self._elegir_normal)
+        btn_normal.setAutoDefault(False)
+        btn_normal.setDefault(False)
         lay.addWidget(btn_normal)
 
         btn_parcial = QPushButton("PRODUCCION PARCIAL", self)
         btn_parcial.clicked.connect(self._elegir_parcial)
+        btn_parcial.setAutoDefault(False)
+        btn_parcial.setDefault(False)
         lay.addWidget(btn_parcial)
 
-        btn_folio = QPushButton("MODIFICACION DE FOLIO", self)
+        btn_folio = QPushButton("FOLIO MODIFICADO", self)
         btn_folio.clicked.connect(self._elegir_folio)
+        btn_folio.setAutoDefault(False)
+        btn_folio.setDefault(False)
         lay.addWidget(btn_folio)
 
         # En el cierre por META (`cancelable=False`) no se permite cancelar:
@@ -116,6 +121,9 @@ class ModalidadCierreDialog(QDialog):
             btn_cancelar.clicked.connect(self.reject)
             lay.addWidget(btn_cancelar)
 
+        # Evitar que ningun boton tenga foco inicial (no preseleccion)
+        self.setFocusPolicy(Qt.NoFocus)
+
     def _elegir_normal(self):
         """Produccion normal: se guarda el cortado, TOPADO a la meta."""
         self.resultado_modalidad = MODALIDAD_NORMAL
@@ -126,13 +134,14 @@ class ModalidadCierreDialog(QDialog):
     def _elegir_parcial(self):
         """Parcial: confirma el conteo o pide corregirlo a mano."""
         self.resultado_modalidad = MODALIDAD_PARCIAL
-        confirmar = QMessageBox.question(
-            self,
-            "Confirmar conteo",
-            f"¿El conteo de {self.cortado} piezas es correcto?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if confirmar == QMessageBox.Yes:
+        caja = QMessageBox(self)
+        caja.setWindowTitle("Confirmar conteo")
+        caja.setText(f"¿El conteo de {self.cortado} piezas es correcto?")
+        caja.setIcon(QMessageBox.Question)
+        btn_si = caja.addButton("Sí", QMessageBox.YesRole)
+        caja.addButton("No", QMessageBox.NoRole)
+        caja.exec()
+        if caja.clickedButton() == btn_si:
             self.resultado_cantidad = self.cortado
             self.resultado_nuevo_total = None
             self.accept()
@@ -142,32 +151,35 @@ class ModalidadCierreDialog(QDialog):
             "Escribe la cantidad correcta de piezas:", minimo=0,
         )
         if valor is None:
-            # Cancelo la correccion: sin aceptar, vuelve a la eleccion.
             return
         if valor is False:
-            QMessageBox.warning(
-                self, "Valor no valido",
-                "Escribe un numero entero mayor o igual a cero.",
-            )
+            caja = QMessageBox(self)
+            caja.setWindowTitle("Valor no valido")
+            caja.setText("Escribe un numero entero mayor o igual a cero.")
+            caja.setIcon(QMessageBox.Warning)
+            caja.addButton("Aceptar", QMessageBox.AcceptRole)
+            caja.exec()
             return
         self.resultado_cantidad = valor
         self.resultado_nuevo_total = None
         self.accept()
 
     def _elegir_folio(self):
-        """Modificacion de folio: pide el nuevo total y guarda el cortado
+        """Folio modificado: pide el nuevo total y guarda el cortado
         TOPADO a ese nuevo total."""
         valor = _pedir_entero(
-            self, "Modificacion de folio",
+            self, "Folio modificado",
             "¿A cuanto se modifico la cantidad total del folio?", minimo=1,
         )
         if valor is None:
             return
         if valor is False:
-            QMessageBox.warning(
-                self, "Valor no valido",
-                "Escribe un numero entero mayor que cero.",
-            )
+            caja = QMessageBox(self)
+            caja.setWindowTitle("Valor no valido")
+            caja.setText("Escribe un numero entero mayor que cero.")
+            caja.setIcon(QMessageBox.Warning)
+            caja.addButton("Aceptar", QMessageBox.AcceptRole)
+            caja.exec()
             return
         self.resultado_modalidad = MODALIDAD_FOLIO
         self.resultado_nuevo_total = valor

@@ -1195,7 +1195,7 @@ def pausar_trabajo(folio: int, cantidad_cortada: int):
     conn.close()
 
 
-def cerrar_trabajo_modalidad(folio: int, cantidad_final: int,
+def cerrar_trabajo_modalidad(folio: int, cortes_actuales: int,
                              meta: int, nuevo_total: int | None = None,
                              modalidad: str = "normal"):
     """Cierra un trabajo segun la modalidad de cierre elegida (#5).
@@ -1205,20 +1205,23 @@ def cerrar_trabajo_modalidad(folio: int, cantidad_final: int,
     'Abierto' (retomable re-escaneando el folio), igual que el cierre por
     meta.
 
-    `cantidad_final` ya llega TOPADA (min) desde la vista segun la modalidad:
-    - produccion normal: min(cortado, meta)
-    - produccion parcial: el conteo confirmado/corregido por el operador
-    - modificacion de folio: min(cortado, nuevo_total)
+    `cortes_actuales` es el conteo REAL en tiempo real (viene del controlador,
+    no de la BD), para incluir cortes hechos mientras el modal estaba abierto.
+
+    Segun la modalidad:
+    - produccion normal: min(cortes_actuales, meta)
+    - produccion parcial: cortes_actuales (el operador confirma o corrige en el dialogo)
+    - modificacion de folio: min(cortes_actuales, nuevo_total)
 
     Si se pasa `nuevo_total` (modificacion de folio) se actualiza
     `cantidad_total` antes de evaluar el estado, y la meta comparada pasa a
     ser ese total modificado. `modalidad` es la etiqueta de cierre ('normal' /
     'parcial' / 'folio') que se persiste en el segmento de `trabajos_sesiones`
     para poder reconstruir despues que tipo de cierre tuvo cada sesion.
-    Devuelve (ok, estado|mensaje).
+    Devuelve (ok, estado_final, cantidad_final_global).
     """
     folio = int(folio)
-    cantidad_final = int(cantidad_final)
+    cortes_actuales = int(cortes_actuales)
     meta = int(meta)
     estado_meta = meta
     conn = obtener_conexion()
@@ -1226,33 +1229,54 @@ def cerrar_trabajo_modalidad(folio: int, cantidad_final: int,
         nuevo_total = int(nuevo_total)
         if nuevo_total <= 0:
             conn.close()
-            return False, "El total modificado debe ser mayor que cero."
+            return False, "El total modificado debe ser mayor que cero.", 0
         conn.execute(
             "UPDATE trabajos SET cantidad_total=? WHERE folio=?",
             (nuevo_total, folio),
         )
         estado_meta = nuevo_total
-    estado = ESTADO_CERRADO if cantidad_final >= estado_meta else ESTADO_ABIERTO
+    # Calcular cantidad_final_global segun modalidad usando el conteo REAL
+    if modalidad == "normal":
+        cantidad_final_global = min(cortes_actuales, estado_meta)
+    elif modalidad == "parcial":
+        cantidad_final_global = cortes_actuales
+    elif modalidad == "folio":
+        cantidad_final_global = min(cortes_actuales, estado_meta)
+    else:
+        conn.close()
+        return False, f"Modalidad de cierre no valida: {modalidad}", 0
+    estado = ESTADO_CERRADO if cantidad_final_global >= estado_meta else ESTADO_ABIERTO
     if estado == ESTADO_CERRADO:
         conn.execute(
             "UPDATE trabajos SET estado=?, fecha_fin=?, cantidad_cortada=? "
             "WHERE folio=?",
-            (estado, ahora_local(), cantidad_final, folio),
+            (estado, ahora_local(), cantidad_final_global, folio),
         )
     else:
         conn.execute(
             "UPDATE trabajos SET fecha_fin=?, cantidad_cortada=? "
             "WHERE folio=? AND estado=?",
-            (ahora_local(), cantidad_final, folio, ESTADO_ABIERTO),
+            (ahora_local(), cantidad_final_global, folio, ESTADO_ABIERTO),
         )
+    # Obtener base del segmento para calcular delta de esta sesion
+    base_del_segmento = conn.execute(
+        "SELECT base FROM trabajos_sesiones "
+        "WHERE folio=? AND fecha_fin IS NULL",
+        (folio,)
+    ).fetchone()
+    if base_del_segmento is None:
+        conn.close()
+        return False, "No se encontro el segmento de sesion abierto.", 0
+    base_del_segmento = base_del_segmento["base"]
+    delta_sesion = cantidad_final_global - base_del_segmento
     conn.execute(
-        "UPDATE trabajos_sesiones SET cantidad=?-base, fecha_fin=?, "
+        "UPDATE trabajos_sesiones SET cantidad=?, fecha_fin=?, "
         "modalidad=? WHERE folio=? AND fecha_fin IS NULL",
-        (cantidad_final, ahora_local(), str(modalidad), folio),
+        (delta_sesion, ahora_local(), str(modalidad), folio),
     )
     conn.commit()
     conn.close()
-    return True, estado
+    return True, estado, cantidad_final_global
 
 
 def actualizar_cantidad_cortada(folio: int, cantidad_cortada: int):

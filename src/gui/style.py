@@ -148,7 +148,7 @@ ESTILOS_ESTADO = {
 PLANTILLA_QSS = """
 * {
     font-family: "@fuente@";
-    font-size: 17px;
+    font-size: 14px;
     color: @texto@;
 }
 
@@ -176,17 +176,17 @@ QLabel {
     background: transparent;
 }
 QLabel#Title {
-    font-size: 32px;
+    font-size: 26px;
     font-weight: 700;
     color: @texto@;
 }
 QLabel#Big {
-    font-size: 64px;
+    font-size: 52px;
     font-weight: 700;
     color: @texto@;
 }
 QLabel#HeaderLabel {
-    font-size: 22px;
+    font-size: 18px;
     font-weight: 600;
     color: @texto@;
 }
@@ -215,14 +215,14 @@ QFrame#Tablero {
 QLabel#TableroEtiqueta {
     background: transparent;
     color: @tablero_etiqueta@;
-    font-size: 20px;
+    font-size: 16px;
     font-weight: 700;
 }
 QLabel#TableroInfo {
     background: transparent;
     color: @tablero_info@;
     font-family: "Consolas";
-    font-size: 24px;
+    font-size: 20px;
     font-weight: 700;
 }
 
@@ -231,9 +231,9 @@ QPushButton {
     background: @accento@;
     color: @blanco@;
     border: none;
-    border-radius: 12px;
-    padding: 14px 30px;
-    font-size: 18px;
+    border-radius: 10px;
+    padding: 10px 22px;
+    font-size: 15px;
     font-weight: 700;
 }
 QPushButton:hover {
@@ -251,9 +251,9 @@ QPushButton#Nav {
     background: transparent;
     color: @texto_sec@;
     text-align: left;
-    padding: 12px 18px;
-    border-radius: 10px;
-    font-size: 18px;
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 15px;
     font-weight: 700;
 }
 QPushButton#Nav:hover {
@@ -287,9 +287,9 @@ QPushButton#NavSesion {
     background: transparent;
     color: @texto@;
     text-align: center;
-    padding: 8px 14px;
-    border-radius: 10px;
-    font-size: 14px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 12px;
     font-weight: 600;
 }
 QPushButton#NavSesion:hover {
@@ -304,8 +304,8 @@ QPushButton#NavSesion:pressed {
 QLabel#ResumenEstado {
     background: transparent;
     color: @texto_sec@;
-    font-size: 13px;
-    padding: 4px 10px;
+    font-size: 11px;
+    padding: 3px 8px;
 }
 
 /* ---- Boton de advertencias del header (notificaciones) ---- */
@@ -313,9 +313,9 @@ QPushButton#Aviso {
     background: transparent;
     color: @texto_sec@;
     border: 1px solid @borde@;
-    border-radius: 10px;
-    padding: 6px 8px;
-    font-size: 18px;
+    border-radius: 8px;
+    padding: 4px 6px;
+    font-size: 15px;
     font-weight: 600;
 }
 QPushButton#Aviso:hover {
@@ -326,9 +326,9 @@ QPushButton#AvisoActivo {
     background: @advertencia@;
     color: @sobre_advertencia@;
     border: 1px solid @advertencia@;
-    border-radius: 10px;
-    padding: 6px 8px;
-    font-size: 18px;
+    border-radius: 8px;
+    padding: 4px 6px;
+    font-size: 15px;
     font-weight: 700;
 }
 QPushButton#AvisoActivo:hover {
@@ -344,10 +344,10 @@ QFrame#PanelAvisos {
 
 /* Boton principal de poder: grande, redondo (PLAY/STOP). */
 QPushButton#Power, QPushButton#PowerOn {
-    border-radius: 52px;
-    font-size: 42px;
-    min-width: 104px;
-    min-height: 104px;
+    border-radius: 40px;
+    font-size: 36px;
+    min-width: 80px;
+    min-height: 80px;
     padding: 0;
 }
 QPushButton#Power {
@@ -624,7 +624,7 @@ def aplicar_estilo(app, tema=None):
     if tema in PALETAS:
         tema_activo = tema
     app.setStyle("Fusion")
-    app.setFont(QFont(FAMILIA_FUENTE, 10))
+    app.setFont(QFont(FAMILIA_FUENTE, 9))
     app.setStyleSheet(hoja_estilos())
 
 

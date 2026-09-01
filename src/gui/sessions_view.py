@@ -173,7 +173,8 @@ class SessionsView(QWidget):
         es lo cortado en ESTA sesion para ese folio y 'Modalidad' el tipo de
         cierre de ese segmento (normal / parcial / folio / en curso)."""
         modalidad_nombre = {
-            "normal": "Normal", "parcial": "Parcial", "folio": "Folio",
+            "normal": "Normal", "parcial": "Parcial",
+            "folio": "Folio modificado",
         }
         self.tree_trabajos.setRowCount(0)
         for t in listar_trabajos_de_sesion(sesion_id):
