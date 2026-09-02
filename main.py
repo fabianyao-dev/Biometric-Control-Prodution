@@ -41,7 +41,6 @@ from src.database import (
     init_db,
     listar_fmds,
     obtener_rol_operador,
-    roles_con_permiso,
     rol_tiene_permiso_operador,
 )
 from src.gui.admin_view import AdminView
@@ -405,16 +404,11 @@ class App(QMainWindow):
         etiqueta = {"sesiones": "SESIONES", "admin": "ADMINISTRACION"}.get(
             nombre, nombre
         )
-        permitidos = " o ".join(roles_con_permiso(permiso)) or "ningun rol"
 
         def validador(op_id, nombre_op, causa_id):
             if rol_tiene_permiso_operador(op_id, permiso):
                 return True, None
-            rol = obtener_rol_operador(op_id)
-            return False, (
-                f"Acceso denegado para {nombre_op} (rol: {rol or 'sin rol'}). "
-                f"Solo {permitidos} puede entrar a {etiqueta}."
-            )
+            return False, "ACCESO RESTRINGIDO"
 
         def navegar(op_id, nombre_op, causa_id):
             log.info("Acceso concedido: %s (%s) entra a %s",

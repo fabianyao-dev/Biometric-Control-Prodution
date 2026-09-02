@@ -232,6 +232,10 @@ class InicioView(QWidget):
         self.lbl_estado_maquina = QLabel("Maquina: EN ESPERA", fila_estado)
         aplicar_estado(self.lbl_estado_maquina, "pendiente")
         h.addWidget(self.lbl_estado_maquina)
+        # Fondo transparente: el QSS global pinta `QWidget { background: @fondo@ }`
+        # y esta fila opaca recortaria el resplandor justo antes de su borde.
+        # Sin fondo, el glow pasa por detras (como con los botones).
+        fila_estado.setStyleSheet("background: transparent;")
         layout.addWidget(fila_estado, alignment=Qt.AlignHCenter)
 
         # Mensaje de acciones
@@ -244,14 +248,25 @@ class InicioView(QWidget):
         layout.addWidget(self.lbl_estado)
 
         # Botón MAQUINA
-        self.resplandor_maquina = Resplandor(radio_extra=36, parent=self)
-        self.btn_maquina = QPushButton(self.resplandor_maquina)
+        # El resplandor es una CAPA de fondo que cubre toda la vista y va
+        # DETRAS de los demas widgets: no ocupa espacio en el layout (no
+        # desplaza al boton) y su glow no se corta al acercarse a los botones
+        # de abajo (se funde tapado por ellos). El boton vive en el layout.
+        self.resplandor_maquina = Resplandor(radio_extra=110, parent=self)
+        self.resplandor_maquina.setGeometry(self.rect())
+        self.resplandor_maquina.lower()
+
+        self.btn_maquina = QPushButton(self)
         self.btn_maquina.setObjectName("PowerOn")
         self.btn_maquina.setIconSize(QSize(48, 48))
         self.btn_maquina.setFixedHeight(56)
         self.btn_maquina.clicked.connect(self._toggle_maquina)
         self.resplandor_maquina.add_widget(self.btn_maquina)
-        layout.addWidget(self.resplandor_maquina, alignment=Qt.AlignHCenter)
+        layout.addWidget(self.btn_maquina, alignment=Qt.AlignHCenter)
+
+        # Hueco limpio (espacio de LAYOUT, no del glow) entre el boton de la
+        # maquina y PARO para que no queden pegados.
+        layout.addSpacing(24)
 
         # Botones PARO y ESCANEAR
         self.btn_paro = QPushButton("PARO", self)
@@ -277,6 +292,9 @@ class InicioView(QWidget):
         fila_h.addWidget(self.switch_primera_pieza)
         lbl_switch = QLabel("Primera pieza", self._fila_switch)
         fila_h.addWidget(lbl_switch)
+        # Fondo transparente: sin esto la fila opaca recorta el resplandor
+        # justo antes del switch.
+        self._fila_switch.setStyleSheet("background: transparent;")
         self._fila_switch.setVisible(False)
         layout.addWidget(self._fila_switch, alignment=Qt.AlignHCenter)
 
@@ -310,6 +328,10 @@ class InicioView(QWidget):
     def resizeEvent(self, event):
         """Ajusta tamaños y fuentes al redimensionar la ventana."""
         super().resizeEvent(event)
+        # Mantener la capa de resplandor cubriendo toda la vista y detras.
+        if getattr(self, "resplandor_maquina", None) is not None:
+            self.resplandor_maquina.setGeometry(self.rect())
+            self.resplandor_maquina.lower()
         self._actualizar_escalado()
 
     def _actualizar_escalado(self):
@@ -1006,15 +1028,9 @@ class InicioView(QWidget):
             return True, None
         if rol_tiene_permiso_operador(id_operador, "autorizar_paro"):
             return True, None
-        permitidos = " o ".join(roles_con_permiso("autorizar_paro")) or (
-            "un rol autorizado"
-        )
-        rol = obtener_rol_operador(id_operador)
-        operador_sesion = self.operador_nombre or "el operador de la sesion"
         return False, (
-            f"No eres {operador_sesion}. Solo el operador de la sesion o "
-            f"{permitidos} puede autorizar esta accion"
-            + (f" (tu rol: {rol})." if rol else " (sin rol asignado).")
+            "Solo el operador de la sesión, Supervisor o Mantenimiento "
+            "puede autorizar esta acción"
         )
 
     def _autorizado_autenticado(self, id_operador, nombre, causa_id=None,
@@ -1043,8 +1059,7 @@ class InicioView(QWidget):
         if rol_tiene_permiso_operador(id_operador, "autorizar_mantenimiento"):
             return True, None
         return False, (
-            "No eres personal de mantenimiento: solo personal autorizado "
-            "puede validar esta accion."
+            "Solo el personal de mantenimiento puede validar esta acción"
         )
 
     def _pedir_huella_mantenimiento(self, on_autenticado, titulo="AUTORIZACION MANTENIMIENTO"):
@@ -1392,15 +1407,9 @@ class InicioView(QWidget):
             # sesion: un descuido prolongado debe resolverlo la supervision.
             if rol_tiene_permiso_operador(id_operador, "autorizar_paro"):
                 return True, None
-            permitidos = " o ".join(roles_con_permiso("autorizar_paro")) or (
-                "un rol autorizado"
-            )
-            rol = obtener_rol_operador(id_operador)
             return False, (
-                f"El modo Primera pieza lleva mas de "
-                f"{config.PRIMERA_PIEZA_TIMEOUT_S // 60} min y debe finalizarlo "
-                f"{permitidos} para iniciar produccion"
-                + (f" (tu rol: {rol})." if rol else " (sin rol asignado).")
+                "Debe ser finalizado por Supervisor o Mantenimiento "
+                "para iniciar producción"
             )
         return validador
 

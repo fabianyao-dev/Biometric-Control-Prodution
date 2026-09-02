@@ -236,3 +236,6 @@ __marimo__/
 
 # Documento local de estimacion/avance de cambios (no se versiona)
 Estimacion_cambios.md
+
+# Notas locales/borradores (no se versionan)
+mensajes_error_huella.md

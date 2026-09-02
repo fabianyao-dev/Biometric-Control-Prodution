@@ -123,8 +123,14 @@ class SelectorCausaZona(QFrame):
         layout.addWidget(self.zonas, stretch=1)
 
         # Causas a la derecha, ANCHAS exactamente lo que necesitan (nada de
-        # espacio muerto): el sobrante horizontal va al croquis.
+        # espacio muerto): el sobrante horizontal va al croquis. Se fija un
+        # ANCHO MINIMO para que la lista de causas (con botones legibles) no
+        # se aplaste contra su minimo de QScrollArea (solo la barra de scroll):
+        # si quedara a ~270px, las causas largas harian botones altos que
+        # envuelven y la columna se llenaria de scroll "porque las zonas la
+        # empujan".
         col_causas = self._columna_causas()
+        col_causas.setMinimumWidth(380)
         col_causas.setMaximumWidth(430)
         layout.addWidget(col_causas, stretch=0)
 

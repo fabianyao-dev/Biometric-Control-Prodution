@@ -505,8 +505,8 @@ class HuellaModal(QDialog):
                 log.info("Huella %s autentica; falta escanear el trabajo.",
                          nombre)
                 self._estado(
-                    "\u2713 Huella autenticada. Escanea el QR del trabajo y "
-                    "vuelve a colocar tu huella.", "error"
+                    "Escanea el qr del trabajo (folio|num_part|cantidad).",
+                    "error",
                 )
                 self.input_qr.setFocus()
                 QTimer.singleShot(2500, self._reintentar)
