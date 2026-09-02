@@ -45,20 +45,22 @@ OPERADOR_TEMPORAL_NOMBRE = "Operador Temporal (dev)"
 # Administracion; aqui solo vive el catalogo y los defaults de primer arranque.
 PERMISOS_SISTEMA = [
     ("autorizar_paro", "Autorizar la reanudacion de un paro (ademas del operador de la sesion).", 1),
-    ("acceso_sesiones", "Ver la vista de Sesiones.", 2),
-    ("acceso_admin", "Acceder a Administracion (incluye la gestion de permisos).", 3),
-    ("actualizar_app", "Buscar y aplicar actualizaciones de la aplicacion.", 4),
-    ("iniciar_primera_pieza", "Entrar a modo Primera pieza sin escanear un trabajo.", 5),
-    ("autorizar_mantenimiento", "Validar la entrada/salida del modo Mantenimiento (junto al operador).", 6),
+    ("autorizar_supervision", "Autorizar la reanudacion de la sesion como Supervisor/Admin (ademas del operador de la sesion).", 2),
+    ("acceso_sesiones", "Ver la vista de Sesiones.", 3),
+    ("acceso_admin", "Acceder a Administracion (incluye la gestion de permisos).", 4),
+    ("actualizar_app", "Buscar y aplicar actualizaciones de la aplicacion.", 5),
+    ("iniciar_primera_pieza", "Entrar a modo Primera pieza sin escanear un trabajo.", 6),
+    ("autorizar_mantenimiento", "Validar la entrada/salida del modo Mantenimiento (junto al operador).", 7),
 ]
 
 # Permisos por defecto de los roles clasicos. Se aplican en el primer arranque
 # (tabla permisos_roles vacia) y a cualquier rol de estos que no tenga ningun
 # permiso asignado (p. ej. un rol recien creado en una BD existente).
 PERMISOS_POR_DEFECTO = {
-    "admin": ["autorizar_paro", "acceso_sesiones", "acceso_admin",
-              "actualizar_app", "iniciar_primera_pieza", "autorizar_mantenimiento"],
-    "supervisor": ["autorizar_paro", "acceso_sesiones"],
+    "admin": ["autorizar_paro", "autorizar_supervision", "acceso_sesiones",
+              "acceso_admin", "actualizar_app", "iniciar_primera_pieza",
+              "autorizar_mantenimiento"],
+    "supervisor": ["autorizar_paro", "autorizar_supervision", "acceso_sesiones"],
     "mantenimiento": ["autorizar_paro", "iniciar_primera_pieza",
                       "autorizar_mantenimiento"],
 }
@@ -276,6 +278,32 @@ def init_db():
                     "VALUES (?, ?)",
                     (rol["id"], permiso),
                 )
+
+    # Migracion (permiso dedicado de supervision): los roles clasicos ya
+    # configurados en una BD existente tienen `autorizar_paro` asignado, asi
+    # que el bloque de defaults NO les vuelve a asignar nada. Se otorga
+    # `autorizar_supervision` SOLO a los roles cuyo default lo incluye (admin
+    # y supervisor) y que ya estaban configurados; mantenimiento NO lo
+    # recibe, de modo que ya no podra autorizar el modal del operador (solo
+    # supervisor/admin o el operador de la sesion).
+    for rol_nombre, permisos in PERMISOS_POR_DEFECTO.items():
+        if "autorizar_supervision" not in permisos:
+            continue
+        rol = cur.execute(
+            "SELECT id FROM roles WHERE nombre=? AND activo=1", (rol_nombre,)
+        ).fetchone()
+        if rol is None:
+            continue
+        configurado = cur.execute(
+            "SELECT 1 FROM permisos_roles WHERE rol_id=? LIMIT 1",
+            (rol["id"],),
+        ).fetchone()
+        if configurado is not None:
+            cur.execute(
+                "INSERT OR IGNORE INTO permisos_roles (rol_id, permiso) "
+                "VALUES (?, ?)",
+                (rol["id"], "autorizar_supervision"),
+            )
 
     # Causas de paro por defecto (misma politica que agregar_causa_paro:
     # si existe inactiva, se reactiva; si no, se inserta).

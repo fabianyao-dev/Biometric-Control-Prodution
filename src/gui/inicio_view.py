@@ -1021,15 +1021,16 @@ class InicioView(QWidget):
             self._modal_abierto = False
 
     def _validar_autorizacion_paro(self, id_operador, nombre, causa_id=None):
-        """Solo autoriza (reanudar paro o cerrar sesion) el dueno de la
-        sesion o un rol con el permiso 'autorizar_paro' (gestionado en
-        Administracion)."""
+        """Solo autoriza (reanudar paro, cerrar sesion o reanudar la
+        produccion tras mantenimiento) el dueno de la sesion o un rol con el
+        permiso 'autorizar_supervision' (Supervisor/Admin; gestionado en
+        Administracion). Mantenimiento NO autoriza este modal."""
         if id_operador == self.operador_id:
             return True, None
-        if rol_tiene_permiso_operador(id_operador, "autorizar_paro"):
+        if rol_tiene_permiso_operador(id_operador, "autorizar_supervision"):
             return True, None
         return False, (
-            "Solo el operador de la sesión, Supervisor o Mantenimiento "
+            "Solo el operador de la sesión, Supervisor o Admin "
             "puede autorizar esta acción"
         )
 
