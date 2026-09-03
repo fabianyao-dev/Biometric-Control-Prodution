@@ -204,7 +204,8 @@ def init_db():
             y REAL NOT NULL DEFAULT 0.0,
             w REAL NOT NULL DEFAULT 0.28,
             h REAL NOT NULL DEFAULT 0.16,
-            icono_frac REAL NOT NULL DEFAULT 0.5
+            icono_frac REAL NOT NULL DEFAULT 0.5,
+            maquina_encendida INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS paros_produccion (
@@ -371,6 +372,11 @@ def init_db():
                 f"ALTER TABLE zonas_maquina ADD COLUMN {col_geo} "
                 f"REAL NOT NULL DEFAULT {default}"
             )
+    if "maquina_encendida" not in cols_zona:
+        cur.execute(
+            "ALTER TABLE zonas_maquina ADD COLUMN maquina_encendida "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
     cols_zona = [
         r[1] for r in cur.execute("PRAGMA table_info(zonas_maquina)").fetchall()
     ]
@@ -1418,12 +1424,14 @@ def listar_zonas_maquina(activas_solo=True):
     conn = obtener_conexion()
     if activas_solo:
         rows = conn.execute(
-            "SELECT id, nombre, posicion, icono, x, y, w, h, icono_frac "
+            "SELECT id, nombre, posicion, icono, x, y, w, h, icono_frac, "
+            "maquina_encendida "
             "FROM zonas_maquina WHERE activo=1 ORDER BY y, x, id"
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT id, nombre, activo, posicion, icono, x, y, w, h, icono_frac "
+            "SELECT id, nombre, activo, posicion, icono, x, y, w, h, "
+            "icono_frac, maquina_encendida "
             "FROM zonas_maquina ORDER BY y, x, id"
         ).fetchall()
     conn.close()
@@ -1438,6 +1446,7 @@ def guardar_zona(
     w: float = 0.28,
     h: float = 0.16,
     icono_frac: float = 0.5,
+    maquina_encendida: int = 0,
 ):
     """Actualiza la geometria libre (fracciones 0..1) e icono de una zona.
 
@@ -1459,9 +1468,18 @@ def guardar_zona(
     icono_frac = max(0.1, min(0.9, float(icono_frac)))
     conn = obtener_conexion()
     conn.execute(
-        "UPDATE zonas_maquina SET icono=?, x=?, y=?, w=?, h=?, icono_frac=? "
-        "WHERE id=?",
-        (icono or "", x, y, w, h, icono_frac, zona_id),
+        "UPDATE zonas_maquina SET icono=?, x=?, y=?, w=?, h=?, icono_frac=?, "
+        "maquina_encendida=? WHERE id=?",
+        (
+            icono or "",
+            x,
+            y,
+            w,
+            h,
+            icono_frac,
+            1 if maquina_encendida else 0,
+            zona_id,
+        ),
     )
     for i, z in enumerate(conn.execute(
         "SELECT id FROM zonas_maquina WHERE activo=1 ORDER BY y, x, id"

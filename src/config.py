@@ -407,3 +407,10 @@ PRIMERA_PIEZA_TIMEOUT_S = _env_int("PRIMERA_PIEZA_TIMEOUT_S", 900)
 # Selector de causa de paro: cuadricula con las causas mas usadas.
 CAUSAS_FRECUENTES_LIMITE = 6
 CAUSAS_GRID_COLUMNAS = 3
+
+# Modo DESARROLLO sin lector. Con MODO_DEV=true la biometria NO intenta usar
+# el lector y en la pantalla de inicio de sesion aparece el boton
+# "Entrar como DEV (sin lector)", que inicia sesion directo con el operador
+# temporal de desarrollo (obtener_operador_temporal). Pensado para probar la
+# interfaz sin hardware biometrico. Nunca debe activarse en produccion.
+MODO_DEV = _env_bool("MODO_DEV", False)

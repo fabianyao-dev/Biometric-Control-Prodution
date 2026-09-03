@@ -134,6 +134,13 @@ class BiometricService:
         """
         from src.database import listar_fmds, obtener_operador_temporal
 
+        # Modo DESARROLLO sin lector: entra directo con el operador temporal,
+        # sin intentar usar el lector.
+        if config.MODO_DEV:
+            if on_progress:
+                on_progress("Modo desarrollo sin lector; acceso como DEV.")
+            return obtener_operador_temporal()
+
         filas = listar_fmds(activos_solo=True)
         if not filas:
             # Sin usuarios reales: acceso automatico (modo desarrollo).

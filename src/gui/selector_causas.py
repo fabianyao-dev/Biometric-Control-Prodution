@@ -45,6 +45,7 @@ class SelectorZonas(QFrame):
         self.on_seleccion = on_seleccion
         self.seleccion_zona_id = None
         self.seleccion_zona_nombre = None
+        self.seleccion_zona_maquina = False
         self._canvas = None
         self._preseleccionar = bool(preseleccionar)
         self._crear_interfaz()
@@ -79,6 +80,7 @@ class SelectorZonas(QFrame):
             return
         self.seleccion_zona_id = zona["id"]
         self.seleccion_zona_nombre = zona["nombre"]
+        self.seleccion_zona_maquina = bool(zona.get("maquina_encendida"))
         self.lbl_zona.setText(f"Zona: {zona['nombre']}")
         if self.on_seleccion:
             self.on_seleccion()
@@ -130,9 +132,32 @@ class SelectorCausaZona(QFrame):
         # envuelven y la columna se llenaria de scroll "porque las zonas la
         # empujan".
         col_causas = self._columna_causas()
-        col_causas.setMinimumWidth(380)
-        col_causas.setMaximumWidth(430)
+        # Ancho de la columna de causas: PORTABLE a la dimension de la
+        # ventana, se recalcula en `resizeEvent`. Base fija estrecha para
+        # dejar el maximo espacio al croquis de zonas (en horizontal o
+        # vertical) y que las zonas no se aplasten.
+        self._col_causas = col_causas
         layout.addWidget(col_causas, stretch=0)
+        self._ajustar_ancho_causas()
+
+    def _ajustar_ancho_causas(self):
+        """Ancho de la lista de causas como fraccion del ancho disponible.
+
+        En pantallas/ventanas angostas (vertical) el croquis se queda con el
+        resto; la lista nunca rebasa un maximo para no empujar a las zonas."""
+        if not hasattr(self, "_col_causas"):
+            return
+        ancho = max(self.width(), 1)
+        # 34% del ancho disponible, acotado para mantener botones legibles y
+        # darle siempre al croquis un minimo respetable.
+        objetivo = int(ancho * 0.34)
+        objetivo = max(250, min(objetivo, 380))
+        self._col_causas.setMinimumWidth(objetivo)
+        self._col_causas.setMaximumWidth(objetivo)
+
+    def resizeEvent(self, evento):
+        super().resizeEvent(evento)
+        self._ajustar_ancho_causas()
 
     def _columna_causas(self):
         """Lista de causas con BUSCAR (columna derecha)."""
@@ -241,3 +266,11 @@ class SelectorCausaZona(QFrame):
         if not self._causa_req_zona:
             return None
         return self.zonas.seleccion_zona_nombre
+
+    def seleccion_zona_maquina_encendida(self):
+        """True si la causa requiere zona y la zona elegida tiene marcada la
+        opcion 'maquina encendida' (el paro deja la maquina en marcha como en
+        mantenimiento). False si no aplica."""
+        if not self._causa_req_zona or self.zonas.seleccion_zona_id is None:
+            return False
+        return bool(getattr(self.zonas, "seleccion_zona_maquina", False))

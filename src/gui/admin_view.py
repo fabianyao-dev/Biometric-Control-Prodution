@@ -89,8 +89,6 @@ from src.gui.util import centrar_y_ajustar, desplazamiento_tactil, preguntar_tex
 
 log = logging.getLogger(__name__)
 
-MIN_HUELLAS_REGISTRO = 2
-
 
 class CheckboxListWidget(QListWidget):
     """QListWidget cuyos items checkables alternan su estado al hacer clic en
@@ -271,7 +269,8 @@ class CroquisZonasEditor(QFrame):
     def _persistir_geometria(self, zona_id, x, y, w, h, icono_frac):
         zona = self.zona_por_id(zona_id)
         icono = (zona["icono"] if zona else "") or ""
-        guardar_zona(zona_id, icono, x, y, w, h, icono_frac)
+        maquina = (zona["maquina_encendida"] if zona else 0) or 0
+        guardar_zona(zona_id, icono, x, y, w, h, icono_frac, maquina)
 
 
 class SelectorIconoModal(QDialog):
@@ -406,6 +405,13 @@ class AdminView(QWidget):
         self._capturando = False
         self._huellas_captura = []
         self._modo_captura = None
+        # Captura MULTIPLE encadenada: al registrar un operador nuevo se
+        # capturan las huellas una tras otra (sin pulsar el boton por cada
+        # dedo) hasta que se presione 'Detener Captura'.
+        self._modo_cadena = False
+        # Indica que la cadena quedo en espera de que el usuario coloque un
+        # dedo distinto (no avanza solo hasta que arranca la captura).
+        self._cadena_esperando = False
         self.cola = queue.Queue()
         self.cola_update = queue.Queue()
         self._manifest = None
@@ -500,7 +506,7 @@ class AdminView(QWidget):
         layout.addWidget(fila_nombre_rol, alignment=Qt.AlignHCenter)
 
         self.lbl_huella = QLabel(
-            f"Huellas capturadas: 0 de al menos {MIN_HUELLAS_REGISTRO}",
+            "Huellas capturadas: 0",
             self.tab_operadores,
         )
         aplicar_estado(self.lbl_huella, "info")
@@ -510,9 +516,13 @@ class AdminView(QWidget):
         hb = QHBoxLayout(frame_botones)
         hb.setContentsMargins(0, 0, 0, 0)
         hb.setSpacing(8)
-        btn_capturar = QPushButton("Capturar Huella", frame_botones)
-        btn_capturar.clicked.connect(self._capturar_huella)
-        hb.addWidget(btn_capturar)
+        self.btn_capturar = QPushButton("Capturar Huellas", frame_botones)
+        self.btn_capturar.setToolTip(
+            "Captura las huellas una tras otra. Vuelve a presionar "
+            "'Detener Captura' cuando hayas puesto las que quieras."
+        )
+        self.btn_capturar.clicked.connect(self._capturar_huella)
+        hb.addWidget(self.btn_capturar)
         btn_quitar = QPushButton("Quitar Última", frame_botones)
         btn_quitar.clicked.connect(self._quitar_ultima_huella)
         hb.addWidget(btn_quitar)
@@ -639,15 +649,40 @@ class AdminView(QWidget):
         self._recargar_huellas()
 
     def _capturar_huella(self):
+        """Toggle de captura MULTIPLE. El boton inicia la cadena (se capturan
+        huellas una tras otra sin pulsar por cada dedo) y, al volver a
+        presionarlo, la DETIENE dejando las huellas capturadas hasta ese
+        momento (el usuario decide cuantas poner)."""
+        if self._modo_cadena:
+            self._detener_cadena()
+            return
         if self._capturando:
+            # Otra captura en curso (agregar/reemplazar de un operador).
             return
         if not self.entry_nombre.text().strip():
             self._lbl("Escribe el nombre antes de capturar las huellas.", "error")
             return
         self._modo_captura = None
+        self._modo_cadena = True
+        self._cadena_esperando = False
         self._lbl("", "info")
-        self._lbl_huella("Coloca tu huella...", "procesando")
+        self._lbl_huella(
+            "Coloca tu huella... Presiona 'Detener Captura' al terminar.",
+            "procesando",
+        )
         self._iniciar_captura()
+        self._actualizar_boton_captura()
+
+    def _detener_cadena(self):
+        """Detiene la captura encadenada; conserva las huellas ya capturadas."""
+        self._modo_cadena = False
+        self._cadena_esperando = False
+        self._lbl_huella("Captura detenida.", "info")
+        self._actualizar_boton_captura()
+
+    def _actualizar_boton_captura(self):
+        texto = "Detener Captura" if self._modo_cadena else "Capturar Huellas"
+        self.btn_capturar.setText(texto)
 
     def _capturar_huella_agregar(self):
         if self._capturando:
@@ -693,10 +728,8 @@ class AdminView(QWidget):
         if not nombre:
             self._lbl("Escribe el nombre.", "error")
             return
-        if len(self._huellas_captura) < MIN_HUELLAS_REGISTRO:
-            self._lbl(
-                f"Captura al menos {MIN_HUELLAS_REGISTRO} huellas distintas.", "error"
-            )
+        if not self._huellas_captura:
+            self._lbl("Captura al menos una huella.", "error")
             return
         rol_id = self._roles_por_nombre.get(self.combo_rol.currentText())
         ok, res = guardar_operador(nombre, self._huellas_captura, rol_id)
@@ -708,7 +741,10 @@ class AdminView(QWidget):
             )
             self.entry_nombre.clear()
             self._huellas_captura = []
+            self._modo_cadena = False
+            self._cadena_esperando = False
             self._actualizar_estado_captura()
+            self._actualizar_boton_captura()
             self._recargar_operadores()
         else:
             self._lbl(str(res), "error")
@@ -716,32 +752,66 @@ class AdminView(QWidget):
     def _quitar_ultima_huella(self):
         if not self._huellas_captura:
             return
+        # Quitar la ultima tambien DETIENE la cadena de captura multiple.
+        self._modo_cadena = False
+        self._cadena_esperando = False
         self._huellas_captura.pop()
         self._lbl("Última huella quitada.", "info")
         self._actualizar_estado_captura()
+        self._actualizar_boton_captura()
 
     def _agregar_huella_captura(self, fmd):
         if self._es_duplicada(fmd, self._huellas_captura):
             self._lbl_huella(
                 "Esa huella ya se puso. Usa un dedo distinto.", "error"
             )
+            if self._modo_cadena:
+                # En cadena no se corta: se vuelve a pedir un dedo distinto.
+                self._lbl_huella(
+                    "Esa huella ya se puso. Retira el dedo y coloca uno "
+                    "distinto...",
+                    "error",
+                )
+                self._encadenar_captura()
             return
         self._huellas_captura.append(fmd)
         n = len(self._huellas_captura)
-        if n < MIN_HUELLAS_REGISTRO:
-            self._lbl(
-                f"Huella {n} capturada. Faltan "
-                f"{MIN_HUELLAS_REGISTRO - n} mas.",
-                "exito",
-            )
-        else:
-            self._lbl("Huellas capturadas. Listo para guardar.", "exito")
+        self._lbl(
+            f"Huella {n} capturada. Presiona 'Detener Captura' para "
+            "terminar.",
+            "exito",
+        )
         self._actualizar_estado_captura()
+        if self._modo_cadena:
+            self._encadenar_captura()
+
+    def _encadenar_captura(self):
+        """Arranca la siguiente captura de la cadena con una pausa para que
+        el operador retire el dedo y coloque otro."""
+        if not self._modo_cadena or self._cadena_esperando:
+            return
+        if self._capturando:
+            return
+        self._cadena_esperando = True
+        QTimer.singleShot(
+            900,
+            lambda: self._lanzar_siguiente_captura_cadena()
+        )
+
+    def _lanzar_siguiente_captura_cadena(self):
+        self._cadena_esperando = False
+        # Si mientras se esperaba se detuvo o cancelo la cadena, no lanzar.
+        if not self._modo_cadena:
+            return
+        if self._capturando:
+            self._encadenar_captura()
+            return
+        self._lbl_huella("Coloca el siguiente dedo...", "procesando")
+        self._iniciar_captura()
 
     def _actualizar_estado_captura(self):
         self._lbl_huella(
-            f"Huellas capturadas: {len(self._huellas_captura)} "
-            f"de al menos {MIN_HUELLAS_REGISTRO}.",
+            f"Huellas capturadas: {len(self._huellas_captura)}.",
             "info",
         )
 
@@ -1101,6 +1171,18 @@ class AdminView(QWidget):
         hit.addStretch(1)
         gp.addWidget(ic_tam_fila, 1, 1)
 
+        self.chk_zona_maquina = CheckBox(
+            "Mantener la maquina ENCENDIDA durante el paro de esta zona "
+            "(como en mantenimiento)",
+            panel,
+        )
+        self.chk_zona_maquina.setToolTip(
+            "Si esta zona se elige como motivo de un paro (y la causa lo "
+            "permite), la maquina seguira en marcha con el conteo suspendido "
+            "hasta que se cierre el paro."
+        )
+        gp.addWidget(self.chk_zona_maquina, 2, 0, 1, 2)
+
         botones = QWidget(panel)
         hb = QHBoxLayout(botones)
         hb.setContentsMargins(0, 0, 0, 0)
@@ -1129,6 +1211,7 @@ class AdminView(QWidget):
         pct = max(10, min(90, int(round(float(zona["icono_frac"]) * 100))))
         self.slider_zona_icono.setValue(pct)
         self.lbl_zona_icono_pct.setText(f"{pct}%")
+        self.chk_zona_maquina.setChecked(bool(zona.get("maquina_encendida")))
         self._set_icono_zona(zona["icono"] or "")
 
     def _set_icono_zona(self, icono):
@@ -1171,6 +1254,7 @@ class AdminView(QWidget):
             zona["w"],
             zona["h"],
             self.slider_zona_icono.value() / 100.0,
+            1 if self.chk_zona_maquina.isChecked() else 0,
         )
         self._lbl_causa("Cambios guardados.", "exito")
         self._editor_zonas._cargar()
@@ -1631,6 +1715,8 @@ class AdminView(QWidget):
             msg = f"Captura sin plantilla ({status})."
             if modo is None:
                 self._lbl_huella(msg, "error")
+                if self._modo_cadena:
+                    self._encadenar_captura()
             else:
                 self._lbl_huellas(msg, "error")
             return

@@ -129,7 +129,7 @@ class HuellaModal(QDialog):
                  mostrar_cancelar=True, cerrable=True, pedir_causa=False,
                  validador=None, pedir_trabajo=False, qr_solo=False,
                  on_trabajo_escaneado=None, permitir_sin_trabajo=False,
-                 on_confirmado=None):
+                 on_confirmado=None, mostrar_dev=False, on_dev=None):
         super().__init__(parent)
         self.biometrico = biometrico
         self.titulo = titulo
@@ -142,6 +142,11 @@ class HuellaModal(QDialog):
         self.validador = validador
         self.pedir_trabajo = pedir_trabajo
         self.pedir_causa = pedir_causa
+        # Boton "Entrar como DEV (sin lector)": visible cuando `mostrar_dev`
+        # es True (modo desarrollo). Al pulsarlo se cierra el modal y se
+        # invoca `on_dev` para iniciar sesion con el operador temporal.
+        self.mostrar_dev = mostrar_dev
+        self.on_dev = on_dev
         # Permite CONFIRMAR con la huella aunque no se haya escaneado ningun
         # QR. El callback on_autenticado recibe folio/num_part/cantidad como
         # None para distinguirlo de una carga con trabajo. El autorizador de
@@ -310,6 +315,17 @@ class HuellaModal(QDialog):
             btn_cancelar.clicked.connect(self._cancelar)
             layout.addWidget(btn_cancelar)
 
+        if self.mostrar_dev:
+            btn_dev = QPushButton("Entrar como DEV (sin lector)", self)
+            btn_dev.setToolTip(
+                "Modo desarrollo: inicia sesion con el operador temporal "
+                "sin usar el lector biometrico."
+            )
+            btn_dev.setAutoDefault(False)
+            btn_dev.setDefault(False)
+            btn_dev.clicked.connect(self._entrar_dev)
+            layout.addWidget(btn_dev)
+
         # En un paro con causa, el flujo es: elegir causa (+ zona) -> boton
         # CONFIRMAR -> huella que autoriza.
         if pedir_causa:
@@ -420,6 +436,7 @@ class HuellaModal(QDialog):
             sel.seleccion_descripcion,
             sel.seleccion_zona_id(),
             sel.seleccion_zona_nombre(),
+            sel.seleccion_zona_maquina_encendida(),
         )
         # Cierra PRIMERO y despues notifica (MISMO patron que
         # _cerrar_y_notificar), para que el segundo modal no se apile sobre este.
@@ -579,6 +596,13 @@ class HuellaModal(QDialog):
             if self.on_cancelar:
                 self.on_cancelar()
         self.reject()
+
+    def _entrar_dev(self):
+        """Accion del boton 'Entrar como DEV (sin lector)'."""
+        self._autenticado = True
+        self.accept()
+        if self.on_dev:
+            self.on_dev()
 
     def _estado(self, texto, estado):
         self.lbl_estado.setText(texto)
