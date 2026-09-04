@@ -264,6 +264,25 @@ QPushButton#Nav:pressed {
     background: @borde@;
 }
 
+/* Variante CENTRADA de #Nav (acciones al fondo del sidebar: Tema, Salir):
+   mismo fantasma que #Nav pero con texto+icono al centro. */
+QPushButton#NavCentro {
+    background: transparent;
+    color: @texto_sec@;
+    text-align: center;
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 700;
+}
+QPushButton#NavCentro:hover {
+    background: @elevada@;
+    color: @texto@;
+}
+QPushButton#NavCentro:pressed {
+    background: @borde@;
+}
+
 /* ---- Botones de ICONO del header (sesion, tema, hamburguesa): cuadrados
    y con contenido centrado; el #Nav del sidebar es texto a la izquierda. */
 QPushButton#NavIcono {

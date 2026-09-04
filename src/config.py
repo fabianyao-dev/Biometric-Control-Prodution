@@ -302,6 +302,13 @@ LOG_DIR = os.environ.get("LOG_DIR") or os.path.join(DIR_DATOS, "logs")
 ZONA_HORARIA = "America/Monterrey"
 
 CAPTURE_TIMEOUT_MS = 60000
+# Timeout CORTO para la captura MULTIPLE encadenada (registro de operador):
+# una captura en vuelo no se puede cancelar (llamada nativa bloqueante), asi
+# que si el usuario pulsa Guardar/Detener a media captura, el hilo queda
+# ocupando el lector hasta que expira. Con 15 s la ventana maxima de "lector
+# ocupado" es breve; al expirar, la cadena se rearma sola. Las capturas
+# simples (agregar/reemplazar) conservan los 60 s.
+CAPTURE_TIMEOUT_CADENA_MS = 15000
 CAPTURE_BUFFER_SIZE = 512 * 1024
 IMAGE_FMT_PIXEL_BUFFER = 0
 IMAGE_PROC_DEFAULT = 0

@@ -28,6 +28,13 @@ El tamano de la ventana se calcula en funcion del contenido (vease
 `centrar_y_ajustar`), asi el modal crece o encoge segun la causa. Se abre en
 bloqueo con `exec()`; los hilos secundarios solo escriben a `queue.Queue()`
 que se drena con un QTimer en el hilo principal.
+
+En MODO_DEV (`config.MODO_DEV=true`, sin lector) el Enter equivale a poner
+la huella: autentica como DEV por el camino normal (validador y requisitos
+de causa/trabajo aplican). No aplica en el selector causa/zona (ahi el Enter
+es del Buscar/CONFIRMAR), en modo qr_solo ni con el foco en un campo con
+texto (el QR usa el Enter para enviar lo escaneado; con el campo vacio el
+Enter tambien entra como DEV).
 """
 
 import logging
@@ -39,6 +46,7 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QDialog, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
+from src import config
 from src.gui import style
 from src.gui.selector_causas import SelectorCausaZona
 from src.gui.style import aplicar_estado
@@ -198,7 +206,9 @@ class HuellaModal(QDialog):
         self._timer_cola.start()
         # En un paro con causa (pedir_causa) la captura de huella arranca
         # hasta pulsar Confirmar (el operador primero elige causa + zona).
-        if not self.qr_solo and not self.pedir_causa:
+        # En MODO_DEV NO se arranca sola: autenticaria al instante con el
+        # operador temporal; se espera a que el usuario pulse Enter.
+        if not self.qr_solo and not self.pedir_causa and not config.MODO_DEV:
             self._empezar()
 
         # El escaner USB tipo teclado escribe aqui y manda Enter.
@@ -299,6 +309,14 @@ class HuellaModal(QDialog):
                 "Escanea el QR del trabajo..." if self.qr_solo
                 else "Coloca tu huella..."
             )
+            # En MODO_DEV el Enter equivale a la huella (sin lector): se
+            # avisa para no dejar el modal aparentemente trabado.
+            if config.MODO_DEV and not self.qr_solo:
+                texto_estado = (
+                    "Escanea el QR y pulsa Enter con el campo vacio para "
+                    "entrar como DEV..." if self.pedir_trabajo else
+                    "Coloca tu huella o pulsa Enter (DEV, sin lector)..."
+                )
         self.lbl_estado = QLabel(texto_estado, self)
         self.lbl_estado.setObjectName("EstadoInfo")
         self.lbl_estado.setAlignment(Qt.AlignCenter)
@@ -352,6 +370,12 @@ class HuellaModal(QDialog):
         las variantes tipicas como separadores.
         """
         texto = self.input_qr.text().strip()
+        # En MODO_DEV el Enter con el campo VACIO equivale a la huella (el
+        # escaner siempre manda texto antes del Enter, asi que no hay
+        # ambiguedad). Con texto se procesa como QR normal.
+        if config.MODO_DEV and not texto and self._enter_dev_permitido(permitir_qr=True):
+            self._auth_dev()
+            return
         partes = [p.strip() for p in re.split(r"[|]", texto)]
         if len(partes) != 3:
             self._rechazar_qr(
@@ -554,6 +578,14 @@ class HuellaModal(QDialog):
 
     def _reintentar(self):
         if not self._autenticado and self._abierto:
+            # En MODO_DEV no se relanza el escaneo (autenticaria solo al
+            # instante): se espera otro Enter del usuario.
+            if config.MODO_DEV:
+                self._estado(
+                    "Pulsa Enter para entrar como DEV (sin lector).",
+                    "procesando",
+                )
+                return
             threading.Thread(target=self._escanea, daemon=True).start()
 
     def _cerrar_y_notificar(self):
@@ -603,6 +635,40 @@ class HuellaModal(QDialog):
         self.accept()
         if self.on_dev:
             self.on_dev()
+
+    def keyPressEvent(self, evento):
+        """En MODO_DEV el Enter equivale a poner la huella (sin lector)."""
+        if evento.key() in (Qt.Key_Return, Qt.Key_Enter) \
+                and self._enter_dev_permitido():
+            self._auth_dev()
+            evento.accept()
+            return
+        super().keyPressEvent(evento)
+
+    def _enter_dev_permitido(self, permitir_qr=False):
+        """Enter-como-huella solo en modales que esperan huella y sin
+        autenticacion previa. El Enter con foco en un campo de texto se
+        respeta (el QR y el Buscar lo usan para lo suyo), salvo el campo QR
+        vacio cuando `permitir_qr` es True (ver `_leer_qr`)."""
+        if not config.MODO_DEV or self._autenticado or not self._abierto:
+            return False
+        if self.pedir_causa or self.qr_solo:
+            return False
+        foco = self.focusWidget()
+        if isinstance(foco, QLineEdit):
+            return bool(permitir_qr and foco is getattr(self, "input_qr", None))
+        return True
+
+    def _auth_dev(self):
+        """Autentica como DEV por Enter: mismo camino que una huella real
+        (pasa por validador, causa/zona y trabajo exigidos)."""
+        try:
+            resultado = self.biometrico.autenticar_operador()
+        except Exception as e:  # noqa: BLE001
+            self._estado(f"Intenta de nuevo: {e}", "error")
+            return
+        self._estado("Acceso DEV sin lector...", "procesando")
+        self.cola.put(("RESULTADO", resultado))
 
     def _estado(self, texto, estado):
         self.lbl_estado.setText(texto)

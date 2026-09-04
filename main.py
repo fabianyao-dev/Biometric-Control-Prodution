@@ -4,8 +4,9 @@ main.py - Punto de entrada del sistema de control biometrico.
 Orquesta:
     - Instancias compartidas: BiometricService, controlador HAL (Modbus TCP
       o SimulacionController) y la BD.
-    - Header con boton hamburguesa que despliega un panel lateral con la
-      navegacion: Inicio, Sesiones y Administracion.
+    - Header con boton hamburguesa que despliega un panel lateral (oculto
+      al inicio) con la navegacion: Inicio, Sesiones y Administracion,
+      mas Tema claro/oscuro y Salir al fondo.
     - Shutdown seguro: siempre llama controlador.cleanup() al salir (manual o
       error).
 
@@ -16,10 +17,11 @@ queue.Queue() drenada en el hilo principal (QTimer).
 import logging
 import os
 import sys
+import time
 
 import qtawesome as qta
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -27,6 +29,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QSplashScreen,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -164,7 +167,7 @@ class App(QMainWindow):
         self.btn_hamburguesa.clicked.connect(self._toggle_sidebar)
         lay.addWidget(self.btn_hamburguesa)
 
-        titulo = QLabel("Control Biometrico de Produccion", self.header)
+        titulo = QLabel("Control de Corte", self.header)
         titulo.setObjectName("HeaderLabel")
         lay.addWidget(titulo)
         lay.addStretch(1)
@@ -183,20 +186,6 @@ class App(QMainWindow):
         self.btn_advertencias = IndicadorAdvertencias(self.header)
         lay.addWidget(self.btn_advertencias)
 
-        # Tema claro/oscuro: cambia en caliente y persiste en config.json.
-        self.btn_tema = QPushButton(self.header)
-        self.btn_tema.setObjectName("NavIcono")
-        self.btn_tema.setFixedSize(44, 44)
-        self.btn_tema.setIconSize(QSize(20, 20))
-        self.btn_tema.clicked.connect(self._alternar_tema)
-        self._refrescar_boton_tema()
-        lay.addWidget(self.btn_tema)
-
-        btn_salir = QPushButton("Salir", self.header)
-        btn_salir.setObjectName("Nav")
-        btn_salir.clicked.connect(self._salir)
-        lay.addWidget(btn_salir)
-
     # ------------------------------------------------------------------
     # Tema claro/oscuro
     # ------------------------------------------------------------------
@@ -211,16 +200,24 @@ class App(QMainWindow):
                         exc_info=True)
         self._refrescar_boton_tema()
         # Regenera de inmediato los iconos SVG con los colores del tema
-        # nuevo (menu, indicador de avisos y boton de sesion).
+        # nuevo (menu, indicador de avisos, boton de sesion y Salir).
         self._refrescar_boton_menu()
         self._revisar_avisos()
         self._refrescar_boton_sesion()
+        self._refrescar_boton_salir()
 
     def _refrescar_boton_menu(self):
         """Icono de la hamburguesa con el color del tema activo."""
         self.btn_hamburguesa.setIcon(
             qta.icon("mdi6.menu", color=style.color("texto_sec"))
         )
+
+    def _refrescar_boton_salir(self):
+        """Icono de Salir (qtawesome) con el color del tema activo."""
+        self.btn_salir.setIcon(
+            qta.icon("mdi6.exit-to-app", color=style.color("texto_sec"))
+        )
+        self.btn_salir.setToolTip("Cerrar la aplicacion")
 
     def _refrescar_boton_tema(self):
         # Iconos por nombre (qtawesome); nunca emojis ni glifos Unicode:
@@ -229,11 +226,13 @@ class App(QMainWindow):
             self.btn_tema.setIcon(qta.icon(
                 "mdi6.weather-sunny", color=style.color("texto_sec")
             ))
+            self.btn_tema.setText("Tema claro")
             self.btn_tema.setToolTip("Cambiar a tema claro")
         else:
             self.btn_tema.setIcon(qta.icon(
                 "mdi6.weather-night", color=style.color("texto")
             ))
+            self.btn_tema.setText("Tema oscuro")
             self.btn_tema.setToolTip("Cambiar a tema oscuro")
 
     # ------------------------------------------------------------------
@@ -368,9 +367,26 @@ class App(QMainWindow):
             self.btn_sidebar[nombre] = btn
         sv.addStretch(1)
 
+        # Acciones de app al FONDO del sidebar: tema claro/oscuro y Salir
+        # (antes vivian en el header). Estilo NavCentro: centrados.
+        self.btn_tema = QPushButton(self.sidebar)
+        self.btn_tema.setObjectName("NavCentro")
+        self.btn_tema.setIconSize(QSize(20, 20))
+        self.btn_tema.clicked.connect(self._alternar_tema)
+        self._refrescar_boton_tema()
+        sv.addWidget(self.btn_tema)
+
+        self.btn_salir = QPushButton("Salir", self.sidebar)
+        self.btn_salir.setObjectName("NavCentro")
+        self.btn_salir.setIconSize(QSize(20, 20))
+        self.btn_salir.clicked.connect(self._salir)
+        self._refrescar_boton_salir()
+        sv.addWidget(self.btn_salir)
+
         # Se inserta antes del contenido para quedar a la izquierda.
         self._cuerpo_layout.insertWidget(0, self.sidebar)
-        self._sidebar_visible = True
+        # El sidebar arranca OCULTO; se despliega con la hamburguesa.
+        self._sidebar_visible = False
         self._actualizar_sidebar()
 
     def _toggle_sidebar(self):
@@ -508,6 +524,80 @@ class App(QMainWindow):
         evento.accept()
 
 
+def _crear_splash():
+    """Pantalla de carga con el logo y el nombre de la app.
+
+    Se muestra centrada mientras arranca el programa (BD + hardware) con
+    mensajes de etapa via `_splash_mensaje`. Usa los colores del tema activo.
+    """
+    ancho, alto = 560, 420
+    base = QPixmap(ancho, alto)
+    base.fill(QColor(style.color("superficie")))
+    p = QPainter(base)
+    try:
+        logo = QPixmap(_ruta_recurso("logo.png"))
+        if not logo.isNull():
+            logo = logo.scaledToWidth(300, Qt.SmoothTransformation)
+            p.drawPixmap((ancho - logo.width()) // 2, 40, logo)
+        p.setPen(QColor(style.color("texto")))
+        p.setFont(QFont(style.FAMILIA_FUENTE, 24, QFont.Bold))
+        p.drawText(0, 250, ancho, 50, Qt.AlignHCenter, "Control de Corte")
+        p.setPen(QColor(style.color("texto_sec")))
+        p.setFont(QFont(style.FAMILIA_FUENTE, 12))
+        p.drawText(
+            0, 295, ancho, 30, Qt.AlignHCenter,
+            "Sistema de Control Biometrico",
+        )
+    finally:
+        p.end()
+    splash = QSplashScreen(base)
+    splash.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+    return splash
+
+
+# Duracion MINIMA visible del splash (segundos): aunque el arranque termine
+# antes, la pantalla de carga se queda este tiempo para que el logo y los
+# mensajes se alcancen a leer.
+SPLASH_MINIMO_S = 3.0
+# Permanencia MINIMA de cada mensaje de etapa: sin esto, las etapas rapidas
+# (BD, hardware) pasan tan veloz que solo se alcanza a ver el ultimo ("Listo").
+SPLASH_MENSAJE_MIN_S = 0.8
+_ultimo_mensaje_t = None
+
+
+def _splash_mensaje(splash, texto):
+    """Actualiza el mensaje del splash (abajo, centrado) y lo repinta.
+
+    Antes de cambiarlo completa la permanencia minima del mensaje anterior,
+    para que cada etapa se alcance a leer aunque su trabajo ya haya
+    terminado.
+    """
+    global _ultimo_mensaje_t
+    ahora = time.monotonic()
+    if _ultimo_mensaje_t is not None:
+        fin = _ultimo_mensaje_t + SPLASH_MENSAJE_MIN_S
+        while time.monotonic() < fin:
+            QApplication.processEvents()
+            time.sleep(0.05)
+    splash.showMessage(
+        texto, Qt.AlignBottom | Qt.AlignHCenter,
+        QColor(style.color("texto_sec")),
+    )
+    QApplication.processEvents()
+    _ultimo_mensaje_t = time.monotonic()
+
+
+def _esperar_splash_minimo(splash, inicio):
+    """Completa hasta SPLASH_MINIMO_S desde `inicio` (y la permanencia del
+    ultimo mensaje) bombeando eventos para que el splash siga repintandose
+    y respondiendo (clic lo oculta)."""
+    fin = max(inicio + SPLASH_MINIMO_S,
+              (_ultimo_mensaje_t or inicio) + SPLASH_MENSAJE_MIN_S)
+    while time.monotonic() < fin:
+        QApplication.processEvents()
+        time.sleep(0.05)
+
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     # Tema inicial: el guardado en config.json (produccion) o en el
@@ -518,11 +608,20 @@ if __name__ == "__main__":
         tema_guardado if tema_guardado in style.PALETAS
         else style.TEMA_POR_DEFECTO,
     )
+    splash = _crear_splash()
+    splash.show()
+    t0_splash = time.monotonic()
+    _splash_mensaje(splash, "Preparando...")
+    _splash_mensaje(splash, "Cargando base de datos...")
     init_db()
     # La sesion 'Activa' que quede tras un apagon se recupera en la vista
     # de Inicio (InicioView._revisar_sesion_interrumpida), no se borra.
+    _splash_mensaje(splash, "Iniciando lector y hardware...")
     ventana = App()
+    _splash_mensaje(splash, "Listo")
+    _esperar_splash_minimo(splash, t0_splash)
     ventana.show()
+    splash.finish(ventana)
     if ventana.kiosko:
         ventana.showFullScreen()
     try:

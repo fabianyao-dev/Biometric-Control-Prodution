@@ -1229,34 +1229,34 @@ def pausar_trabajo(folio: int, cantidad_cortada: int):
     conn.close()
 
 
-def cerrar_trabajo_modalidad(folio: int, cortes_actuales: int,
+def cerrar_trabajo_modalidad(folio: int, cantidad: int,
                              meta: int, nuevo_total: int | None = None,
-                             modalidad: str = "normal"):
-    """Cierra un trabajo segun la modalidad de cierre elegida (#5).
+                             modalidad: str = "parcial"):
+    """Cierra un trabajo con la cantidad confirmada por el operador (#5).
 
-    Esta funcion define la CANTIDAD final que se guarda; el ESTADO lo decide
-    si esa cantidad alcanza la meta: si la alcanza queda 'Cerrado', si no
-    'Abierto' (retomable re-escaneando el folio), igual que el cierre por
-    meta.
+    `cantidad` es AUTORITATIVA: viene del input del dialogo de cierre
+    (pre-cargado con el conteo detectado y corregible a mano). Ya NO se
+    recalcula desde el conteo en tiempo real.
 
-    `cortes_actuales` es el conteo REAL en tiempo real (viene del controlador,
-    no de la BD), para incluir cortes hechos mientras el modal estaba abierto.
+    El ESTADO lo decide si esa cantidad alcanza la meta: si la alcanza queda
+    'Cerrado', si no 'Abierto' (retomable re-escaneando el folio).
 
     Segun la modalidad:
-    - produccion normal: min(cortes_actuales, meta)
-    - produccion parcial: cortes_actuales (el operador confirma o corrige en el dialogo)
-    - modificacion de folio: min(cortes_actuales, nuevo_total)
+    - guardado directo ('parcial'): cantidad tal cual (sin topar).
+    - modificacion de folio ('folio'): min(cantidad, nuevo_total).
 
     Si se pasa `nuevo_total` (modificacion de folio) se actualiza
     `cantidad_total` antes de evaluar el estado, y la meta comparada pasa a
-    ser ese total modificado. `modalidad` es la etiqueta de cierre ('normal' /
-    'parcial' / 'folio') que se persiste en el segmento de `trabajos_sesiones`
-    para poder reconstruir despues que tipo de cierre tuvo cada sesion.
+    ser ese total modificado. `modalidad` es la etiqueta de cierre que se
+    persiste en el segmento de `trabajos_sesiones` para poder reconstruir
+    despues que tipo de cierre tuvo cada sesion.
     Devuelve (ok, estado_final, cantidad_final_global).
     """
     folio = int(folio)
-    cortes_actuales = int(cortes_actuales)
+    cantidad = int(cantidad)
     meta = int(meta)
+    if cantidad < 0:
+        return False, "La cantidad no puede ser negativa.", 0
     estado_meta = meta
     conn = obtener_conexion()
     if nuevo_total is not None:
@@ -1269,13 +1269,11 @@ def cerrar_trabajo_modalidad(folio: int, cortes_actuales: int,
             (nuevo_total, folio),
         )
         estado_meta = nuevo_total
-    # Calcular cantidad_final_global segun modalidad usando el conteo REAL
-    if modalidad == "normal":
-        cantidad_final_global = min(cortes_actuales, estado_meta)
-    elif modalidad == "parcial":
-        cantidad_final_global = cortes_actuales
-    elif modalidad == "folio":
-        cantidad_final_global = min(cortes_actuales, estado_meta)
+    # Cantidad final global: la del dialogo manda; solo folio topa.
+    if modalidad == "folio":
+        cantidad_final_global = min(cantidad, estado_meta)
+    elif modalidad in ("parcial", "normal"):
+        cantidad_final_global = cantidad
     else:
         conn.close()
         return False, f"Modalidad de cierre no valida: {modalidad}", 0

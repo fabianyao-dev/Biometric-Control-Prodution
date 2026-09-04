@@ -60,9 +60,9 @@ marcador muestra NUMERO DE PARTE arriba, los digitos al centro y CANTIDAD/
 META abajo; la linea inferior de estado resume sesion, folio, parte,
 cantidad, meta, ciclos totales y setup. 'Cerrado' SOLO
 al alcanzar la cantidad_total: ahi suena la alarma, se guarda la cantidad
-TOPADA a la meta (min(real, meta)) y vuelve a Primera pieza para el siguiente
-QR. El cierre por el boton de MAQUINA con trabajo carga la modalidad de
-cierre (#5). Lo mismo al cerrar sesion: el parcial queda Abierto. Tras un
+confirmada en el dialogo de cierre y vuelve a Primera pieza para el
+siguiente QR. El cierre por el boton de MAQUINA con trabajo carga el dialogo
+de cierre (#5). Lo mismo al cerrar sesion: el parcial queda Abierto. Tras un
 apagon se recupera el trabajo Abierto en curso desde su checkpoint.
 
 RECUPERACION TRAS CIERRE ABRUPTO: si la app se cerro con una sesion 'Activa'
@@ -118,8 +118,6 @@ from src.database import (
 from src.gui.huella_modal import HuellaModal
 from src.gui.modalidades_cierre import (
     MODALIDAD_FOLIO,
-    MODALIDAD_NORMAL,
-    MODALIDAD_PARCIAL,
     ModalidadCierreDialog,
 )
 from src.gui.resplandor import Resplandor
@@ -562,13 +560,12 @@ class InicioView(QWidget):
     def _apagar_maquina_en_marcha(self):
         """Apaga la maquina manteniendo la sesion abierta.
 
-        Con un trabajo cargado hace el CIERRE COMPLETO (#5): elige la
-        modalidad de cierre (normal topada / parcial / modificacion de
-        folio), pide la huella, guarda la cantidad segun la eleccion y
-        detiene el relevo, quedando en espera de trabajo. Sin trabajo
-        detiene directo (saliendo del modo Primera pieza si estuviera
-        activo). La sesion sigue abierta: solo se cierra desde el header con
-        la maquina ya detenida.
+        Con un trabajo cargado hace el CIERRE COMPLETO (#5): confirma la
+        cantidad detectada en un input editable (o modifica el folio), pide
+        la huella, guarda la cantidad y detiene el relevo, quedando en espera
+        de trabajo. Sin trabajo detiene directo (saliendo del modo Primera
+        pieza si estuviera activo). La sesion sigue abierta: solo se cierra
+        desde el header con la maquina ya detenida.
         """
         if self._trabajo is not None:
             self._abrir_cierre_con_modalidad(por_meta=False)
@@ -587,13 +584,14 @@ class InicioView(QWidget):
                  self.operador_nombre, self.sesion_id)
 
     def _abrir_cierre_con_modalidad(self, por_meta=False):
-        """CIERRE COMPLETO (#5) con modalidad + huella, comun al apagado
-        manual (boton de maquina) y al alcanzar la meta.
+        """CIERRE COMPLETO (#5) con cantidad confirmada + huella, comun al
+        apagado manual (boton de maquina) y al alcanzar la meta.
 
         `por_meta=True` indica que la maquina ya llego a la cantidad_total
         (cierre automatico por timer); no se apaga aqui, queda esperando al
-        autorizado. El flujo: 1) modal de modalidad, 2) huella del
-        autorizador, 3) guardar y DETENER la maquina.
+        autorizado. El flujo: 1) dialogo de cierre (input editable + folio
+        modificado), 2) huella del autorizador, 3) guardar y DETENER la
+        maquina.
         """
         if self._trabajo is None or self._modal_abierto or self._en_paro:
             return
@@ -605,9 +603,10 @@ class InicioView(QWidget):
             num_part = self._trabajo["num_part"]
             cortado = self._cortes_trabajo()
             meta = self._trabajo["cantidad_total"]
-            # 1) Modalidad de cierre (#5): normal topada / parcial / folio.
-            # Por meta NO se puede cancelar: el operador debe elegir y
-            # autorizar (no queda un trabajo Abierto con la meta cumplida).
+            # 1) Cierre (#5): input con la cantidad detectada (editable) +
+            # Folio modificado. Por meta NO se puede cancelar: el operador
+            # debe confirmar y autorizar (no queda un trabajo Abierto con la
+            # meta cumplida).
             dlg = ModalidadCierreDialog(
                 self, folio, num_part, cortado, meta, cancelable=not por_meta,
             )
@@ -623,10 +622,8 @@ class InicioView(QWidget):
                 etiqueta = (
                     f"Folio modificado (nuevo total {nuevo_total})"
                 )
-            elif modalidad == MODALIDAD_PARCIAL:
-                etiqueta = "Produccion parcial"
             else:
-                etiqueta = "Produccion normal"
+                etiqueta = "Cantidad confirmada"
             texto_estado = ("meta alcanzada" if por_meta
                             else "la maquina se detendra")
             # 2) Huella del autorizador para el cierre completo. Por meta
@@ -661,23 +658,22 @@ class InicioView(QWidget):
                                          modalidad, cantidad_final,
                                          nuevo_total=None, causa_id=None,
                                          por_meta=False):
-        """Cierre completo autorizado (modalidad #5): guarda la cantidad
-        segun la eleccion y DETIENE la maquina.
+        """Cierre completo autorizado (#5): guarda la cantidad del dialogo y
+        DETIENE la maquina.
 
-        La cantidad final ya viene TOPADA por la modalidad (min); la capa de
-        BD decide el estado del trabajo: reaches la meta -> 'Cerrado', no ->
+        `cantidad_final` es AUTORITATIVA (viene del input del dialogo,
+        pre-cargado con el conteo detectado y corregible); la capa de BD
+        decide el estado del trabajo: alcanza la meta -> 'Cerrado', no ->
         'Abierto' (retomable re-escaneando el folio). La sesion sigue abierta
         con la maquina detenida.
         """
         folio = self._trabajo["folio"]
         meta = self._trabajo["cantidad_total"]
-        # Usar conteo REAL en tiempo real (incluye cortes hechos mientras el modal estaba abierto)
-        cortes_actuales = self._cortes_trabajo()
         self.controlador.maquina_pausada()
         self._finalizar_primera_pieza_si_activa(id_operador)
         self._fijar_switch(False)
         ok, estado, cantidad_final = cerrar_trabajo_modalidad(
-            folio, cortes_actuales, meta, nuevo_total, modalidad,
+            folio, cantidad_final, meta, nuevo_total, modalidad,
         )
         self._trabajo = None
         self._baseline_trabajo = 0
@@ -691,14 +687,13 @@ class InicioView(QWidget):
             return
         if por_meta:
             self._sonar_alarma()
-            # En meta: cantidad_final ya viene capado a meta
             self._estado(
                 f"Trabajo {folio} completado ({cantidad_final}/{meta}) "
                 f"y maquina detenida. Pulsa PLAY para cargar el siguiente.",
                 "procesando",
             )
         else:
-            # Mensaje claro segun modalidad
+            # Mensaje claro segun cierre
             if modalidad == "folio":
                 # nuevo_total es el nuevo total del folio
                 self._estado(
@@ -706,15 +701,10 @@ class InicioView(QWidget):
                     f"{cantidad_final} piezas (Folio modificado a {nuevo_total}), "
                     f"maquina detenida.", "exito",
                 )
-            elif modalidad == "parcial":
+            else:
                 self._estado(
                     f"Trabajo {folio} guardado por {nombre} con {cantidad_final} "
-                    f"piezas (Produccion parcial, {estado}) y maquina detenida.", "exito",
-                )
-            else:  # normal
-                self._estado(
-                    f"Trabajo {folio} guardado por {nombre} con {cantidad_final} "
-                    f"piezas (Produccion normal, {estado}) y maquina detenida.", "exito",
+                    f"piezas ({estado}) y maquina detenida.", "exito",
                 )
         log.info("Trabajo %s guardado (modalidad %s, %s piezas, estado %s) "
                  "y maquina apagada por %s (sesion %s continua%s)", folio,
@@ -1896,16 +1886,17 @@ class InicioView(QWidget):
         )
 
     def _verificar_meta_trabajo(self):
-        """Meta alcanzada: abre el cierre con MODALIDAD sin detener la maquina.
+        """Meta alcanzada: abre el cierre con cantidad a confirmar sin detener
+        la maquina.
 
         Llamado desde `_refrescar_contador` (hilo principal). Al llegar a la
-        cantidad_total se abre el mismo cierre con modalidad que el boton de
-        MAQUINA (#5) — el operador elige normal/parcial/folio y autoriza con
-        huella. La maquina SIGUE EN MARCHA y contando mientras se resuelve el
-        cierre (el operador la detiene al autorizar); el exceso sobre la meta
-        se descarta en la modalidad normal y el conteo del tablero no se
-        congela. Un trabajo solo pasa a 'Cerrado' aqui (o en el cierre
-        manual) al alcanzarse la meta.
+        cantidad_total se abre el mismo cierre con input editable que el boton
+        de MAQUINA (#5) — el operador confirma/corrige la cantidad (o modifica
+        el folio) y autoriza con huella. La maquina SIGUE EN MARCHA y contando
+        mientras se resuelve el cierre (el operador la detiene al autorizar);
+        lo que se guarda es el numero confirmado, no el conteo en vivo. Un
+        trabajo solo pasa a 'Cerrado' aqui (o en el cierre manual) al
+        alcanzarse la meta.
         """
         if self._trabajo is None or self._modal_abierto or self._en_paro:
             return

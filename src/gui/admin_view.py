@@ -403,8 +403,18 @@ class AdminView(QWidget):
         self.biometrico = biometrico
 
         self._capturando = False
+        # Hilo de captura en curso: el lector NO admite dos capturas a la vez
+        # (la llamada nativa es bloqueante y sin cancelacion); este handle es
+        # la exclusion mutua real (`_lector_ocupado`). `_capturando` es solo
+        # estado de UI y puede ir por delante cuando se invalida una captura.
+        self._hilo_captura = None
         self._huellas_captura = []
         self._modo_captura = None
+        # Secuencia de capturas: cada `_iniciar_captura` la incrementa. Sirve
+        # para INVALIDAR una captura en vuelo (ej. se pulsa Guardar mientras
+        # la cadena ya arranco la siguiente): su resultado tardio se descarta
+        # en `_revisar_cola` en vez de colarse como huella fantasma.
+        self._captura_seq = 0
         # Captura MULTIPLE encadenada: al registrar un operador nuevo se
         # capturan las huellas una tras otra (sin pulsar el boton por cada
         # dedo) hasta que se presione 'Detener Captura'.
@@ -656,8 +666,12 @@ class AdminView(QWidget):
         if self._modo_cadena:
             self._detener_cadena()
             return
-        if self._capturando:
-            # Otra captura en curso (agregar/reemplazar de un operador).
+        if self._capturando or self._lector_ocupado():
+            # Hay una captura en curso (o liberandose): no pisarla.
+            self._lbl_huella(
+                "Lector ocupado: coloca el dedo para liberar la captura en "
+                "curso o espera unos segundos...", "error"
+            )
             return
         if not self.entry_nombre.text().strip():
             self._lbl("Escribe el nombre antes de capturar las huellas.", "error")
@@ -670,13 +684,26 @@ class AdminView(QWidget):
             "Coloca tu huella... Presiona 'Detener Captura' al terminar.",
             "procesando",
         )
-        self._iniciar_captura()
+        # Timeout CORTO en cadena: si el usuario detiene/garda a media
+        # captura, el hilo en vuelo (no cancelable) libera el lector pronto.
+        if not self._iniciar_captura(
+            timeout_ms=config.CAPTURE_TIMEOUT_CADENA_MS
+        ):
+            self._modo_cadena = False
+            self._lbl_huella("Lector ocupado, intenta de nuevo...", "error")
+            return
         self._actualizar_boton_captura()
 
     def _detener_cadena(self):
-        """Detiene la captura encadenada; conserva las huellas ya capturadas."""
+        """Detiene la captura encadenada; conserva las huellas ya capturadas.
+
+        Si habia una captura en vuelo (no cancelable), se invalida: su
+        resultado tardio se descarta y Guardar funciona de inmediato aunque
+        el lector siga liberandose unos segundos."""
         self._modo_cadena = False
         self._cadena_esperando = False
+        if self._modo_captura is None:
+            self._invalidar_captura_en_vuelo()
         self._lbl_huella("Captura detenida.", "info")
         self._actualizar_boton_captura()
 
@@ -685,7 +712,7 @@ class AdminView(QWidget):
         self.btn_capturar.setText(texto)
 
     def _capturar_huella_agregar(self):
-        if self._capturando:
+        if self._capturando or self._lector_ocupado():
             return
         op_id, _ = self._operador_seleccionado()
         if op_id is None:
@@ -696,7 +723,7 @@ class AdminView(QWidget):
         self._iniciar_captura()
 
     def _capturar_huella_reemplazar(self):
-        if self._capturando:
+        if self._capturando or self._lector_ocupado():
             return
         huella_id = self._huella_seleccionada()
         if huella_id is None:
@@ -706,23 +733,58 @@ class AdminView(QWidget):
         self._lbl_huellas("Coloca tu huella...", "procesando")
         self._iniciar_captura()
 
-    def _iniciar_captura(self):
-        self._capturando = True
-        threading.Thread(target=self._hilo_captura, daemon=True).start()
+    def _lector_ocupado(self):
+        """True si hay un hilo de captura VIVO (dueno real del lector)."""
+        h = self._hilo_captura
+        return bool(h is not None and h.is_alive())
 
-    def _hilo_captura(self):
+    def _iniciar_captura(self, timeout_ms=None):
+        """Arranca una captura en hilo. Devuelve False (sin arrancar) si el
+        lector esta ocupado: NUNCA se pisa una captura en curso, porque dos
+        `dpfpdd_capture` concurrentes traban el lector hasta reiniciar."""
+        if self._lector_ocupado():
+            return False
+        self._captura_seq += 1
+        seq = self._captura_seq
+        self._capturando = True
+        h = threading.Thread(target=self._trabajo_captura,
+                             args=(seq, timeout_ms), daemon=True)
+        self._hilo_captura = h
+        h.start()
+        return True
+
+    def _trabajo_captura(self, seq, timeout_ms):
         try:
-            data = self.biometrico.enrollar(on_progress=self._progreso)
-            self.cola.put(("ENROLL", data))
+            data = self.biometrico.enrollar(
+                timeout_ms=timeout_ms,
+                on_progress=lambda m: self.cola.put(("PROGRESO", (seq, m))),
+            )
+            self.cola.put(("ENROLL", (seq, data)))
         except Exception as e:  # noqa: BLE001
             log.error("Captura admin fallo: %s", e, exc_info=True)
-            self.cola.put(("ERROR", str(e)))
+            self.cola.put(("ERROR", (seq, str(e))))
 
     def _progreso(self, mensaje):
-        self.cola.put(("PROGRESO", mensaje))
+        self.cola.put(("PROGRESO", (self._captura_seq, mensaje)))
+
+    def _invalidar_captura_en_vuelo(self):
+        """Invalida la captura en curso: su resultado tardio se descarta en
+        `_revisar_cola` (no se agrega como huella fantasma)."""
+        self._captura_seq += 1
+        self._capturando = False
 
     def _guardar_operador(self):
+        if self._modo_cadena:
+            # Guardar DETIENE la cadena (`_detener_cadena` ya invalida la
+            # captura en vuelo y baja `_capturando`): se guarda de inmediato
+            # con lo capturado, aunque el lector siga liberandose.
+            self._detener_cadena()
         if self._capturando:
+            # Solo posible en flujos agregar/reemplazar (la cadena ya
+            # invalido su captura). El bloqueo del lector NUNCA frena el
+            # guardado: solo el arranque de NUEVAS capturas lo respeta.
+            self._lbl("Termina la captura en curso y vuelve a guardar.",
+                      "error")
             return
         nombre = self.entry_nombre.text().strip()
         if not nombre:
@@ -753,8 +815,13 @@ class AdminView(QWidget):
         if not self._huellas_captura:
             return
         # Quitar la ultima tambien DETIENE la cadena de captura multiple.
+        era_cadena = self._modo_cadena
         self._modo_cadena = False
         self._cadena_esperando = False
+        # Si la cadena tenia una captura en vuelo, invalidarla para que su
+        # resultado tardio no re-agregue la huella que se acaba de quitar.
+        if era_cadena and self._modo_captura is None:
+            self._invalidar_captura_en_vuelo()
         self._huellas_captura.pop()
         self._lbl("Última huella quitada.", "info")
         self._actualizar_estado_captura()
@@ -803,11 +870,15 @@ class AdminView(QWidget):
         # Si mientras se esperaba se detuvo o cancelo la cadena, no lanzar.
         if not self._modo_cadena:
             return
-        if self._capturando:
+        if self._capturando or self._lector_ocupado():
+            # El lector sigue liberandose (captura invalidada en vuelo):
+            # reintentar cuando quede libre, sin pisarlo.
             self._encadenar_captura()
             return
         self._lbl_huella("Coloca el siguiente dedo...", "procesando")
-        self._iniciar_captura()
+        self._iniciar_captura(
+            timeout_ms=config.CAPTURE_TIMEOUT_CADENA_MS
+        )
 
     def _actualizar_estado_captura(self):
         self._lbl_huella(
@@ -1687,21 +1758,28 @@ class AdminView(QWidget):
         try:
             while True:
                 ev, data = self.cola.get_nowait()
+                # Los eventos llevan (seq, carga): si la secuencia no es la
+                # vigente, la captura fue invalidada (ej. se guardo mientras
+                # corria) y el evento tardio se descarta SIN tocar
+                # `_capturando` (podria haber una captura nueva en curso).
+                seq, carga = data if isinstance(data, tuple) else (self._captura_seq, data)
+                if seq != self._captura_seq:
+                    continue
                 if ev == "PROGRESO":
-                    texto = data or "Procesando..."
+                    texto = carga or "Procesando..."
                     if self._modo_captura is None:
                         self._lbl_huella(texto, "procesando")
                     else:
                         self._lbl_huellas(texto, "procesando")
                 elif ev == "ENROLL":
                     self._capturando = False
-                    self._procesar_enroll(data)
+                    self._procesar_enroll(carga)
                 elif ev == "ERROR":
                     self._capturando = False
                     if self._modo_captura is None:
-                        self._lbl_huella(f"Error: {data}", "error")
+                        self._lbl_huella(f"Error: {carga}", "error")
                     else:
-                        self._lbl_huellas(f"Error: {data}", "error")
+                        self._lbl_huellas(f"Error: {carga}", "error")
         except queue.Empty:
             pass
         QTimer.singleShot(50, self._revisar_cola)
