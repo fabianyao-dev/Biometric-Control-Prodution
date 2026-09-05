@@ -9,14 +9,20 @@ Esquema relacional:
     causas_paro            Motivos configurables de paro (soft-delete).
     sesiones_produccion    Entrada/salida del operador por turno.
     trabajos               Trabajos de corte por QR (folio|num_part|cantidad),
-                           vinculados a una sesion; folio es la clave unica.
-                           'Cerrado' SOLO al alcanzar cantidad_total; un
-                           parcial (FINALIZAR TRABAJO / cierre de sesion) queda
-                           'Abierto' con fecha_fin y es retomable.
+                            vinculados a una sesion; folio es la clave unica.
+                            'Cerrado' SOLO al alcanzar cantidad_total; un
+                            parcial (FINALIZAR TRABAJO / cierre de sesion) queda
+                            'Abierto' con fecha_fin y es retomable.
+                            Por folio: `cortes_detectados` (conteo vivo de la
+                            maquina) y `cortes_confirmados` (cantidad validada
+                            por el operador al cerrar).
     trabajos_sesiones      Desglose por segmento (folio x sesion): cuantos cortes
                            aporto cada sesion a cada folio y la `modalidad` de
                            cierre de ese segmento ('normal'/'parcial'/'folio').
-    paros_produccion       Paros vinculados a una sesion (FK a sesion_id).
+    paros_produccion       Paros vinculados a una sesion (FK a sesion_id) y,
+                            opcionalmente, al folio activo (FK a trabajos);
+                            folio NULL = paro sin trabajo (Primera pieza con
+                            permiso o espera de QR).
 
 Politicas:
     - Soft-delete: roles, operadores y causas_paro marcan `activo=0`.
@@ -65,8 +71,10 @@ PERMISOS_POR_DEFECTO = {
                       "autorizar_mantenimiento"],
 }
 
-# Causas de paro que se crean por defecto (modo "Primera pieza").
-CAUSAS_PARO_POR_DEFECTO = ["Primera pieza", "mantenimiento"]
+# Causas de paro que se crean por defecto. "Primera pieza" y "Esperando
+# trabajo" son IMPLICITAS (las abre/cierra el sistema, no el operador: por
+# eso "Primera pieza" no sale en el selector de causas).
+CAUSAS_PARO_POR_DEFECTO = ["Primera pieza", "mantenimiento", "Esperando trabajo"]
 
 # Zonas de la maquina (croquis del punto 7). Se siembran en la tabla
 # `zonas_maquina` (soft-delete) con su posicion de orden e icono por defecto.
@@ -103,6 +111,27 @@ def obtener_conexion():
     # Funcion SQL con la hora local de la planta (para DEFAULTs del esquema).
     conn.create_function("ahora_monterrey", 0, ahora_local)
     return conn
+
+
+# Subconsulta: folio cuyo segmento (folio x sesion) SOLAPA con el intervalo
+# del paro `p` ([inicio_paro, fin_paro o ? = ahora si sigue en curso]).
+# Recibe un solo parametro (?) con el timestamp actual. Si hay varios
+# segmentos solapados se elige el de inicio mas reciente.
+_SQL_FOLIO_SOLAPADO = (
+    "SELECT ts.folio FROM trabajos_sesiones ts "
+    "WHERE ts.sesion_id=p.sesion_id "
+    "AND ts.fecha_inicio <= COALESCE(p.fin_paro, ?) "
+    "AND (ts.fecha_fin IS NULL OR ts.fecha_fin >= p.inicio_paro) "
+    "ORDER BY ts.fecha_inicio DESC LIMIT 1"
+)
+
+# Los paros "Esperando trabajo" NUNCA llevan folio (son tiempo sin folio
+# cargado por definicion); el backfill y el fill al cerrar los excluyen y
+# cualquier folio que ya traigan se limpia.
+_SQL_ES_ESPERA = (
+    "EXISTS (SELECT 1 FROM causas_paro c "
+    "WHERE c.id=p.causa_id AND LOWER(TRIM(c.descripcion))='esperando trabajo')"
+)
 
 
 def init_db():
@@ -172,17 +201,36 @@ def init_db():
             sesion_id INTEGER NOT NULL REFERENCES sesiones_produccion(id),
             num_part TEXT NOT NULL,
             cantidad_total INTEGER NOT NULL,
-            cantidad_cortada INTEGER NOT NULL DEFAULT 0,
+            cortes_detectados INTEGER NOT NULL DEFAULT 0,
+            cortes_confirmados INTEGER NOT NULL DEFAULT 0,
             fecha_inicio TIMESTAMP DEFAULT (ahora_monterrey()),
             fecha_fin TIMESTAMP,
             estado TEXT NOT NULL DEFAULT 'Abierto'
         );
 
         -- Cuanto corto CADA sesion de cada folio: un renglón por segmento
-        -- (folio x sesion). `base` es la cantidad_cortada del folio al
-        -- vincularse (retoma) y `cantidad` los cortes hechos EN ESA sesion;
-        -- la suma de segmentos reconstruye el total sin depender de
-        -- trabajos.sesion_id (que apunta a la ultima sesion que lo toco).
+        -- (folio x sesion). `base` son los cortes_detectados del folio al
+        -- vincularse (retoma) y `cantidad` los cortes DETECTADOS hechos EN
+        -- ESA sesion; `confirmados` lo validado en el cierre de ESE segmento
+        -- (0 si solo se pauso); `estado` el estado del folio AL MOMENTO de
+        -- ese segmento ('En curso' si sigue abierto). Ventana productiva:
+        -- `fecha_inicio` es la SALIDA de Primera pieza a produccion (no el
+        -- QR: el setup previo lo cubre el paro de Primera pieza) o el
+        -- escaneo directo sin modo; `fecha_fin` la pausa/cierre. La suma de
+        -- segmentos reconstruye el total sin depender de trabajos.sesion_id
+        -- (que apunta a la ultima sesion que lo toco).
+        CREATE TABLE IF NOT EXISTS trabajos_sesiones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            folio INTEGER NOT NULL REFERENCES trabajos(folio),
+            sesion_id INTEGER NOT NULL REFERENCES sesiones_produccion(id),
+            base INTEGER NOT NULL DEFAULT 0,
+            cantidad INTEGER NOT NULL DEFAULT 0,
+            confirmados INTEGER NOT NULL DEFAULT 0,
+            fecha_inicio TIMESTAMP DEFAULT (ahora_monterrey()),
+            fecha_fin TIMESTAMP,
+            modalidad TEXT NOT NULL DEFAULT 'normal',
+            estado TEXT NOT NULL DEFAULT 'En curso'
+        );
         CREATE TABLE IF NOT EXISTS trabajos_sesiones (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             folio INTEGER NOT NULL REFERENCES trabajos(folio),
@@ -213,6 +261,7 @@ def init_db():
             sesion_id INTEGER NOT NULL REFERENCES sesiones_produccion(id),
             causa_id INTEGER REFERENCES causas_paro(id),
             zona_id INTEGER REFERENCES zonas_maquina(id),
+            folio INTEGER REFERENCES trabajos(folio),
             inicio_paro TIMESTAMP DEFAULT (ahora_monterrey()),
             fin_paro TIMESTAMP,
             autorizado_por_operador_id INTEGER REFERENCES operadores(id)
@@ -490,6 +539,131 @@ def init_db():
             "ALTER TABLE trabajos_sesiones "
             "ADD COLUMN modalidad TEXT NOT NULL DEFAULT 'normal'"
         )
+
+    # Paro -> trabajo (sesion con N trabajos, cada trabajo con M paros): los
+    # paros colgaban solo de la sesion y el cruce paro<->folio habia que
+    # adivinarlo por horario. Se agrega `folio` NULLABLE (un paro puede no
+    # tener trabajo: Primera pieza sin folio con permiso `iniciar_primera_pieza`
+    # o espera de QR); `sesion_id` sigue siendo la autoridad. Idempotente y
+    # re-ejecutable: solo toca filas con folio IS NULL.
+    #
+    # Regla de asignacion: SOLAPE real entre el intervalo del paro
+    # [inicio_paro, fin_paro o ahora si sigue en curso] y el segmento
+    # (folio x sesion) [fecha_inicio, fecha_fin o abierto]. Si un paro solapa
+    # con varios folios (cambio de folio a mitad del paro) se queda con el de
+    # inicio mas reciente.
+    cols_paros_folio = [
+        r[1] for r in cur.execute("PRAGMA table_info(paros_produccion)").fetchall()
+    ]
+    if "folio" not in cols_paros_folio:
+        cur.execute(
+            "ALTER TABLE paros_produccion ADD COLUMN folio INTEGER "
+            "REFERENCES trabajos(folio)"
+        )
+    cur.execute(
+        f"UPDATE paros_produccion AS p SET folio = ({_SQL_FOLIO_SOLAPADO}) "
+        f"WHERE p.folio IS NULL AND NOT ({_SQL_ES_ESPERA})",
+        (ahora_local(),),
+    )
+    # Reparacion: esperas que ya traigan folio (backfill anterior) vuelven
+    # a NULL: por definicion no tienen folio ni parte.
+    cur.execute(
+        f"UPDATE paros_produccion AS p SET folio = NULL "
+        f"WHERE p.folio IS NOT NULL AND ({_SQL_ES_ESPERA})"
+    )
+
+    # Cortes detectados vs confirmados por folio: la columna de cortes de
+    # `trabajos` pasa a ser `cortes_confirmados` (cantidad validada por el
+    # operador al cerrar) y se agrega `cortes_detectados` (conteo vivo de la
+    # maquina, checkpoint periodico y base de retoma). Historico: sin
+    # detectados registrados, se aproximan con los confirmados.
+    cols_trab = [
+        r[1] for r in cur.execute("PRAGMA table_info(trabajos)").fetchall()
+    ]
+    if "cortes_confirmados" not in cols_trab and "cantidad_cortada" in cols_trab:
+        cur.execute(
+            "ALTER TABLE trabajos RENAME COLUMN cantidad_cortada "
+            "TO cortes_confirmados"
+        )
+        cols_trab = [
+            r[1] for r in cur.execute("PRAGMA table_info(trabajos)").fetchall()
+        ]
+    if "cortes_detectados" not in cols_trab:
+        cur.execute(
+            "ALTER TABLE trabajos ADD COLUMN cortes_detectados "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+    cur.execute(
+        "UPDATE trabajos SET cortes_detectados=cortes_confirmados "
+        "WHERE cortes_detectados=0 AND cortes_confirmados>0"
+    )
+
+    # Confirmados por segmento: lo validado en cada cierre se guarda en su
+    # segmento (antes el export lo aproximaba). Solo BDs que se actualizan:
+    # el backfill corre UNA vez al agregar la columna (si corriera en cada
+    # arranque sobrescribiria los confirmados reales con la aproximacion).
+    # Historico: se reparte el confirmado del folio en orden cronologico
+    # (mejor aproximacion; la suma por folio queda exacta).
+    cols_seg = [
+        r[1] for r in cur.execute("PRAGMA table_info(trabajos_sesiones)").fetchall()
+    ]
+    if "confirmados" not in cols_seg:
+        cur.execute(
+            "ALTER TABLE trabajos_sesiones ADD COLUMN confirmados "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+    for folio in [
+        r[0] for r in cur.execute("SELECT folio FROM trabajos").fetchall()
+    ]:
+        total = cur.execute(
+            "SELECT cortes_confirmados FROM trabajos WHERE folio=?",
+            (folio,),
+        ).fetchone()
+        restante = (total["cortes_confirmados"] or 0) if total else 0
+        segs = cur.execute(
+            "SELECT id, cantidad FROM trabajos_sesiones "
+            "WHERE folio=? ORDER BY fecha_inicio, id", (folio,),
+        ).fetchall()
+        for s in segs:
+            det = s["cantidad"] or 0
+            conf = min(max(det, 0), max(restante, 0))
+            restante -= conf
+            cur.execute(
+                "UPDATE trabajos_sesiones SET confirmados=? WHERE id=?",
+                (conf, s["id"]),
+            )
+
+    # Estado por segmento: el del folio AL MOMENTO de ese segmento (no el
+    # actual). Solo BDs que se actualizan, una sola vez. Historico: acumulado
+    # confirmado en orden cronologico vs meta vigente (aproximacion).
+    cols_seg2 = [
+        r[1] for r in cur.execute("PRAGMA table_info(trabajos_sesiones)").fetchall()
+    ]
+    if "estado" not in cols_seg2:
+        cur.execute(
+            "ALTER TABLE trabajos_sesiones ADD COLUMN estado "
+            "TEXT NOT NULL DEFAULT 'En curso'"
+        )
+        for (folio, meta) in [
+            (r[0], r[1]) for r in cur.execute(
+                "SELECT folio, cantidad_total FROM trabajos").fetchall()
+        ]:
+            acum = 0
+            segs = cur.execute(
+                "SELECT id, confirmados, fecha_fin FROM trabajos_sesiones "
+                "WHERE folio=? ORDER BY fecha_inicio, id", (folio,),
+            ).fetchall()
+            for s in segs:
+                if s["fecha_fin"] is None:
+                    est = "En curso"
+                else:
+                    acum += s["confirmados"] or 0
+                    est = ("Cerrado" if (meta and acum >= meta)
+                           else ESTADO_ABIERTO)
+                cur.execute(
+                    "UPDATE trabajos_sesiones SET estado=? WHERE id=?",
+                    (est, s["id"]),
+                )
 
     conn.commit()
     conn.close()
@@ -1097,10 +1271,11 @@ def abrir_trabajo(folio: int, sesion_id: int, num_part: str,
     """Abre (o retoma) un trabajo identificado por su folio unico.
 
     Devuelve (ok, mensaje|fila):
-        - Folio nuevo: se crea 'Abierto' con cantidad_cortada=0.
-        - Folio 'Abierto': se RETOMA sin perder `cantidad_cortada`; se
-          re-vincula a la sesion actual, refresca num_part/cantidad con lo
-          escaneado y limpia `fecha_fin` (queda activo de nuevo).
+        - Folio nuevo: se crea 'Abierto' con detectados=0 y confirmados=0.
+        - Folio 'Abierto': se RETOMA sin perder conteos; se re-vincula a la
+          sesion actual, refresca num_part/cantidad con lo escaneado y limpia
+          `fecha_fin` (queda activo de nuevo). La retoma parte de los
+          cortes_detectados (realidad de maquina).
         - Folio 'Cerrado': rechazado (ya alcanzo su cantidad_total).
     """
     try:
@@ -1121,14 +1296,15 @@ def abrir_trabajo(folio: int, sesion_id: int, num_part: str,
 
     conn = obtener_conexion()
     existe = conn.execute(
-        "SELECT folio, sesion_id, num_part, cantidad_total, cantidad_cortada, "
-        "       fecha_inicio, estado FROM trabajos WHERE folio=?", (folio,)
+        "SELECT folio, sesion_id, num_part, cantidad_total, cortes_detectados, "
+        "       cortes_confirmados, fecha_inicio, estado "
+        "FROM trabajos WHERE folio=?", (folio,)
     ).fetchone()
     if existe is not None and existe["estado"] == ESTADO_CERRADO:
         conn.close()
         return False, (
             f"El trabajo {folio} ya esta CERRADO "
-            f"({existe['cantidad_cortada']}/{existe['cantidad_total']})."
+            f"({existe['cortes_confirmados']}/{existe['cantidad_total']})."
         )
     if existe is not None:
         conn.execute(
@@ -1136,9 +1312,9 @@ def abrir_trabajo(folio: int, sesion_id: int, num_part: str,
             "fecha_fin=NULL WHERE folio=?",
             (sesion_id, num_part, cantidad_total, folio),
         )
-        # Segmento (folio, sesion): base = lo ya cortado al retomarlo.
+        # Segmento (folio, sesion): base = detectados al retomarlo.
         _vincular_trabajo_sesion(conn, folio, sesion_id,
-                                 existe["cantidad_cortada"])
+                                 existe["cortes_detectados"])
         conn.commit()
         fila = conn.execute(
             "SELECT * FROM trabajos WHERE folio=?", (folio,)
@@ -1163,7 +1339,7 @@ def abrir_trabajo(folio: int, sesion_id: int, num_part: str,
 def _vincular_trabajo_sesion(conn, folio, sesion_id, base):
     """Abre el segmento (folio, sesion) en `trabajos_sesiones`.
 
-    `base` es la cantidad_cortada del folio al momento de vincularse (0 en
+    `base` son los cortes_detectados del folio al momento de vincularse (0 en
     un folio nuevo; lo acumulado de otras sesiones en un retoma). Si ya hay
     un segmento ABIERTO para el par (recuperacion tras apagon sin pausa
     previa) se conserva: su base original sigue siendo valida.
@@ -1181,49 +1357,73 @@ def _vincular_trabajo_sesion(conn, folio, sesion_id, base):
         )
 
 
-def completar_trabajo(folio: int, cantidad_cortada: int):
+def recortar_inicio_segmento(folio: int, sesion_id: int) -> bool:
+    """Mueve a ahora el inicio del segmento ABIERTO (folio x sesion).
+
+    Se usa al SALIR de Primera pieza a produccion: el conteo del folio
+    arranca ahi (el setup previo queda descartado y cubierto por el paro de
+    Primera pieza). No toca base/cantidad: solo la ventana de tiempo (para
+    paros por segmento y reportes). Devuelve True si actualizo.
+    """
+    conn = obtener_conexion()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE trabajos_sesiones SET fecha_inicio=? "
+        "WHERE folio=? AND sesion_id=? AND fecha_fin IS NULL",
+        (ahora_local(), int(folio), int(sesion_id)),
+    )
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def completar_trabajo(folio: int, cantidad: int):
     """Marca 'Cerrado' un trabajo al ALCANZAR su cantidad_total.
 
     Solo la meta alcanzada cierra un trabajo; recibe la cantidad YA topada
-    (`min(real, meta)`, calculada por la vista #5) para que el exceso sobre
-    la meta se descarte (se contaron 202 de 200 -> se guardan 200). Cierra
+    (`min(real, meta)`, calculada por la vista #5) como confirmados (el exceso
+    sobre la meta se descarta del oficial pero queda en detectados). Cierra
     tambien el segmento de `trabajos_sesiones` con los cortes de ESTA sesion.
     """
     conn = obtener_conexion()
     conn.execute(
-        "UPDATE trabajos SET estado=?, fecha_fin=?, cantidad_cortada=? "
-        "WHERE folio=?",
-        (ESTADO_CERRADO, ahora_local(), int(cantidad_cortada), int(folio)),
+        "UPDATE trabajos SET estado=?, fecha_fin=?, cortes_confirmados=?, "
+        "cortes_detectados=MAX(cortes_detectados, ?) WHERE folio=?",
+        (ESTADO_CERRADO, ahora_local(), int(cantidad), int(cantidad),
+         int(folio)),
     )
     conn.execute(
-        "UPDATE trabajos_sesiones SET cantidad=?-base, fecha_fin=? "
-        "WHERE folio=? AND fecha_fin IS NULL",
-        (int(cantidad_cortada), ahora_local(), int(folio)),
+        "UPDATE trabajos_sesiones SET cantidad=?-base, fecha_fin=?, "
+        "confirmados=?, estado=? WHERE folio=? AND fecha_fin IS NULL",
+        (int(cantidad), ahora_local(), int(cantidad), ESTADO_CERRADO,
+         int(folio)),
     )
     conn.commit()
     conn.close()
 
 
-def pausar_trabajo(folio: int, cantidad_cortada: int):
-    """Guarda el parcial de un trabajo SIN cerrarlo (queda 'Abierto').
+def pausar_trabajo(folio: int, cantidad_detectada: int):
+    """Guarda el parcial DETECTADO de un trabajo SIN cerrarlo (queda 'Abierto').
 
     Se usa en el cierre anticipado (boton de maquina con trabajo cargado) y
     al apagar/cerrar sesion con trabajo en curso: `fecha_fin` marca el
-    momento del parcial y `cantidad_cortada` permite retomarlo despues
+    momento del parcial y `cortes_detectados` permite retomarlo despues
     re-escaneando el mismo folio (que lo reactiva) o via recuperacion tras
-    apagon. Cierra tambien el segmento de `trabajos_sesiones` con los
-    cortes de ESTA sesion.
+    apagon. Los confirmados NO se tocan (no hubo validacion del operador) y
+    el segmento cierra con confirmados=0. Cierra tambien el segmento de
+    `trabajos_sesiones` con los cortes detectados de ESTA sesion.
     """
     conn = obtener_conexion()
     conn.execute(
-        "UPDATE trabajos SET fecha_fin=?, cantidad_cortada=? "
+        "UPDATE trabajos SET fecha_fin=?, cortes_detectados=? "
         "WHERE folio=? AND estado=?",
-        (ahora_local(), int(cantidad_cortada), int(folio), ESTADO_ABIERTO),
+        (ahora_local(), int(cantidad_detectada), int(folio), ESTADO_ABIERTO),
     )
     conn.execute(
         "UPDATE trabajos_sesiones SET cantidad=?-base, fecha_fin=?, "
-        "modalidad='parcial' WHERE folio=? AND fecha_fin IS NULL",
-        (int(cantidad_cortada), ahora_local(), int(folio)),
+        "modalidad='parcial', confirmados=0, estado=? "
+        "WHERE folio=? AND fecha_fin IS NULL",
+        (int(cantidad_detectada), ahora_local(), ESTADO_ABIERTO, int(folio)),
     )
     conn.commit()
     conn.close()
@@ -1231,34 +1431,48 @@ def pausar_trabajo(folio: int, cantidad_cortada: int):
 
 def cerrar_trabajo_modalidad(folio: int, cantidad: int,
                              meta: int, nuevo_total: int | None = None,
-                             modalidad: str = "parcial"):
-    """Cierra un trabajo con la cantidad confirmada por el operador (#5).
+                             modalidad: str = "parcial",
+                             detectados: int | None = None):
+    """Cierra un trabajo con la cantidad confirmada EN LA SESION (#5).
 
-    `cantidad` es AUTORITATIVA: viene del input del dialogo de cierre
-    (pre-cargado con el conteo detectado y corregible a mano). Ya NO se
-    recalcula desde el conteo en tiempo real.
+    `cantidad` es lo confirmado EN ESTA SESION: viene del input del dialogo
+    (pre-cargado con los detectados de la sesion y corregible a mano) y se
+    SUMA a los confirmados acumulados del folio, nunca los reemplaza
+    (confirmar 0 en una sesion sin cortes no borra lo confirmado antes).
+    `detectados` es el conteo vivo GLOBAL al cerrar: va a
+    `cortes_detectados` (sin topar: la diferencia queda registrada) y de ahi
+    sale el delta del segmento de ESTA sesion. Si no se pasa, se usa
+    `cantidad` (compatibilidad).
 
-    El ESTADO lo decide si esa cantidad alcanza la meta: si la alcanza queda
-    'Cerrado', si no 'Abierto' (retomable re-escaneando el folio).
+    El ESTADO lo decide si el confirmado GLOBAL alcanza la meta: si la
+    alcanza queda 'Cerrado', si no 'Abierto' (retomable re-escaneando el
+    folio).
 
     Segun la modalidad:
-    - guardado directo ('parcial'): cantidad tal cual (sin topar).
-    - modificacion de folio ('folio'): min(cantidad, nuevo_total).
+    - guardado directo ('parcial'): se suma tal cual (sin topar).
+    - modificacion de folio ('folio'): el global se topa a nuevo_total.
 
     Si se pasa `nuevo_total` (modificacion de folio) se actualiza
     `cantidad_total` antes de evaluar el estado, y la meta comparada pasa a
     ser ese total modificado. `modalidad` es la etiqueta de cierre que se
     persiste en el segmento de `trabajos_sesiones` para poder reconstruir
     despues que tipo de cierre tuvo cada sesion.
-    Devuelve (ok, estado_final, cantidad_final_global).
+    Devuelve (ok, estado_final, confirmados_global_nuevo).
     """
     folio = int(folio)
     cantidad = int(cantidad)
     meta = int(meta)
     if cantidad < 0:
         return False, "La cantidad no puede ser negativa.", 0
+    if detectados is None:
+        detectados = cantidad
+    detectados = int(detectados)
     estado_meta = meta
     conn = obtener_conexion()
+    previos = conn.execute(
+        "SELECT cortes_confirmados FROM trabajos WHERE folio=?", (folio,)
+    ).fetchone()
+    prev_conf = previos["cortes_confirmados"] if previos is not None else 0
     if nuevo_total is not None:
         nuevo_total = int(nuevo_total)
         if nuevo_total <= 0:
@@ -1269,26 +1483,27 @@ def cerrar_trabajo_modalidad(folio: int, cantidad: int,
             (nuevo_total, folio),
         )
         estado_meta = nuevo_total
-    # Cantidad final global: la del dialogo manda; solo folio topa.
+    # Confirmado global: lo previo mas lo de esta sesion; solo folio topa.
     if modalidad == "folio":
-        cantidad_final_global = min(cantidad, estado_meta)
+        confirmados_global = min(prev_conf + cantidad, estado_meta)
     elif modalidad in ("parcial", "normal"):
-        cantidad_final_global = cantidad
+        confirmados_global = prev_conf + cantidad
     else:
         conn.close()
         return False, f"Modalidad de cierre no valida: {modalidad}", 0
-    estado = ESTADO_CERRADO if cantidad_final_global >= estado_meta else ESTADO_ABIERTO
+    estado = ESTADO_CERRADO if confirmados_global >= estado_meta else ESTADO_ABIERTO
     if estado == ESTADO_CERRADO:
         conn.execute(
-            "UPDATE trabajos SET estado=?, fecha_fin=?, cantidad_cortada=? "
-            "WHERE folio=?",
-            (estado, ahora_local(), cantidad_final_global, folio),
+            "UPDATE trabajos SET estado=?, fecha_fin=?, cortes_confirmados=?, "
+            "cortes_detectados=? WHERE folio=?",
+            (estado, ahora_local(), confirmados_global, detectados, folio),
         )
     else:
         conn.execute(
-            "UPDATE trabajos SET fecha_fin=?, cantidad_cortada=? "
-            "WHERE folio=? AND estado=?",
-            (ahora_local(), cantidad_final_global, folio, ESTADO_ABIERTO),
+            "UPDATE trabajos SET fecha_fin=?, cortes_confirmados=?, "
+            "cortes_detectados=? WHERE folio=? AND estado=?",
+            (ahora_local(), confirmados_global, detectados, folio,
+             ESTADO_ABIERTO),
         )
     # Obtener base del segmento para calcular delta de esta sesion
     base_del_segmento = conn.execute(
@@ -1300,36 +1515,44 @@ def cerrar_trabajo_modalidad(folio: int, cantidad: int,
         conn.close()
         return False, "No se encontro el segmento de sesion abierto.", 0
     base_del_segmento = base_del_segmento["base"]
-    delta_sesion = cantidad_final_global - base_del_segmento
+    delta_sesion = detectados - base_del_segmento
     conn.execute(
         "UPDATE trabajos_sesiones SET cantidad=?, fecha_fin=?, "
-        "modalidad=? WHERE folio=? AND fecha_fin IS NULL",
-        (delta_sesion, ahora_local(), str(modalidad), folio),
+        "modalidad=?, confirmados=?, estado=? "
+        "WHERE folio=? AND fecha_fin IS NULL",
+        (delta_sesion, ahora_local(), str(modalidad), cantidad, estado,
+         folio),
     )
     conn.commit()
     conn.close()
-    return True, estado, cantidad_final_global
+    return True, estado, confirmados_global
 
 
-def actualizar_cantidad_cortada(folio: int, cantidad_cortada: int):
-    """Checkpoint periodico del conteo del trabajo (respaldo ante apagon).
+def actualizar_detectados(folio: int, cantidad: int):
+    """Checkpoint periodico del conteo DETECTADO del trabajo (respaldo).
 
     Actualiza tambien el segmento ABIERTO de `trabajos_sesiones`: los
-    cortes de la sesion viva quedan respaldados cada 30 s, no solo al
-    pausar/completar.
+    detectados de la sesion viva quedan respaldados cada 30 s, no solo al
+    pausar/completar. Los confirmados NO se tocan. La retoma parte de aqui.
     """
     conn = obtener_conexion()
     conn.execute(
-        "UPDATE trabajos SET cantidad_cortada=? WHERE folio=?",
-        (int(cantidad_cortada), int(folio)),
+        "UPDATE trabajos SET cortes_detectados=? WHERE folio=?",
+        (int(cantidad), int(folio)),
     )
     conn.execute(
         "UPDATE trabajos_sesiones SET cantidad=?-base "
         "WHERE folio=? AND fecha_fin IS NULL",
-        (int(cantidad_cortada), int(folio)),
+        (int(cantidad), int(folio)),
     )
     conn.commit()
     conn.close()
+
+
+# Compatibilidad: nombre anterior del checkpoint de detectados.
+def actualizar_cantidad_cortada(folio: int, cantidad_cortada: int):
+    """Alias de `actualizar_detectados` (nombre historico)."""
+    actualizar_detectados(folio, cantidad_cortada)
 
 
 def obtener_trabajo_abierto(sesion_id: int | None = None):
@@ -1360,19 +1583,22 @@ def listar_trabajos_de_sesion(sesion_id: int):
     """Trabajos de una sesion para reportes, POR SEGMENTO.
 
     Un renglon por segmento (folio x sesion) de `trabajos_sesiones`:
-    `cantidad_sesion` es lo cortado EN ESTA sesion para ese folio y
-    `cantidad_cortada` el acumulado global del folio. Si un folio se pauso
-    y se retomo dentro de la misma sesion aparecen sus dos segmentos.
-    NOTA: los folios previos a esta tabla no tienen desglose por sesion.
+    `cantidad_sesion` son los DETECTADOS en ESTA sesion para ese folio y
+    `confirmados` lo VALIDADO al cerrar ESE segmento (0 si solo se pauso);
+    `cortes_detectados`/`cortes_confirmados` el acumulado global del folio.
+    Si un folio se pauso y se retomo dentro de la misma sesion aparecen sus
+    dos segmentos. NOTA: los folios previos a esta tabla no tienen desglose.
     """
     conn = obtener_conexion()
     rows = conn.execute(
         "SELECT ts.folio AS folio, t.num_part AS num_part, "
         "       t.cantidad_total AS cantidad_total, "
-        "       t.cantidad_cortada AS cantidad_cortada, "
+        "       t.cortes_detectados AS cortes_detectados, "
+        "       t.cortes_confirmados AS cortes_confirmados, "
         "       ts.cantidad AS cantidad_sesion, "
+        "       ts.confirmados AS confirmados, "
         "       ts.fecha_inicio AS fecha_inicio, ts.fecha_fin AS fecha_fin, "
-        "       ts.modalidad AS modalidad, "
+        "       ts.modalidad AS modalidad, ts.estado AS estado_segmento, "
         "       t.estado AS estado "
         "FROM trabajos_sesiones ts JOIN trabajos t ON t.folio=ts.folio "
         "WHERE ts.sesion_id=? ORDER BY ts.fecha_inicio",
@@ -1382,17 +1608,81 @@ def listar_trabajos_de_sesion(sesion_id: int):
     return rows
 
 
+def paros_de_segmento(sesion_id: int, inicio: str, fin: str | None = None):
+    """Paros de una sesion caidos en la ventana [inicio, fin] de un segmento.
+
+    `fin=None` = segmento abierto (sin limite superior). Cada paro se
+    atribuye por solape: inicio dentro de la ventana, o ventana que empieza
+    dentro del paro (setup previo que termina al arrancar el segmento).
+    Devuelve filas con causa, zona, folio, inicio/fin y duracion en minutos
+    (None si sigue en curso). La exclusion de 'Esperando trabajo' la decide
+    el reporte, no esta capa.
+    """
+    conn = obtener_conexion()
+    rows = conn.execute(
+        "SELECT p.id, c.descripcion, p.inicio_paro, p.fin_paro, "
+        "       z.nombre AS zona, a.nombre AS autorizador, "
+        "       p.folio, t.num_part AS num_part "
+        "FROM paros_produccion p "
+        "LEFT JOIN causas_paro c ON c.id=p.causa_id "
+        "LEFT JOIN zonas_maquina z ON z.id=p.zona_id "
+        "LEFT JOIN operadores a ON a.id=p.autorizado_por_operador_id "
+        "LEFT JOIN trabajos t ON t.folio=p.folio "
+        "WHERE p.sesion_id=? AND p.inicio_paro IS NOT NULL "
+        "ORDER BY p.inicio_paro, p.id",
+        (sesion_id,),
+    ).fetchall()
+    conn.close()
+    seg_fin = fin if fin else "9999"
+    salida = []
+    for p in rows:
+        ini = p["inicio_paro"] or ""
+        fin_p = p["fin_paro"] or "9999"
+        if ini <= seg_fin and fin_p >= (inicio or ""):
+            dur = None
+            if p["fin_paro"] and p["inicio_paro"]:
+                try:
+                    from datetime import datetime as _dt
+                    _ini = _dt.strptime(p["inicio_paro"], "%Y-%m-%d %H:%M:%S")
+                    _fin = _dt.strptime(p["fin_paro"], "%Y-%m-%d %H:%M:%S")
+                    dur = round((_fin - _ini).total_seconds() / 60.0, 1)
+                except (ValueError, TypeError):
+                    dur = None
+            d = dict(p)
+            d["duracion_min"] = dur
+            salida.append(d)
+    return salida
+
+
 # ---------------------------------------------------------------------------
 # Paros de produccion
 # ---------------------------------------------------------------------------
 
-def iniciar_paro(sesion_id: int) -> int:
-    """Crea un paro 'en curso' (sin causa ni fin). Devuelve id."""
+def iniciar_paro(sesion_id: int, folio: int | None = None) -> int:
+    """Crea un paro 'en curso' (sin causa ni fin). Devuelve id.
+
+    `folio` es el trabajo activo al iniciar el paro (o None si no hay folio
+    cargado: Primera pieza sin trabajo con permiso `iniciar_primera_pieza` o
+    espera de QR). Si se pasa un folio inexistente se guarda NULL para no
+    violar la FK.
+    """
     conn = obtener_conexion()
+    if folio is not None:
+        try:
+            folio = int(folio)
+        except (TypeError, ValueError):
+            folio = None
+        if folio is not None:
+            existe = conn.execute(
+                "SELECT 1 FROM trabajos WHERE folio=?", (folio,)
+            ).fetchone()
+            if existe is None:
+                folio = None
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO paros_produccion (sesion_id, inicio_paro) VALUES (?, ?)",
-        (sesion_id, ahora_local()),
+        "INSERT INTO paros_produccion (sesion_id, folio, inicio_paro) "
+        "VALUES (?, ?, ?)",
+        (sesion_id, folio, ahora_local()),
     )
     conn.commit()
     nuevo_id = cur.lastrowid
@@ -1407,6 +1697,14 @@ def finalizar_paro(paro_id: int, causa_id: int, operador_id: int,
         "UPDATE paros_produccion SET causa_id=?, zona_id=?, fin_paro=?, "
         "autorizado_por_operador_id=? WHERE id=?",
         (causa_id, zona_id, ahora_local(), operador_id, paro_id),
+    )
+    # Si el paro nacio sin folio (p. ej. Primera pieza sin trabajo y el folio
+    # se cargo a mitad del paro), se intenta vincular por solape al cerrarlo.
+    # Los "Esperando trabajo" nunca llevan folio: se excluyen y se limpian.
+    conn.execute(
+        f"UPDATE paros_produccion AS p SET folio = ({_SQL_FOLIO_SOLAPADO}) "
+        f"WHERE p.id=? AND p.folio IS NULL AND NOT ({_SQL_ES_ESPERA})",
+        (ahora_local(), paro_id),
     )
     conn.commit()
     conn.close()
@@ -1502,17 +1800,63 @@ def paro_en_curso(sesion_id: int):
 
 
 def obtener_paros_de_sesion(sesion_id: int):
-    """Paros de la sesion con causa, zona y autorizador, para reportes."""
+    """Paros de la sesion con causa, zona, folio y autorizador, para reportes."""
     conn = obtener_conexion()
     rows = conn.execute(
         "SELECT p.id, c.descripcion, p.inicio_paro, p.fin_paro, "
-        "       z.nombre AS zona, a.nombre AS autorizador "
+        "       z.nombre AS zona, a.nombre AS autorizador, "
+        "       p.folio, t.num_part AS num_part "
         "FROM paros_produccion p "
         "LEFT JOIN causas_paro c ON c.id=p.causa_id "
         "LEFT JOIN zonas_maquina z ON z.id=p.zona_id "
         "LEFT JOIN operadores a ON a.id=p.autorizado_por_operador_id "
+        "LEFT JOIN trabajos t ON t.folio=p.folio "
         "WHERE p.sesion_id=? ORDER BY p.id",
         (sesion_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def obtener_paros_agrupados(sesion_id: int):
+    """Paros de una sesion agrupados por trabajo: {folio|None: [paros]}.
+
+    La clave es el folio (int) o None para paros sin trabajo (Primera pieza
+    sin folio con permiso o espera de QR). Cada sesion puede tener N trabajos
+    y cada trabajo M paros.
+    """
+    grupos: dict[int | None, list] = {}
+    for p in obtener_paros_de_sesion(sesion_id):
+        grupos.setdefault(p["folio"], []).append(p)
+    return grupos
+
+
+def listar_sesiones_por_fecha(fecha: str):
+    """Sesiones cuya fecha_inicio cae en `fecha` ('YYYY-MM-DD').
+
+    Base del export por dia: todas las sesiones de ese dia con operador,
+    duracion en minutos y numero de paros (sin "Esperando trabajo": la
+    espera no cuenta como paro para el cruce).
+    """
+    conn = obtener_conexion()
+    ahora = ahora_local()
+    rows = conn.execute(
+        "SELECT s.id, o.nombre, s.fecha_inicio, s.fecha_fin, s.total_cortes, "
+        "       s.estado, "
+        "       ROUND(COALESCE((julianday(s.fecha_fin)-julianday(s.fecha_inicio))*1440, "
+        "                      (julianday(?)-julianday(s.fecha_inicio))*1440), 1) "
+        "       AS minutos, "
+        "       (SELECT COUNT(*) FROM paros_produccion p "
+        "        LEFT JOIN causas_paro c ON c.id=p.causa_id "
+        "        WHERE p.sesion_id=s.id "
+        "        AND (c.descripcion IS NULL "
+        "             OR LOWER(TRIM(c.descripcion))<>'esperando trabajo')) "
+        "       AS num_paros "
+        "FROM sesiones_produccion s "
+        "JOIN operadores o ON o.id=s.operador_id "
+        "WHERE date(s.fecha_inicio)=date(?) "
+        "ORDER BY s.id",
+        (ahora, fecha),
     ).fetchall()
     conn.close()
     return rows

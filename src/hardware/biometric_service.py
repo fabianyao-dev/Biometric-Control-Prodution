@@ -51,6 +51,17 @@ class BiometricService:
         """Prepara el lector. Devuelve True si está listo."""
         return self.sdk.abrir_lector()
 
+    def reiniciar_lector(self) -> bool:
+        """Reboot por software del lector (cierra handle stale, reinicia
+        dpfpdd, re-enumera y reabre). Devuelve True si quedo listo."""
+        if not self.disponible:
+            return False
+        try:
+            return bool(self.sdk.reiniciar_lector())
+        except Exception:  # noqa: BLE001 - nunca debe crashear la UI
+            log.error("reiniciar_lector fallo", exc_info=True)
+            return False
+
     def capturar_huella(self, timeout_ms=None):
         """Captura la huella y devuelve dict con 'fmd', 'width', 'height' y
         'dpi', o None si no se capturó nada."""

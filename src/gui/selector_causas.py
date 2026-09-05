@@ -193,7 +193,12 @@ class SelectorCausaZona(QFrame):
         return col_causas
 
     def _cargar_causas(self):
-        self._causas = listar_causas_paro(activas_solo=True)
+        # "Primera pieza" es IMPLICITA (la abre/cierra el sistema al entrar y
+        # salir del modo): no debe elegirse a mano en un paro normal.
+        self._causas = [
+            c for c in listar_causas_paro(activas_solo=True)
+            if str(c["descripcion"]).strip().lower() != "primera pieza"
+        ]
         self._refrescar_causas()
 
     def _refrescar_causas(self):

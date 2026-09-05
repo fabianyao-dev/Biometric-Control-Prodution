@@ -534,6 +534,26 @@ class BiometricSDK:
         except Exception:  # noqa: BLE001
             pass
 
+    def reiniciar_lector(self) -> bool:
+        """Reboot por software del lector: cierra el handle (puede quedar
+        stale tras un desconecta/conecta del USB), reinicia dpfpdd,
+        re-enumera y reabre el primer lector DigitalPersona.
+
+        Devuelve True si el lector quedo abierto. No toca procesos ni
+        servicios del sistema: todo el SDK corre in-process via DLLs.
+        """
+        if not self.dpfpdd:
+            log.warning("reiniciar_lector: dpfpdd.dll no cargada.")
+            return False
+        self._cerrar_lector()
+        self._reinit_sdk()
+        # Forzar re-log de la enumeracion y re-diagnostico si sigue ausente.
+        self._firma_lectores = None
+        self._diag_mostrado = False
+        ok = self.abrir_lector()
+        log.info("reiniciar_lector -> %s", "OK" if ok else "sin lector")
+        return ok
+
     def abrir_lector(self):
         """Abre el primer lector DIGITALPERSONA detectado. Devuelve True/False.
 

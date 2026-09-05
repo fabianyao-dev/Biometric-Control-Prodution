@@ -77,7 +77,13 @@ class _IconoAdvertencia(QWidget):
 
 
 class PanelAdvertencias(QFrame):
-    """Panel flotante (Qt.Popup) con la lista de advertencias. Solo informativo."""
+    """Panel flotante (Qt.Popup) con la lista de advertencias.
+
+    Arriba de los labels lleva el boton de reboot de hardware (reintenta
+    lector biometrico + Modbus via `reboot_handler`, que devuelve
+    (ok, mensaje) y se muestra aqui mismo); el timer de avisos de la app
+    refresca la lista a los pocos segundos.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -87,14 +93,34 @@ class PanelAdvertencias(QFrame):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(16, 14, 16, 14)
         self._layout.setSpacing(10)
+        self._reboot_handler = None
+        self._btn_reboot = QPushButton("Reintentar conexión", self)
+        self._btn_reboot.clicked.connect(self._on_reboot)
+        self._lbl_resultado = QLabel("", self)
+        self._lbl_resultado.setObjectName("EstadoInfo")
+        self._lbl_resultado.setWordWrap(True)
+        self._lbl_resultado.hide()
+
+    def set_reboot_handler(self, handler):
+        """`handler` sin args -> (ok, mensaje). None oculta el boton."""
+        self._reboot_handler = handler
 
     def fijar_avisos(self, avisos):
         """Rellena el panel. `avisos` es una lista de (titulo, detalle)."""
         while self._layout.count():
             item = self._layout.takeAt(0)
             widget = item.widget()
-            if widget is not None:
+            if widget is not None and widget not in (
+                self._btn_reboot, self._lbl_resultado,
+            ):
                 widget.deleteLater()
+        # El boton va ARRIBA de los labels, solo con avisos y handler.
+        if avisos and self._reboot_handler is not None:
+            self._layout.addWidget(self._btn_reboot)
+            self._btn_reboot.show()
+        else:
+            self._btn_reboot.hide()
+        self._layout.addWidget(self._lbl_resultado)
         if not avisos:
             lbl = QLabel(AVISO_VACIO, self)
             lbl.setObjectName("EstadoInfo")
@@ -103,6 +129,21 @@ class PanelAdvertencias(QFrame):
             return
         for titulo, detalle in avisos:
             self._layout.addWidget(self._fila(titulo, detalle))
+
+    def _on_reboot(self):
+        if self._reboot_handler is None:
+            return
+        self._btn_reboot.setEnabled(False)
+        self._btn_reboot.setText("Reintentando...")
+        try:
+            _ok, mensaje = self._reboot_handler()
+        except Exception as e:  # noqa: BLE001 - nunca debe crashear la UI
+            log.error("Reboot de hardware fallo", exc_info=True)
+            _ok, mensaje = False, f"No se pudo reintentar: {e}"
+        self._lbl_resultado.setText(mensaje or "")
+        self._lbl_resultado.show()
+        self._btn_reboot.setEnabled(True)
+        self._btn_reboot.setText("Reintentar conexión")
 
     def _fila(self, titulo, detalle):
         fila = QWidget(self)
@@ -139,10 +180,17 @@ class IndicadorAdvertencias(QPushButton):
         super().__init__(parent)
         self._avisos = []
         self._panel = None
+        self._reboot_handler = None
         self.setFixedWidth(58)
         self.setIconSize(QSize(20, 20))
         self.clicked.connect(self._alternar_panel)
         self.set_advertencias([])
+
+    def set_reboot_handler(self, handler):
+        """Handler del boton de reboot del panel: sin args -> (ok, mensaje)."""
+        self._reboot_handler = handler
+        if self._panel is not None:
+            self._panel.set_reboot_handler(handler)
 
     def set_advertencias(self, avisos):
         self._avisos = list(avisos)
@@ -166,6 +214,7 @@ class IndicadorAdvertencias(QPushButton):
             return
         if self._panel is None:
             self._panel = PanelAdvertencias(self.window())
+            self._panel.set_reboot_handler(self._reboot_handler)
         self._panel.fijar_avisos(self._avisos)
         self._panel.adjustSize()
         self._posicionar_panel()

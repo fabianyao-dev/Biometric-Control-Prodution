@@ -95,7 +95,7 @@ class ModalidadCierreDialog(QDialog):
 
         resumen = QLabel(
             f"Trabajo {self.folio} ({self.num_part})\n"
-            f"Cortadas: {self.cortado}  ·  Meta: {self.meta}",
+            f"Cortadas en esta sesión: {self.cortado}  ·  Meta: {self.meta}",
             self,
         )
         resumen.setObjectName("EstadoInfo")

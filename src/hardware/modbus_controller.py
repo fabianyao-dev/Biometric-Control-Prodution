@@ -271,6 +271,21 @@ class ModbusController:
         """True si hay enlace Modbus activo (para alerta en la UI)."""
         return self._conectado
 
+    def reconectar(self) -> bool:
+        """Fuerza una reconexion inmediata (cierra el socket y reintenta ya).
+
+        El polling en segundo plano seguiria reintentando de todos modos;
+        esto solo adelanta el intento para el boton de reboot. No aplica el
+        latch PAUSE inicial si ya se aplico una vez (no para una maquina en
+        marcha por una caida de red). Devuelve True si hay enlace.
+        """
+        if self._simulacion:
+            return True
+        self._desconectar()
+        ok = self._conectar()
+        log.info("reconectar Modbus -> %s", "OK" if ok else "sin respuesta")
+        return ok
+
     def en_simulacion(self) -> bool:
         """True si el controlador corre sin modulo real (sin alerta UI)."""
         return self._simulacion

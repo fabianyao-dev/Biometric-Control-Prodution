@@ -184,6 +184,7 @@ class App(QMainWindow):
         lay.addWidget(self.btn_sesion)
 
         self.btn_advertencias = IndicadorAdvertencias(self.header)
+        self.btn_advertencias.set_reboot_handler(self._reboot_hardware)
         lay.addWidget(self.btn_advertencias)
 
     # ------------------------------------------------------------------
@@ -347,6 +348,70 @@ class App(QMainWindow):
             )
 
         self.btn_advertencias.set_advertencias(avisos)
+
+    def _reboot_hardware(self):
+        """Reboot por software del lector biometrico y del enlace Modbus.
+
+        Llamado desde el boton "Reintentar conexión" del panel de
+        advertencias. Devuelve (ok, mensaje) y el timer de avisos refresca
+        la lista a los pocos segundos. Nunca mata procesos ni toca
+        servicios del sistema: el SDK biometrico corre in-process (se cierra
+        el handle stale y se re-enumera) y Modbus es un socket TCP que se
+        cierra y reconecta (sin latch PAUSE: no detiene una maquina en
+        marcha).
+        """
+        lineas = []
+        todo_ok = True
+
+        reiniciar = getattr(self.biometrico, "reiniciar_lector", None)
+        if not getattr(self.biometrico, "disponible", False):
+            lineas.append("Biometría: SDK no disponible (falta driver).")
+            todo_ok = False
+        elif reiniciar is None:
+            lineas.append("Biometría: sin función de reboot en este modo.")
+            todo_ok = False
+        else:
+            try:
+                if reiniciar():
+                    lineas.append("Biometría: lector re-detectado.")
+                else:
+                    lineas.append(
+                        "Biometría: sigue sin lector (revisa el cable USB)."
+                    )
+                    todo_ok = False
+            except Exception as e:  # noqa: BLE001 - reportar, no crashear
+                log.error("Reboot biometrico fallo", exc_info=True)
+                lineas.append(f"Biometría: error ({e}).")
+                todo_ok = False
+
+        en_simulacion = getattr(
+            self.controlador, "en_simulacion", lambda: True
+        )()
+        if en_simulacion:
+            lineas.append("Modbus: en simulación (sin módulo real).")
+        else:
+            reconectar = getattr(self.controlador, "reconectar", None)
+            if reconectar is None:
+                lineas.append("Modbus: sin función de reboot en este modo.")
+                todo_ok = False
+            else:
+                try:
+                    if reconectar():
+                        lineas.append("Modbus: enlace restablecido.")
+                    else:
+                        lineas.append(
+                            "Modbus: sin respuesta (se reintenta en "
+                            "segundo plano)."
+                        )
+                        todo_ok = False
+                except Exception as e:  # noqa: BLE001 - reportar, no crashear
+                    log.error("Reboot Modbus fallo", exc_info=True)
+                    lineas.append(f"Modbus: error ({e}).")
+                    todo_ok = False
+
+        mensaje = "\n".join(lineas)
+        log.info("Reboot de hardware: %s", mensaje.replace("\n", " | "))
+        return todo_ok, mensaje
 
     # ------------------------------------------------------------------
     # Sidebar lateral (ocultable con la hamburguesa)

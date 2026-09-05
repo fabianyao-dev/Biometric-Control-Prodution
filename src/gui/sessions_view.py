@@ -9,12 +9,16 @@ que se estiran.
 """
 
 import logging
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDate, QStandardPaths, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCalendarWidget,
+    QDialog,
+    QFileDialog,
     QHeaderView,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -22,11 +26,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import qtawesome as qta
+
 from src.database import (
     listar_sesiones,
     listar_trabajos_de_sesion,
     obtener_paros_de_sesion,
 )
+from src.reportes.export_dia import exportar_dia
 
 log = logging.getLogger(__name__)
 
@@ -47,9 +54,19 @@ class SessionsView(QWidget):
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(8)
 
-        titulo = QLabel("Historial de Sesiones", self)
-        titulo.setObjectName("Title")
-        layout.addWidget(titulo, alignment=Qt.AlignHCenter)
+        # Encabezado: titulo centrado a todo el ancho + boton Exportar
+        # flotante arriba a la derecha (fuera del layout para no desplazar
+        # el titulo).
+        self.lbl_titulo = QLabel("Historial de Sesiones", self)
+        self.lbl_titulo.setObjectName("Title")
+        layout.addWidget(self.lbl_titulo, alignment=Qt.AlignHCenter)
+
+        self.btn_exportar = QPushButton("Exportar", self)
+        self.btn_exportar.setObjectName("Success")
+        self.btn_exportar.setIcon(qta.icon("mdi6.file-excel", color="white"))
+        self.btn_exportar.clicked.connect(self._exportar_dia)
+        self.btn_exportar.raise_()
+        self._posicionar_export()
 
         subtitulo = QLabel("Selecciona una sesion para ver sus paros:", self)
         subtitulo.setObjectName("EstadoInfo")
@@ -115,6 +132,22 @@ class SessionsView(QWidget):
         btn_actualizar.clicked.connect(self._recargar_sesiones)
         layout.addWidget(btn_actualizar, alignment=Qt.AlignHCenter)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._posicionar_export()
+
+    def _posicionar_export(self):
+        """Boton Exportar flotante: alineado a la derecha del titulo sin
+        ocupar espacio en el layout (no desplaza nada)."""
+        btn = getattr(self, "btn_exportar", None)
+        titulo = getattr(self, "lbl_titulo", None)
+        if btn is None or titulo is None:
+            return
+        hint = btn.sizeHint()
+        x = self.width() - hint.width() - 16
+        y = titulo.y() + max(0, (titulo.height() - hint.height()) // 2)
+        btn.setGeometry(x, y, hint.width(), hint.height())
+
     @staticmethod
     def _config_tabla(tabla, col_stretch=()):
         tabla.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -170,8 +203,9 @@ class SessionsView(QWidget):
 
     def _recargar_trabajos(self, sesion_id):
         """Trabajos de la sesion POR SEGMENTO (folio x sesion): 'Cortados'
-        es lo cortado en ESTA sesion para ese folio y 'Modalidad' el tipo de
-        cierre de ese segmento (normal / parcial / folio / en curso)."""
+        es lo cortado en ESTA sesion para ese folio, 'Modalidad' el tipo de
+        cierre de ese segmento y 'Estado' el del folio AL MOMENTO del
+        segmento (no el actual)."""
         modalidad_nombre = {
             "normal": "Normal", "parcial": "Parcial",
             "folio": "Folio modificado",
@@ -185,13 +219,17 @@ class SessionsView(QWidget):
                 modalidad_nombre.get(t["modalidad"], t["modalidad"])
                 if not en_curso else "En curso"
             )
+            estado_seg = (
+                t["estado_segmento"] if t["estado_segmento"]
+                else ("En curso" if en_curso else t["estado"])
+            )
             valores = (
                 t["folio"], t["num_part"], t["cantidad_total"],
                 t["cantidad_sesion"],
                 t["fecha_fin"] or ("En curso" if t["estado"] == "Abierto"
                                    else "Sin registro"),
                 modalidad,
-                t["estado"],
+                estado_seg,
             )
             for col, valor in enumerate(valores):
                 self.tree_trabajos.setItem(
@@ -219,3 +257,74 @@ class SessionsView(QWidget):
 
     def _limpiar_paros(self):
         self.tree_paros.setRowCount(0)
+
+    # ------------------------------------------------------------------
+    # Export por dia
+    # ------------------------------------------------------------------
+
+    def _pedir_fecha_export(self):
+        """Dialogo de fecha para el export. Devuelve 'YYYY-MM-DD' o None."""
+        dialogo = QDialog(self)
+        dialogo.setWindowTitle("Exportar día")
+        lay = QVBoxLayout(dialogo)
+        lay.addWidget(QLabel("Selecciona el día a exportar:", dialogo))
+        cal = QCalendarWidget(dialogo)
+        hoy = QDate.currentDate()
+        cal.setSelectedDate(hoy)
+        cal.setMaximumDate(hoy)
+        lay.addWidget(cal)
+        fila = QHBoxLayout()
+        fila.addStretch(1)
+        btn_ok = QPushButton("Aceptar", dialogo)
+        btn_ok.setObjectName("Success")
+        btn_ok.clicked.connect(dialogo.accept)
+        btn_no = QPushButton("Cancelar", dialogo)
+        btn_no.clicked.connect(dialogo.reject)
+        fila.addWidget(btn_ok)
+        fila.addWidget(btn_no)
+        lay.addLayout(fila)
+        if dialogo.exec() != QDialog.Accepted:
+            return None
+        return cal.selectedDate().toString("yyyy-MM-dd")
+
+    def _exportar_dia(self):
+        from src import config
+
+        fecha = self._pedir_fecha_export()
+        if not fecha:
+            return
+        # Carpeta inicial: la ultima donde se guardo (persistida en
+        # config.json como el tema); si no hay o ya no existe, Documentos.
+        base = config.leer_config("export_dir", "") or ""
+        import os
+
+        if not base or not os.path.isdir(base):
+            base = QStandardPaths.writableLocation(
+                QStandardPaths.DocumentsLocation
+            ) or ""
+        destino_ini = (
+            os.path.join(base, f"Sesiones_{fecha}.xlsx") if base
+            else f"Sesiones_{fecha}.xlsx"
+        )
+        ruta, _ = QFileDialog.getSaveFileName(
+            self, "Exportar día a Excel", destino_ini, "Excel (*.xlsx)"
+        )
+        if not ruta:
+            return
+        ok, mensaje, _stats = exportar_dia(fecha, ruta)
+        if ok:
+            # Recordar la carpeta para el proximo export.
+            try:
+                config.guardar_config("export_dir", os.path.dirname(ruta))
+            except Exception:  # noqa: BLE001 - no debe opacar el exito
+                log.warning("No se pudo guardar export_dir", exc_info=True)
+        caja = QMessageBox(self)
+        caja.setWindowTitle("Exportar día" if ok else "Sin datos")
+        caja.setText(mensaje)
+        caja.setIcon(QMessageBox.Information if ok else QMessageBox.Warning)
+        caja.addButton("Aceptar", QMessageBox.AcceptRole)
+        caja.exec()
+        if not ok:
+            log.info("Export día %s sin generar: %s", fecha, mensaje)
+        else:
+            log.info("Export día %s guardado en %s", fecha, ruta)
