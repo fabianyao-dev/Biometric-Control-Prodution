@@ -679,8 +679,9 @@ if __name__ == "__main__":
     _splash_mensaje(splash, "Preparando...")
     _splash_mensaje(splash, "Cargando base de datos...")
     init_db()
-    # La sesion 'Activa' que quede tras un apagon se recupera en la vista
-    # de Inicio (InicioView._revisar_sesion_interrumpida), no se borra.
+    # La sesion 'Activa' que quede tras un apagon se cierra sola al arrancar
+    # (InicioView._cerrar_sesion_interrumpida): sus datos ya estan guardados
+    # por el checkpoint, no se borran.
     _splash_mensaje(splash, "Iniciando lector y hardware...")
     ventana = App()
     _splash_mensaje(splash, "Listo")

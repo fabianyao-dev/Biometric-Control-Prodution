@@ -129,7 +129,7 @@ class ModalidadCierreDialog(QDialog):
         lay.addWidget(btn_folio)
 
         # En el cierre por META (`cancelable=False`) no se permite cancelar:
-        # el operador debe confirmar la cantidad y autorizar; no puede dejar
+        # el operador debe confirmar la cantidad; no puede dejar
         # el trabajo Abierto con la cantidad_total ya cumplida.
         if self.cancelable:
             btn_cancelar = QPushButton("Cancelar", self)
