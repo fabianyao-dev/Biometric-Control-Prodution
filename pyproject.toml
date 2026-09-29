@@ -1,0 +1,54 @@
+# Configuracion de herramientas de desarrollo.
+#
+# El proyecto NO se instala como paquete: se ejecuta desde la raiz con
+# `python main.py`, y `src/` se resuelve por el `sys.path` que inyecta
+# `tests/conftest.py`. Por eso no hay [build-system] ni [project] aqui.
+
+[tool.pytest.ini_options]
+# CRITICO: sin esto pytest recolecta tambien `test/`, que son scripts MANUALES
+# de planta (hacen sys.exit(1), tocan hardware y arrancan el HAL). Ojo la s:
+# la suite automatizada vive en `tests/`.
+testpaths = ["tests"]
+norecursedirs = [
+    "venv",
+    "test_pc",     # copia de la app empaquetada, con PySide6 duplicado
+    "release",
+    "assets",
+    "sdk",
+    "dist",
+    "build",
+]
+# Los tests de `src/gui` no necesitan ventana: offscreen via conftest.py.
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [
+    "venv",
+    "test_pc",
+    "release",
+    "assets",
+    "sdk",
+    "dist",
+    "build",
+]
+
+[tool.ruff.lint]
+# F = pyflakes (imports rotos, nombres indefinidos). Es el que detecta un
+# import olvidado despues de mover un archivo entre fases: `ruff check .`
+# E/W = pycodestyle. I = isort (orden de imports).
+select = ["F", "E", "W", "I"]
+# Conflicto E741 (`l` como nombre de variable) con el estilo actual del repo.
+ignore = ["E741"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.ruff.lint.per-file-ignores]
+# conftest.py ajusta sys.path antes de importar `src`, y los tests hacen lo
+# mismo para poder correrlos sin instalar el paquete.
+"tests/*" = ["E402"]
+# Los scripts de `test/` son manuales, de planta, y no forman parte de la
+# suite. No se lintean.
+"test/*" = ["E402", "F401", "F811", "E722", "E731"]

@@ -79,6 +79,46 @@ q0 75 54 123t126 48q6 0 17-1t23-3q9-2 15.5 2.5T744-191q2 8-3 14t-13 8q-18 5 \
 """
 
 
+def parsear_qr(texto):
+    """Parsea la linea del escaner de trabajo `folio|num_part|cantidad_total`.
+
+    Funcion PURA: sin Qt, sin widgets, sin estado. Devuelve la tupla
+    `(folio, num_part, cantidad_total)` si el QR es valido, o el string con
+    el motivo del rechazo si no lo es. El modal decide que pintar; aqui solo
+    se decide si el QR es valido.
+
+    Separador ESTRICTO: solo `|`. Los escaneres USB tipo teclado no mandan
+    caracteres sino codigos de tecla de una distribucion US, y Windows los
+    traduce segun la disposicion activa, asi que con la PC en ES/Latinoamericano
+    el `|` puede llegar como `]`. Se mantiene estricto a proposito: un QR con
+    otro separador es un QR invalido, y conviene que el operador lo sepa.
+
+    Cubierto por `tests/test_qr_parser.py`.
+    """
+    partes = [p.strip() for p in re.split(r"[|]", texto)]
+    if len(partes) != 3:
+        return (
+            "Formato invalido: se esperan 3 campos "
+            "folio|num_part|cantidad_total."
+        )
+    folio_txt, num_part, cantidad_txt = partes
+    try:
+        folio = int(folio_txt)
+    except ValueError:
+        return f"Folio no numerico: '{folio_txt}'."
+    try:
+        cantidad_total = int(cantidad_txt)
+    except ValueError:
+        return f"Cantidad no numerica: '{cantidad_txt}'."
+    if folio <= 0:
+        return "El folio debe ser mayor que cero."
+    if not num_part:
+        return "El numero de parte viene vacio."
+    if cantidad_total <= 0:
+        return "La cantidad total debe ser mayor que cero."
+    return folio, num_part, cantidad_total
+
+
 class HuellaWidget(QWidget):
     """Insignia circular con el icono de huella (Material Symbols, SVG).
 
@@ -363,11 +403,15 @@ class HuellaModal(QDialog):
         Formato exigido: folio|num_part|cantidad_total, con folio y cantidad
         enteros positivos. Invalido -> error, limpia y vuelve a esperar.
 
+        La validacion vive en `parsear_qr()` (funcion pura, testeada en
+        `tests/test_qr_parser.py`); aqui solo se refleja el resultado en la
+        interfaz. El separador es ESTRICTO: solo `|`.
+
         Los escaneres USB tipo teclado NO mandan caracteres: mandan codigos
         de tecla de una distribucion US y Windows los traduce segun la
-        disposicion activa. Con la PC en ES/Latinoamericano, el separador
-        '|' llega como ']' u otro simbolo vecino (p. ej. Steren): se aceptan
-        las variantes tipicas como separadores.
+        disposicion activa, asi que con la PC en ES/Latinoamericano el `|`
+        puede llegar como `]`. Se acepta solo `|`: un QR con otro separador
+        es un QR invalido y el operador debe enterarse.
         """
         texto = self.input_qr.text().strip()
         # En MODO_DEV el Enter con el campo VACIO equivale a la huella (el
@@ -376,33 +420,11 @@ class HuellaModal(QDialog):
         if config.MODO_DEV and not texto and self._enter_dev_permitido(permitir_qr=True):
             self._auth_dev()
             return
-        partes = [p.strip() for p in re.split(r"[|]", texto)]
-        if len(partes) != 3:
-            self._rechazar_qr(
-                "Formato invalido: se esperan 3 campos "
-                "folio|num_part|cantidad_total."
-            )
+        resultado = parsear_qr(texto)
+        if isinstance(resultado, str):
+            self._rechazar_qr(resultado)
             return
-        folio_txt, num_part, cantidad_txt = partes
-        try:
-            folio = int(folio_txt)
-        except ValueError:
-            self._rechazar_qr(f"Folio no numerico: '{folio_txt}'.")
-            return
-        try:
-            cantidad_total = int(cantidad_txt)
-        except ValueError:
-            self._rechazar_qr(f"Cantidad no numerica: '{cantidad_txt}'.")
-            return
-        if folio <= 0:
-            self._rechazar_qr("El folio debe ser mayor que cero.")
-            return
-        if not num_part:
-            self._rechazar_qr("El numero de parte viene vacio.")
-            return
-        if cantidad_total <= 0:
-            self._rechazar_qr("La cantidad total debe ser mayor que cero.")
-            return
+        folio, num_part, cantidad_total = resultado
         self.trabajo_escaneado = (folio, num_part, cantidad_total)
         self.lbl_trabajo.setText(
             f"\u2713 Folio {folio} \u00b7 Parte {num_part} \u00b7 "

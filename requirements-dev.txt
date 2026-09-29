@@ -1,0 +1,19 @@
+# Dependencias de desarrollo y build.
+# NO forman parte de la app empaquetada: `requirements.txt` sigue siendo la
+# lista de runtime (PySide6, pyModbusTCP, python-dotenv, tzdata, qtawesome,
+# openpyxl). Este archivo instala lo que hace falta para desarrollar, probar,
+# lintear y empaquetar.
+#
+# Instalacion:  venv\Scripts\pip install -r requirements-dev.txt
+
+# Suite de pruebas automatizadas (la nueva, en `tests/`).
+# OJO: los scripts de `test/` son manuales y siguen siendo de planta.
+pytest>=8.0
+
+# Linter/formateador. Configurado en [tool.ruff] de pyproject.toml.
+ruff>=0.6
+
+# Empaquetado. Build onedir:  venv\Scripts\pyinstaller --noconfirm WTSControl.spec
+# (AGENTS.md documenta este comando; el build no era reproducible porque
+# `*.spec` estaba en .gitignore. Ver PLAN_MODULARIZACION.md, Fase 0.12.)
+pyinstaller>=6.0

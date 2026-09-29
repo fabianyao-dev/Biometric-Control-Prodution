@@ -37,10 +37,10 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#   Usually these files are written by a python script from a template
-#   before PyInstaller builds the exe, so as to inject date/other infos into it.
+# NOTA: `*.spec` NO se ignora a proposito. En este repo los .spec son
+# definiciones de build escritas a MANO y versionadas (`WTSControl.spec`,
+# `tools/updater.spec`): son la documentacion de como se empaqueta la app.
 *.manifest
-*.spec
 
 # Installer logs
 pip-log.txt
@@ -232,10 +232,9 @@ __marimo__/
 .streamlit/secrets.toml
 
 
-**/AGENTS.md
-
 # Documento local de estimacion/avance de cambios (no se versiona)
 Estimacion_cambios.md
 
 # Notas locales/borradores (no se versionan)
 mensajes_error_huella.md
+PLAN_MODULARIZACION.md
