@@ -28,17 +28,27 @@ log = logging.getLogger(__name__)
 
 FORMATO_TS = "%Y-%m-%d %H:%M:%S"
 SIN_TRABAJO = "—sin trabajo—"
-CAUSA_ESPERA = "esperando trabajo"
+
+# Causas que NO son paros de produccion: se listan en la hoja Paros pero NO
+# suman a Nº paros, Min paro, Disponibilidad ni a los cruces.
+#   - "Esperando trabajo": tiempo ocioso entre trabajos (no lleva folio).
+#   - "Computadora apagada": corte de luz que el reinicio cierra. Es una
+#     omision del operador al apagar sin cerrar sesion, no una falla de la
+#     maquina, asi que no debe restarle disponibilidad al turno.
+# En minusculas sin espacios: es como las compara la BD.
+CAUSAS_NO_PRODUCTIVAS = ("esperando trabajo", "computadora apagada")
 
 
-def _es_espera(causa) -> bool:
-    """True si la causa es 'Esperando trabajo'.
+def _cuenta_como_paro(causa) -> bool:
+    """True si el paro debe sumarse a los agregados de produccion.
 
-    La espera (sin folio) NO cuenta como paro para el cruce: contamina los
-    datos por corrida y las duraciones. Se lista en la hoja Paros pero se
-    excluye de Nº/min derivados (segmento, Resumen, Cruces).
+    Inverso de `CAUSAS_NO_PRODUCTIVAS`: la espera de trabajo y el corte de luz
+    se muestran en la hoja Paros (quedan registrados) pero quedan fuera de
+    Nº/min derivados (segmento, Resumen, Cruces). Un paro sin causa SI cuenta:
+    no sabemos que fue y esconderlo seria peor que medirlo de mas.
     """
-    return str(causa or "").strip().lower() == CAUSA_ESPERA
+    return str(causa or "").strip().lower() not in CAUSAS_NO_PRODUCTIVAS
+
 
 MODALIDAD_NOMBRE = {
     "normal": "Normal",
@@ -147,8 +157,11 @@ def exportar_dia(fecha: str, ruta_destino: str):
             causa = p["descripcion"] or "(sin causa registrada)"
             zona = p["zona"] or "(sin zona)"
             folio = p["folio"]
-            espera = _es_espera(p["descripcion"])
-            if folio is not None:
+            # El corte de luz SI lleva folio (ocurrio con el trabajo cargado),
+            # asi que el filtro va ANTES de cualquier acumulacion para que no
+            # cuelte en el bloque "Por folio" del cruce.
+            productivo = _cuenta_como_paro(p["descripcion"])
+            if folio is not None and productivo:
                 keyf = (folio, p["num_part"] or "")
                 agf = paros_por_folio.setdefault(
                     keyf, {"paros": 0, "min": 0.0})
@@ -167,7 +180,7 @@ def exportar_dia(fecha: str, ruta_destino: str):
                     "Sin autorizar" if not p["fin_paro"] else "(sin registro)"
                 ),
             ])
-            if espera:
+            if not productivo:
                 continue
             if dur is not None:
                 por_causa[causa]["paros"] += 1
@@ -189,7 +202,10 @@ def exportar_dia(fecha: str, ruta_destino: str):
             s["total_cortes"] or 0,
             s["estado"] or "",
             s["minutos"] or 0.0,
-            len(paros),
+            # `num_paros` (no `len(paros)`): paros PRODUCTIVOS, los mismos que
+            # suman el Resumen. Aqui no hay tabla de detalle debajo que
+            # justifique el total bruto.
+            s["num_paros"] or 0,
         ])
         for t in trabajos:
             meta = t["cantidad_total"] or 0
@@ -221,8 +237,9 @@ def exportar_dia(fecha: str, ruta_destino: str):
                 key, {"cortado": 0, "conf": 0})
             agg["cortado"] += t["cantidad_sesion"] or 0
             agg["conf"] += conf_seg
-        # Paros del segmento desde BD (uno solo por paro, sin esperas): el
-        # primero que lo solapa en orden cronologico se lo queda.
+        # Paros del segmento desde BD (uno solo por paro, solo los
+        # productivos): el primero que lo solapa en orden cronologico se lo
+        # queda.
         vistos = set()
         base_filas = len(filas_trabajo) - len(trabajos)
         for i in range(base_filas, len(filas_trabajo)):
@@ -230,7 +247,7 @@ def exportar_dia(fecha: str, ruta_destino: str):
             ini_seg = f[9]
             fin_seg = None if f[10] == "En curso" else f[10]
             for p in paros_de_segmento(sid, ini_seg, fin_seg):
-                if p["id"] in vistos or _es_espera(p["descripcion"]):
+                if p["id"] in vistos or not _cuenta_como_paro(p["descripcion"]):
                     continue
                 vistos.add(p["id"])
                 f[13] += 1
@@ -292,20 +309,33 @@ def exportar_dia(fecha: str, ruta_destino: str):
         ("Sesiones", "=COUNTA(Sesiones!A2:A1048576)"),
         ("Cortes totales", "=SUM(Sesiones!E2:E1048576)"),
         ("Min producción", "=SUM(Sesiones!G2:G1048576)"),
-        # Paro = todo excepto "Esperando trabajo" (sin folio): la espera se
-        # informa aparte y no contamina disponibilidad ni duraciones.
+        # Paro = todo MENOS las causas no productivas (`CAUSAS_NO_PRODUCTIVAS`):
+        # la espera de trabajo (ociosa, sin folio) y el corte de luz. El corte
+        # de luz es una omision del operador al apagar sin cerrar sesion, no
+        # una falla de la maquina: restarle disponibilidad al turno seri
+        # penalizar al operador por algo que no controla. Se excluye con un
+        # criterio por causa sobre la misma columna.
         ("Min paro",
          "=SUMIFS(Paros!I2:I1048576,Paros!E2:E1048576,"
-         "\"<>Esperando trabajo\")"),
+         "\"<>Esperando trabajo\",Paros!E2:E1048576,"
+         "\"<>Computadora apagada\")"),
         ("Disponibilidad", "=IF(B4=0,0,1-B5/B4)"),
         ("Nº paros",
          "=COUNTIFS(Paros!A2:A1048576,\"<>\",Paros!E2:E1048576,"
-         "\"<>Esperando trabajo\")"),
+         "\"<>Esperando trabajo\",Paros!E2:E1048576,"
+         "\"<>Computadora apagada\")"),
         ("Segmentos folio×sesión", "=COUNTA(Trabajos!A2:A1048576)"),
+        # Informativas (NO entran en disponibilidad ni en el cruce): lo que se
+        # salio de los agregados se reporta aparte, no se esconde.
         ("Nº esperas",
          "=COUNTIF(Paros!E2:E1048576,\"Esperando trabajo\")"),
         ("Min espera",
          "=SUMIF(Paros!E2:E1048576,\"Esperando trabajo\",Paros!I2:I1048576)"),
+        ("Nº cortes de luz",
+         "=COUNTIF(Paros!E2:E1048576,\"Computadora apagada\")"),
+        ("Min computadora apagada",
+         "=SUMIF(Paros!E2:E1048576,\"Computadora apagada\","
+         "Paros!I2:I1048576)"),
     ]
     for i, (etiqueta, formula) in enumerate(kpis, start=2):
         ws_res.cell(row=i, column=1, value=etiqueta)
@@ -412,9 +442,18 @@ def exportar_dia(fecha: str, ruta_destino: str):
         "3. Arrastra: Filas=Causa/Zona/Folio, Valores=Suma de Duración min o Cuenta.",
         "",
         "Notas:",
-        "- Folio '—sin trabajo—' = paro sin trabajo (Primera pieza con permiso o espera de QR).",
+        "- Folio '—sin trabajo—' = paro sin trabajo (Primera pieza con permiso, espera de QR o corte de luz sin QR).",
         "- Trabajos: un renglon por segmento (folio x sesion) con Inicio/Fin propios. 'Detectados' es lo cortado en ESE segmento, 'Confirmados' lo validado al cerrarlo (0 si solo se pauso), 'Avance %' su aporte, 'Estado' si YA alcanzaba la meta en ese punto, y 'Nº paros'/'Min paro' solo los caidos en su ventana.",
-        "- Paro = todo excepto 'Esperando trabajo' (sin folio): Nº paros, Min paro y Disponibilidad la excluyen; se lista en Paros y se informa como 'Nº esperas'/'Min espera'.",
+        "- Paro = todo MENOS 'Esperando trabajo' y 'Computadora apagada': ambas "
+        "se listan en Paros pero quedan fuera de Nº paros, Min paro y "
+        "Disponibilidad (la espera es tiempo ocioso; el corte de luz es una "
+        "omisión del operador al apagar sin cerrar sesión, no una falla de la "
+        "máquina).",
+        "- Lo excluido no se esconde: se informa aparte como 'Nº esperas'/"
+        "'Min espera' y 'Nº cortes de luz'/'Min computadora apagada'.",
+        "- Un paro '(sin causa registrada)' sí cuenta como paro: si no se "
+        "registró causa, no sabemos qué fue y medirlo es más honesto que "
+        "esconderlo.",
         "- Resumen usa fórmulas sobre las hojas (se recalculan al abrir en Excel).",
         "- Cruces viene pre-calculado para lo más pedido: por operador, causa, zona y folio.",
     ]

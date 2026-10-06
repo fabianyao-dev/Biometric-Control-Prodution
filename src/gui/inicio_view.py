@@ -84,9 +84,13 @@ crash, cierre de ventana), al reiniciar `_cerrar_sesion_interrumpida` NO la
 recupera: los datos ya estan guardados por el checkpoint de 30 s
 (`_checkpoint_cortes`), asi que solo limpia y pide una sesion NUEVA:
 
-    1. El trabajo en curso queda 'Abierto' con el parcial de su checkpoint
-       (se retoma escaneando su QR; no hace falta autorizacion).
-    2. El paro en curso se cierra SIN causa (se fue la luz).
+    1. El trabajo en curso se CONFIRMA con lo detectado en su checkpoint: las
+       piezas ya se cortaron y no habra quien las vuelva a contar. Si alcanzo
+       la meta queda 'Cerrado', si no 'Abierto' con su parcial (se retoma
+       escaneando su QR; no hace falta autorizacion).
+    2. El paro en curso se cierra con la causa implicita "Computadora
+       apagada" (nadie autorizo nada, pero el reporte no debe mostrar paros
+       sin causa).
     3. La sesion pasa a 'Finalizada' con el total del checkpoint.
 
 La vista arranca deliberadamente SIN sesion (`sesion_id=None`): el header pide
@@ -98,6 +102,7 @@ import logging
 import threading
 import time
 from collections import deque
+from datetime import datetime, timedelta
 
 from PySide6.QtCore import Qt, QSize, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -115,12 +120,16 @@ from PySide6.QtWidgets import (
 
 from src import config
 from src.database import (
+    ESTADO_CERRADO,
     abrir_sesion,
     abrir_trabajo,
     actualizar_cortes_sesion,
     actualizar_detectados,
+    ahora_local,
     cerrar_sesion,
     cerrar_trabajo_modalidad,
+    confirmar_trabajo_por_apagon,
+    crear_paro_por_apagon,
     finalizar_paro,
     iniciar_paro,
     listar_causas_paro,
@@ -130,6 +139,7 @@ from src.database import (
     paro_en_curso,
     pausar_trabajo,
     recortar_inicio_segmento,
+    registrar_ultimo_corte,
     roles_con_permiso,
     rol_tiene_permiso_operador,
 )
@@ -779,12 +789,15 @@ class InicioView(QWidget):
         pedir autorizacion. Aqui solo se hace la limpieza para que el
         operador entre con una sesion NUEVA:
 
-        1. El trabajo en curso queda 'Abierto' con el parcial de su
-           checkpoint (se pasa tal cual: aqui no hay conteo vivo todavia) y su
-           segmento de `trabajos_sesiones` cerrado. Se retoma escaneando su
-           QR, que lo reactiva desde `cortes_detectados`.
-        2. El paro en curso se cierra SIN causa: se fue la luz, nadie
-           autoriza nada.
+        1. El trabajo en curso se CONFIRMA con lo detectado (se paso tal cual:
+           aqui no hay conteo vivo todavia). Las piezas ya se cortaron y no
+           habra quien las vuelva a contar, asi que no se dejan solo como
+           detectadas; si el folio llega a la meta queda 'Cerrado', si no
+           'Abierto' con su parcial y su segmento cerrado. Se retoma
+           escaneando su QR, que lo reactiva desde `cortes_confirmados`.
+        2. El paro en curso se cierra con la causa implicita "Computadora
+           apagada": se fue la luz y nadie autorizo nada, pero el reporte no
+           debe mostrar un paro "(sin causa registrada)".
         3. La sesion pasa a 'Finalizada' con el total del checkpoint.
 
         La vista queda deliberadamente SIN sesion (`sesion_id=None`): el
@@ -800,30 +813,57 @@ class InicioView(QWidget):
         operador_id = sesion["operador_id"]
         nombre = sesion["nombre"]
         total = sesion["total_cortes"] or 0
-        # 1) Parcial del trabajo: se re-pasa el valor del checkpoint para no
-        # pisar `cortes_detectados` (aun no hay contador vivo que lo supere).
+        # 1) Parcial del trabajo: se re-pasa el valor del checkpoint (aun no
+        # hay contador vivo que lo supere) y se CONFIRMA, no solo se pausa.
         trabajo = None
+        estado_trabajo = None
+        confirmados = 0
+        # El folio se guarda ANTES de cerrar el trabajo: `confirmar_trabajo_
+        # por_apagon` le pone `fecha_fin`, asi que despues
+        # `obtener_trabajo_abierto` ya no lo devolveria y el paro del corte de
+        # luz saldria sin trabajo aunque la maquina cortara con el cargado.
+        folio_en_curso = None
         try:
             trabajo = obtener_trabajo_abierto(sesion_id)
             if trabajo is not None:
-                pausar_trabajo(trabajo["folio"],
-                               trabajo["cortes_detectados"] or 0)
-                log.info("Trabajo %s queda Abierto con %s/%s piezas (sesion %s "
-                         "interrumpida)", trabajo["folio"],
-                         trabajo["cortes_detectados"] or 0,
+                folio_en_curso = trabajo["folio"]
+                detectados = trabajo["cortes_detectados"] or 0
+                ok, estado_trabajo, confirmados = confirmar_trabajo_por_apagon(
+                    trabajo["folio"], detectados
+                )
+                if not ok:
+                    raise RuntimeError(estado_trabajo)
+                log.info("Trabajo %s queda %s con %s/%s piezas (sesion %s "
+                         "interrumpida: corte de luz)", trabajo["folio"],
+                         estado_trabajo, confirmados,
                          trabajo["cantidad_total"], sesion_id)
         except Exception:  # noqa: BLE001 - la limpieza no debe tumbar el arranque
-            log.warning("No se pudo pausar el trabajo de la sesion %s",
+            log.warning("No se pudo cerrar el trabajo de la sesion %s",
                         sesion_id, exc_info=True)
+            estado_trabajo = None
         # 2) Paro en curso (Primera pieza, 'Esperando trabajo' o el del boton
-        # PARO): se cierra sin causa para no dejar filas 'En curso' sobre una
-        # sesion ya Finalizada.
+        # PARO): se cierra con la causa implicita del corte de luz para no
+        # dejar filas 'En curso' ni "(sin causa registrada)" sobre una sesion
+        # ya Finalizada.
         try:
             paro = paro_en_curso(sesion_id)
             if paro is not None:
-                finalizar_paro(paro, None, operador_id)
-                log.info("Paro %s cerrado sin causa por corte de luz (sesion "
-                         "%s)", paro, sesion_id)
+                causa_id = self._causa_id("Computadora apagada")
+                if causa_id is None:
+                    log.warning("Causa 'Computadora apagada' inactiva o "
+                                "inexistente; paro %s sin causa", paro)
+                finalizar_paro(paro, causa_id, operador_id)
+                log.info("Paro %s cerrado por corte de luz (sesion %s, causa "
+                         "%s)", paro, sesion_id, causa_id)
+            else:
+                # La maquina CORRIA cuando se fue la luz: no habria fila en
+                # curso que cerrar, pero el hueco quedaria sin medir. Se
+                # escribe el paro entero desde el ultimo corte/arranque
+                # conocido hasta el reinicio.
+                self._reconstruir_paro_apagon(
+                    sesion_id, operador_id, sesion["ultimo_corte"],
+                    folio=folio_en_curso,
+                )
         except Exception:  # noqa: BLE001 - idem
             log.warning("No se pudo cerrar el paro en curso de la sesion %s",
                         sesion_id, exc_info=True)
@@ -835,12 +875,20 @@ class InicioView(QWidget):
                         exc_info=True)
         self._refrescar_operador()
         self._refrescar_estado_maquina()
-        if trabajo is not None:
+        if trabajo is not None and estado_trabajo == ESTADO_CERRADO:
+            self._estado(
+                f"Corte de luz: la sesion de {nombre} se cerro con {total} "
+                f"cortes. El trabajo {trabajo['folio']} completo la meta y se "
+                f"cerro con {confirmados}/{trabajo['cantidad_total']} piezas "
+                "confirmadas. Inicia sesion para el siguiente.",
+                "procesando",
+            )
+        elif trabajo is not None:
             self._estado(
                 f"Corte de luz: la sesion de {nombre} se cerro con {total} "
                 f"cortes. El trabajo {trabajo['folio']} sigue abierto con "
-                f"{trabajo['cortes_detectados'] or 0}/{trabajo['cantidad_total']}"
-                f" piezas: inicia sesion y escanea su QR para continuar.",
+                f"{confirmados}/{trabajo['cantidad_total']} piezas "
+                "confirmadas: inicia sesion y escanea su QR para continuar.",
                 "procesando",
             )
         else:
@@ -851,6 +899,49 @@ class InicioView(QWidget):
             )
         log.info("Sesion %s interrumpida cerrada por corte de luz (operador "
                  "%s, %s cortes)", sesion_id, nombre, total)
+
+    def _reconstruir_paro_apagon(self, sesion_id, operador_id, ultimo_corte,
+                                  folio=None):
+        """Escribe el paro del corte de luz cuando la maquina CORRIA.
+
+        Cubre el caso que `paro_en_curso` no alcanza: si no habia ninguna fila
+        en curso, la maquina estaba EN MARCHA (contando) y no en paro. Sin
+        esto, el tiempo desde el ultimo corte hasta el reinicio no aparece en
+        ningun lado y el reporte sale como si la maquina hubiera producido
+        todo ese tiempo sin interrupcion.
+
+        El INTERVALO va del ultimo corte (o arranque) conocido al reinicio, no
+        del reinicio: medir desde el reinicio daria un paro de cero. `fin` es
+        el instante en que se detecto el apagon, para que el hueco no se
+        alargue con las horas que el equipo estuvo apagado.
+
+        `folio` lo pasa el llamador y es el trabajo que estaba ABIERTO al
+        cortarse la luz. No se vuelve a consultar `obtener_trabajo_abierto`
+        porque para este punto ese trabajo ya fue cerrado por
+        `confirmar_trabajo_por_apagon` y la consulta exigiria `fecha_fin` nula,
+        de ahi que antes saliera 'sin trabajo'. Sin folio, el paro queda sin
+        trabajo asociado.
+        """
+        if not ultimo_corte:
+            # Sin ancla no hay intervalo honesto: se cae a `fin` (paro de un
+            # instante) en vez de medir desde el inicio de la sesion, que
+            # inventaria horas de paro que el operador no hizo.
+            log.warning("Sesion %s sin 'ultimo_corte' registrado; el paro del "
+                        "corte de luz se registra de duracion cero", sesion_id)
+        fin = ahora_local()
+        try:
+            causa_id = self._causa_id("Computadora apagada")
+            paro_id = crear_paro_por_apagon(
+                sesion_id, folio, ultimo_corte, operador_id, causa_id, fin=fin,
+            )
+            log.info("Paro %s reconstruido por corte de luz (sesion %s, folio "
+                     "%s, desde %s hasta %s)", paro_id, sesion_id, folio,
+                     ultimo_corte, fin)
+            return paro_id
+        except Exception:  # noqa: BLE001 - la limpieza no debe tumbar el arranque
+            log.warning("No se pudo reconstruir el paro del corte de luz de "
+                        "la sesion %s", sesion_id, exc_info=True)
+            return None
 
     def _abrir_huella_cierre(self):
         """Cierre de sesion: requiere autorizacion del operador de la sesion
@@ -1180,8 +1271,16 @@ class InicioView(QWidget):
                 and causa_id == self._causa_mantenimiento_id())
 
     def _causa_mantenimiento_id(self):
+        return self._causa_id("mantenimiento")
+
+    def _causa_id(self, descripcion):
+        """Id de una causa por su descripcion (comparacion tolerante a
+        mayusculas/espacios). None si no existe o esta inactiva: la columna
+        `causa_id` de `paros_produccion` es nullable y el reporte muestra
+        "(sin causa registrada)". Las llama el sistema, nunca el operador."""
+        objetivo = str(descripcion).strip().lower()
         for causa in listar_causas_paro(activas_solo=True):
-            if str(causa["descripcion"]).strip().lower() == "mantenimiento":
+            if str(causa["descripcion"]).strip().lower() == objetivo:
                 return causa["id"]
         return None
 
@@ -1430,15 +1529,51 @@ class InicioView(QWidget):
 
         Respaldos ante apagones: si se va la luz, la sesion conserva el
         ultimo conteo en la base de datos (ver config.CORTES_GUARDAR_INTERVALO_MS).
+
+        Ademas persiste `ultimo_corte`: el HAL lo lleva en memoria, asi que
+        sin esto, al reiniciar tras un corte de luz no habria forma de saber
+        desde que momento medir el paro con la maquina en marcha (quedaria
+        en cero). El ancla es el ULTIMO ARRANQUE: la corrida que se corta
+        empezo ahi, no en el corte anterior. Tomar el min con el ultimo corte
+        alargaba el paro hacia atras (hasta el corte previo, que pudovenir de
+        una corrida ya cerrada); el corte solo sirve de respaldo si el HAL no
+        expone arranque.
         """
         if self.sesion_id is not None:
             actualizar_cortes_sesion(self.sesion_id, self.controlador.cortes_totales())
+            ancla = self._momento_ultimo_arranque() or self._momento_ultimo_corte()
+            if ancla:
+                registrar_ultimo_corte(self.sesion_id, ancla)
         if self._trabajo is not None:
             actualizar_detectados(
                 self._trabajo["folio"], self._cortes_trabajo()
             )
         QTimer.singleShot(
             config.CORTES_GUARDAR_INTERVALO_MS, self._checkpoint_cortes
+        )
+
+    def _momento_ultimo_corte(self):
+        """Timestamp local del ultimo corte real, o None si el HAL no lo da."""
+        ts = self._segundos_desde(self.controlador.segundos_sin_corte)
+        return ts
+
+    def _momento_ultimo_arranque(self):
+        """Timestamp local del ultimo arranque/reanudacion, o None."""
+        return self._segundos_desde(self.controlador.segundos_desde_arranque)
+
+    def _segundos_desde(self, getter):
+        """Convierte 'hace N segundos' (o None) a timestamp local 'YYYY-MM-DD
+        HH:MM:SS'. Devuelve None si el HAL no expone ese dato."""
+        try:
+            segundos = getter()
+        except Exception:  # noqa: BLE001 - un checkpoint no debe fallar
+            log.debug("El HAL no expone segundos desde un evento", exc_info=True)
+            return None
+        if segundos is None or segundos < 0:
+            return None
+        ahora = datetime.strptime(ahora_local(), "%Y-%m-%d %H:%M:%S")
+        return (ahora - timedelta(seconds=float(segundos))).strftime(
+            "%Y-%m-%d %H:%M:%S"
         )
 
     def _verificar_inactividad(self):
@@ -1687,16 +1822,10 @@ class InicioView(QWidget):
         return incorporados
 
     def _causa_primera_pieza_id(self):
-        for causa in listar_causas_paro(activas_solo=True):
-            if str(causa["descripcion"]).strip().lower() == "primera pieza":
-                return causa["id"]
-        return None
+        return self._causa_id("primera pieza")
 
     def _causa_espera_id(self):
-        for causa in listar_causas_paro(activas_solo=True):
-            if str(causa["descripcion"]).strip().lower() == "esperando trabajo":
-                return causa["id"]
-        return None
+        return self._causa_id("esperando trabajo")
 
     def _abrir_espera_trabajo(self):
         """Abre el paro implicito 'Esperando trabajo' si aplica.

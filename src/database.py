@@ -71,10 +71,26 @@ PERMISOS_POR_DEFECTO = {
                       "autorizar_mantenimiento"],
 }
 
-# Causas de paro que se crean por defecto. "Primera pieza" y "Esperando
-# trabajo" son IMPLICITAS (las abre/cierra el sistema, no el operador: por
-# eso "Primera pieza" no sale en el selector de causas).
-CAUSAS_PARO_POR_DEFECTO = ["Primera pieza", "mantenimiento", "Esperando trabajo"]
+# Causas de paro que se crean por defecto. "Primera pieza" y "Computadora
+# apagada" son IMPLICITAS (las pone/quita el sistema, no el operador: por eso
+# no salen en el selector de causas). "Computadora apagada" la asigna el
+# reinicio al paro que quedo en curso tras un corte de luz, para que el
+# reporte no muestre paros "(sin causa registrada)".
+CAUSAS_PARO_POR_DEFECTO = ["Primera pieza", "mantenimiento", "Esperando trabajo",
+                          "Computadora apagada"]
+
+# Causas que NUNCA se ofrecen al operador en el selector: las pone y las
+# quita el sistema. Se comparan en minusculas sin espacios.
+CAUSAS_OCULTAS_EN_SELECTOR = ("primera pieza", "computadora apagada")
+
+# Causas que NO son paros de PRODUCCION: el reporte las lista una fila en la
+# hoja Paros, pero no las suma a minutos/paros de maquina (contaminarian
+# disponibilidad, duraciones y cruces). "Esperando trabajo" es el tiempo
+# ocioso entre trabajos; "Computadora apagada" es el corte de luz que cierra
+# el reinicio (omision del operador al apagar sin cerrar sesion, no una
+# falla de la maquina). Se guardan en minusculas sin espacios: es como las
+# consulta el SQL.
+CAUSAS_NO_PRODUCTIVAS = ("esperando trabajo", "computadora apagada")
 
 # Zonas de la maquina (croquis del punto 7). Se siembran en la tabla
 # `zonas_maquina` (soft-delete) con su posicion de orden e icono por defecto.
@@ -117,11 +133,23 @@ def obtener_conexion():
 # del paro `p` ([inicio_paro, fin_paro o ? = ahora si sigue en curso]).
 # Recibe un solo parametro (?) con el timestamp actual. Si hay varios
 # segmentos solapados se elige el de inicio mas reciente.
+#
+# ASIMETRIA DEL SOLAPE (a proposito, no es descuido):
+#   - `ts.fecha_inicio <= fin_paro` es INCLUSIVO: el segmento pudo empezar
+#     el mismo segundo en que el paro cerro. Los timestamps son de segundo,
+#     asi que "empezar y terminar en X" no prueba que uno sea posterior al
+#     otro; sin el `<=` un paro de un segundo perderia su folio.
+#   - `ts.fecha_fin > p.inicio_paro` es ESTRICTO: aqui la inclusividad SI
+#     fabricaba datos. Cerrar el trabajo y abrir el paro siguiente ocurre en
+#     el MISMO segundo, y con `>=` ese par de intervalos consecutivos se
+#     contaba como solapado: el paro se colgaba del folio recien cerrado
+#     (un corte de luz tras cerrar el trabajo mostraba el folio viejo).
+#     Compartir solo el punto final no es solape: el trabajo ya no estaba.
 _SQL_FOLIO_SOLAPADO = (
     "SELECT ts.folio FROM trabajos_sesiones ts "
     "WHERE ts.sesion_id=p.sesion_id "
     "AND ts.fecha_inicio <= COALESCE(p.fin_paro, ?) "
-    "AND (ts.fecha_fin IS NULL OR ts.fecha_fin >= p.inicio_paro) "
+    "AND (ts.fecha_fin IS NULL OR ts.fecha_fin > p.inicio_paro) "
     "ORDER BY ts.fecha_inicio DESC LIMIT 1"
 )
 
@@ -131,6 +159,20 @@ _SQL_FOLIO_SOLAPADO = (
 _SQL_ES_ESPERA = (
     "EXISTS (SELECT 1 FROM causas_paro c "
     "WHERE c.id=p.causa_id AND LOWER(TRIM(c.descripcion))='esperando trabajo')"
+)
+
+# Filtro para CONTAR paros PRODUCTIVOS: descarta los de
+# `CAUSAS_NO_PRODUCTIVAS` (espera de trabajo y corte de luz). Es un
+# `NOT EXISTS` sobre `causas_paro` para no arrastrar el JOIN. Un paro SIN
+# causa (`causa_id IS NULL`) SI cuenta: no sabemos que fue y dejarlo fuera
+# esconderia paros reales. Los literales seArman de la constante del modulo
+# (no vienen del usuario) y se comparan en minusculas sin espacios, como
+# los guarda el resto del modulo.
+_SQL_EXCLUYE_NO_PRODUCTIVAS = (
+    "NOT EXISTS (SELECT 1 FROM causas_paro c "
+    "WHERE c.id=p.causa_id AND LOWER(TRIM(c.descripcion)) IN ("
+    + ",".join(f"'{c}'" for c in CAUSAS_NO_PRODUCTIVAS)
+    + "))"
 )
 
 
@@ -539,6 +581,21 @@ def init_db():
             "ALTER TABLE trabajos_sesiones "
             "ADD COLUMN modalidad TEXT NOT NULL DEFAULT 'normal'"
         )
+
+    # Ultimo corte de la sesion: momento en que el HAL registro el ultimo
+    # corte REAL (o el arranque/reanudacion, si todavia no corto). El HAL lo
+    # lleva en memoria (`_ultimo_corte`), asi que sin persistirlo se pierde
+    # con la luz: al reiniciar tras un apagon no habia forma de saber desde
+    # cuando medir el paro implicito, y con trabajo en marcha la sesion
+    # interrumpida se cerraba SIN registrar ningun paro.
+    # Se usa como INICIO del paro "Computadora apagada" reconstruido.
+    cols_ses = [
+        r[1]
+        for r in cur.execute("PRAGMA table_info(sesiones_produccion)").fetchall()
+    ]
+    if "ultimo_corte" not in cols_ses:
+        cur.execute("ALTER TABLE sesiones_produccion ADD COLUMN ultimo_corte "
+                    "TIMESTAMP")
 
     # Paro -> trabajo (sesion con N trabajos, cada trabajo con M paros): los
     # paros colgaban solo de la sesion y el cruce paro<->folio habia que
@@ -1217,6 +1274,23 @@ def actualizar_cortes_sesion(sesion_id: int, total_cortes: int):
     conn.close()
 
 
+def registrar_ultimo_corte(sesion_id: int, momento=None):
+    """Persiste el momento del ultimo corte REAL (o del arranque/reanudacion).
+
+    El HAL lleva `_ultimo_corte` en memoria, asi que sin esto se pierde con
+    la luz. Se escribe junto al checkpoint de cortes para que al reiniciar
+    tras un apagon se pueda reconstruir el paro implicito desde ese instante
+    y no desde el reinicio (que lo dejaria en cero).
+    """
+    conn = obtener_conexion()
+    conn.execute(
+        "UPDATE sesiones_produccion SET ultimo_corte=? WHERE id=?",
+        (momento or ahora_local(), sesion_id),
+    )
+    conn.commit()
+    conn.close()
+
+
 def sesion_activa_actual():
     """Devuelve el id de la sesion Activa vigente o None."""
     conn = obtener_conexion()
@@ -1233,12 +1307,13 @@ def obtener_sesion_interrumpida():
 
     El cierre normal siempre finaliza la sesion (estado != 'Activa'), asi que
     una sesion 'Activa' al arrancar significa que la app se cerro sin pasar
-    por `cerrar_sesion`. Devuelve id, operador_id, nombre y el total de
-    cortes del ultimo checkpoint para poder retomarla.
+    por `cerrar_sesion`. Devuelve id, operador_id, nombre, el total de
+    cortes del ultimo checkpoint y `ultimo_corte` (momento del ultimo corte
+    real o del arranque: el ancla para reconstruir el paro del corte de luz).
     """
     conn = obtener_conexion()
     row = conn.execute(
-        "SELECT s.id, s.operador_id, o.nombre, s.total_cortes "
+        "SELECT s.id, s.operador_id, o.nombre, s.total_cortes, s.ultimo_corte "
         "FROM sesiones_produccion s "
         "JOIN operadores o ON o.id=s.operador_id "
         "WHERE s.estado='Activa' ORDER BY s.id DESC LIMIT 1"
@@ -1427,6 +1502,70 @@ def pausar_trabajo(folio: int, cantidad_detectada: int):
     )
     conn.commit()
     conn.close()
+
+
+def confirmar_trabajo_por_apagon(folio: int, cantidad_detectada: int):
+    """Confirma lo DETECTADO al cerrar la sesion cortada por un apagón.
+
+    Es la excepcion a `pausar_trabajo`: en la pausa normal las piezas quedan
+    solo como detectadas (nadie las valido), pero tras un corte de luz las
+    piezas YA SE CORTARON y no habra quien las vuelva a contar, asi que se
+    confirman tal cual. De lo contrario el folio queda con mas detectados que
+    confirmados y el reporte muestra la diferencia comoproduccion perdida.
+
+    `confirmados` nunca baja: se queda en `max(previo, detectados)`. Si el
+    folio alcanza la meta queda 'Cerrado'; si no, 'Abierto' y retomable
+    re-escaniendo su QR. Ademas repara los segmentos ANTERIORES del mismo
+    folio que se quedaron sin confirmar (pausados antes del corte de luz),
+    para que la suma de segmentos cuadre con el confirmado global.
+    Devuelve (ok, estado_final, confirmados_global).
+    """
+    folio = int(folio)
+    conn = obtener_conexion()
+    trabajo = conn.execute(
+        "SELECT estado, cantidad_total, cortes_detectados, cortes_confirmados "
+        "FROM trabajos WHERE folio=?", (folio,)
+    ).fetchone()
+    if trabajo is None or trabajo["estado"] != ESTADO_ABIERTO:
+        conn.close()
+        return False, "El trabajo no esta abierto.", 0
+    detectados = max(int(cantidad_detectada),
+                     int(trabajo["cortes_detectados"] or 0))
+    previos = int(trabajo["cortes_confirmados"] or 0)
+    confirmados = max(previos, detectados)
+    meta = int(trabajo["cantidad_total"] or 0)
+    estado = ESTADO_CERRADO if meta and confirmados >= meta else ESTADO_ABIERTO
+    ahora = ahora_local()
+    conn.execute(
+        "UPDATE trabajos SET estado=?, fecha_fin=?, cortes_confirmados=?, "
+        "cortes_detectados=? WHERE folio=?",
+        (estado, ahora, confirmados, detectados, folio),
+    )
+    # Segmentos previos del folio que quedaron pausados sin confirmar: se
+    # igualan a lo detectado en ellos (solo el segmento ABIERTO de esta
+    # sesion, cerrado justo despues, se actualiza aparte con su delta).
+    conn.execute(
+        "UPDATE trabajos_sesiones SET confirmados=cantidad "
+        "WHERE folio=? AND fecha_fin IS NOT NULL AND confirmados<cantidad",
+        (folio,),
+    )
+    base = conn.execute(
+        "SELECT base FROM trabajos_sesiones "
+        "WHERE folio=? AND fecha_fin IS NULL", (folio,)
+    ).fetchone()
+    if base is None:
+        conn.close()
+        return False, "No se encontro el segmento de sesion abierto.", 0
+    delta_sesion = detectados - base["base"]
+    conn.execute(
+        "UPDATE trabajos_sesiones SET cantidad=?, fecha_fin=?, "
+        "modalidad='parcial', confirmados=?, estado=? "
+        "WHERE folio=? AND fecha_fin IS NULL",
+        (delta_sesion, ahora, delta_sesion, estado, folio),
+    )
+    conn.commit()
+    conn.close()
+    return True, estado, confirmados
 
 
 def cerrar_trabajo_modalidad(folio: int, cantidad: int,
@@ -1710,6 +1849,41 @@ def finalizar_paro(paro_id: int, causa_id: int, operador_id: int,
     conn.close()
 
 
+def crear_paro_por_apagon(sesion_id: int, folio: int | None, inicio: str,
+                          operador_id: int, causa_id: int | None,
+                          fin: str | None = None) -> int:
+    """Crea un paro YA CERRADO con causa, spanning [inicio, fin] (BACKFILL).
+
+    Es el caso que NO cubre `iniciar_paro`: el proceso estaba VIVO cuando
+    arranco el intervalo (la maquina corria) y MURIO sin cerrarlo, asi que no
+    hay fila en curso que cerrar; hay que escribirla entera. Se usa al
+    reiniciar tras un corte de luz con la maquina en marcha, para que el
+    tiempo en que la maquina estuvo producing-sin-registro no se pierda.
+
+    `inicio` es el ultimo corte/arranque conocido (columna
+    `sesiones_produccion.ultimo_corte`), NO el reinicio: medir desde el
+    reinicio daria un paro de cero y dejaria el hueco sin medir. Si `inicio`
+    es nulo o posterior a `fin`, se cae a `fin` (paro de un instante) en vez
+    de inventar una duracion.
+    """
+    fin = fin or ahora_local()
+    # Un inicio posterior al fin (o ausente) no se puede usar: se degrada al
+    # propio `fin` para no generar un intervalo negativo.
+    if not inicio or str(inicio) > str(fin):
+        inicio = fin
+    conn = obtener_conexion()
+    cur = conn.execute(
+        "INSERT INTO paros_produccion (sesion_id, folio, causa_id, "
+        "inicio_paro, fin_paro, autorizado_por_operador_id) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (sesion_id, folio, causa_id, inicio, fin, operador_id),
+    )
+    conn.commit()
+    nuevo_id = cur.lastrowid
+    conn.close()
+    return nuevo_id
+
+
 def listar_zonas_maquina(activas_solo=True):
     """Zonas del croquis (punto 7) con su geometria libre.
 
@@ -1835,8 +2009,9 @@ def listar_sesiones_por_fecha(fecha: str):
     """Sesiones cuya fecha_inicio cae en `fecha` ('YYYY-MM-DD').
 
     Base del export por dia: todas las sesiones de ese dia con operador,
-    duracion en minutos y numero de paros (sin "Esperando trabajo": la
-    espera no cuenta como paro para el cruce).
+    duracion en minutos y numero de paros PRODUCTIVOS (excluye
+    `CAUSAS_NO_PRODUCTIVAS`: la espera de trabajo y el corte de luz, que no
+    son paros de la maquina y contaminarian el cruce).
     """
     conn = obtener_conexion()
     ahora = ahora_local()
@@ -1847,10 +2022,7 @@ def listar_sesiones_por_fecha(fecha: str):
         "                      (julianday(?)-julianday(s.fecha_inicio))*1440), 1) "
         "       AS minutos, "
         "       (SELECT COUNT(*) FROM paros_produccion p "
-        "        LEFT JOIN causas_paro c ON c.id=p.causa_id "
-        "        WHERE p.sesion_id=s.id "
-        "        AND (c.descripcion IS NULL "
-        "             OR LOWER(TRIM(c.descripcion))<>'esperando trabajo')) "
+        "        WHERE p.sesion_id=s.id AND " + _SQL_EXCLUYE_NO_PRODUCTIVAS + ") "
         "       AS num_paros "
         "FROM sesiones_produccion s "
         "JOIN operadores o ON o.id=s.operador_id "

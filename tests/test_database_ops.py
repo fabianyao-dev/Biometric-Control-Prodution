@@ -498,6 +498,479 @@ def test_trabajos_de_sesion_solo_los_de_esa_sesion(db):
 
 
 # ---------------------------------------------------------------------------
+# Cierre por APAGON (reinicio tras un corte de luz)
+# ---------------------------------------------------------------------------
+
+
+def test_apagon_confirma_los_detectados_del_trabajo(db):
+    """Tras un apagon los detectados se CONFIRMAN, no solo se pausan.
+
+    Es la diferencia con `pausar_trabajo`: las piezas ya se cortaron y no
+    habra quien las vuelva a contar, asi que dejarlas solo como detectadas
+    hacia que el folio quedara con mas detectados que confirmados.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+    database.abrir_trabajo(1009, sesion_id, "PZA-G", 200)
+    database.actualizar_detectados(1009, 145)
+
+    ok, estado, confirmados = database.confirmar_trabajo_por_apagon(1009, 145)
+
+    assert ok is True
+    assert confirmados == 145
+    assert estado == database.ESTADO_ABIERTO, "145 de 200 NO cierra el folio"
+
+    conn = database.obtener_conexion()
+    try:
+        trabajo = conn.execute(
+            "SELECT * FROM trabajos WHERE folio=1009"
+        ).fetchone()
+        segmento = conn.execute(
+            "SELECT * FROM trabajos_sesiones WHERE folio=1009"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert trabajo["cortes_confirmados"] == 145
+    assert trabajo["cortes_detectados"] == 145
+    assert trabajo["fecha_fin"] is not None
+    assert trabajo["estado"] == database.ESTADO_ABIERTO
+    # El segmento de la sesion tambnien se cierra, y ya no queda descuadrado.
+    assert segmento["fecha_fin"] is not None
+    assert segmento["cantidad"] == 145
+    assert segmento["confirmados"] == 145
+
+
+def test_apagon_cierra_el_trabajo_si_ya_alcanzo_la_meta(db):
+    """Si los detectados llegan a la meta, el folio queda 'Cerrado'."""
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+    database.abrir_trabajo(1010, sesion_id, "PZA-H", 150)
+    database.actualizar_detectados(1010, 150)
+
+    ok, estado, confirmados = database.confirmar_trabajo_por_apagon(1010, 150)
+
+    assert (ok, estado, confirmados) == (True, database.ESTADO_CERRADO, 150)
+
+    conn = database.obtener_conexion()
+    try:
+        trabajo = conn.execute(
+            "SELECT * FROM trabajos WHERE folio=1010"
+        ).fetchone()
+        segmento = conn.execute(
+            "SELECT * FROM trabajos_sesiones WHERE folio=1010"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert trabajo["estado"] == database.ESTADO_CERRADO
+    assert trabajo["cortes_confirmados"] == 150
+    assert segmento["estado"] == database.ESTADO_CERRADO
+    # Un folio Cerrado ya NO se puede reabrir escaneando su QR.
+    ok_reabrir, _ = database.abrir_trabajo(1010, sesion_id, "PZA-H", 150)
+    assert ok_reabrir is False
+
+
+def test_apagon_no_rebaja_los_confirmados_previos(db):
+    """`confirmar_trabajo_por_apagon` nunca deja confirmados < detectados.
+
+    Si el checkpoint llegara atras (contador reiniciado, BD restaurada), la
+    funcion se queda con el maximo: perder un confirmado ya validado seria
+    peor que dejar detectados > confirmados.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+    database.abrir_trabajo(1011, sesion_id, "PZA-I", 200)
+    database.actualizar_detectados(1011, 180)
+    database.cerrar_trabajo_modalidad(1011, 180, 200, modalidad="parcial",
+                                     detectados=180)
+    database.abrir_trabajo(1011, sesion_id, "PZA-I", 200)
+    # El checkpoint de esta sesion quedo atras (no deberia pasar, pero el
+    # guardado nunca debe perder lo ya confirmado).
+    database.actualizar_detectados(1011, 150)
+
+    ok, _estado, confirmados = database.confirmar_trabajo_por_apagon(1011, 150)
+
+    assert ok is True
+    assert confirmados == 180, "los confirmados previos no se deben rebajar"
+
+
+def test_apagon_repara_los_segmentos_pausados_sin_confirmar(db):
+    """Los segmentos previos del folio que pausaron sin confirmar se igualan.
+
+    Si no, el folio queda con `cortes_confirmados` = 145 pero los segmentos
+    (que es lo que suma el reporte) seguirian reportando 0.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion1 = database.abrir_sesion(operador_id)
+    database.abrir_trabajo(1012, sesion1, "PZA-J", 300)
+    database.actualizar_detectados(1012, 100)
+    database.pausar_trabajo(1012, 100)
+
+    sesion2 = database.abrir_sesion(operador_id)
+    database.abrir_trabajo(1012, sesion2, "PZA-J", 300)
+    database.actualizar_detectados(1012, 145)
+    database.confirmar_trabajo_por_apagon(1012, 145)
+
+    segmentos = database.listar_trabajos_de_sesion(sesion1) + \
+        database.listar_trabajos_de_sesion(sesion2)
+    suma_confirmados = sum(s["confirmados"] or 0 for s in segmentos)
+    conn = database.obtener_conexion()
+    try:
+        trabajo = conn.execute(
+            "SELECT cortes_confirmados FROM trabajos WHERE folio=1012"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert suma_confirmados == trabajo["cortes_confirmados"] == 145
+
+
+def test_apagon_con_paro_en_curso_lo_cierra_con_causa(db):
+    """El reinicio debe poder cerrar el paro abierto con la causa implicita.
+
+    `causa_id` es nullable, asi que el fallo (causa None) NO revienta: el
+    reporte sale con "(sin causa registrada)". Por eso el test mira el id.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+    paro_id = database.iniciar_paro(sesion_id, None)
+
+    causa_id = None
+    for causa in database.listar_causas_paro(activas_solo=True):
+        if str(causa["descripcion"]).strip().lower() == "computadora apagada":
+            causa_id = causa["id"]
+    assert causa_id is not None, "la causa implicita del corte de luz debe existir"
+
+    database.finalizar_paro(paro_id, causa_id, operador_id)
+
+    conn = database.obtener_conexion()
+    try:
+        paro = conn.execute(
+            "SELECT * FROM paros_produccion WHERE id=?", (paro_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert paro["causa_id"] == causa_id, "el paro no debe quedar sin causa"
+    assert paro["fin_paro"] is not None
+
+
+def test_apagon_con_trabajo_lega_el_folio_al_paro_reconstruido(db):
+    """Regresion: el paro del corte de luz debe conservar el folio.
+
+    Reproduce el ORDEN real de `_cerrar_sesion_interrumpida`: primero
+    `confirmar_trabajo_por_apagon` (que le pone `fecha_fin` al trabajo) y
+    DESPUES se reconstruye el paro. Si el folio se vuelve a pedir con
+    `obtener_trabajo_abierto` en ese segundo paso, la consulta exige
+    `fecha_fin IS NULL`, no encuentra el trabajo ya cerrado y el paro sale
+    'sin trabajo' aunque la maquina cortara con el folio cargado.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+    database.abrir_trabajo(1040, sesion_id, "PZA-APLIE", 50)
+    database.registrar_ultimo_corte(sesion_id, "2026-09-29 10:47:52")
+
+    # Paso 1 de la recuperacion: el trabajo se confirma y queda CERRADO.
+    trabajo = database.obtener_trabajo_abierto(sesion_id)
+    assert trabajo is not None
+    folio_en_curso = trabajo["folio"]
+    database.confirmar_trabajo_por_apagon(
+        folio_en_curso, trabajo["cortes_detectados"] or 0
+    )
+    assert database.obtener_trabajo_abierto(sesion_id) is None, (
+        "tras confirmar, el trabajo ya no debe verse como abierto"
+    )
+
+    # Paso 2: el paro se reconstruye con el folio capturado ANTES del cierre.
+    database.crear_paro_por_apagon(
+        sesion_id, folio_en_curso, "2026-09-29 10:47:52", operador_id,
+        _causa_id_de(database, "computadora apagada"),
+        fin="2026-09-29 10:49:11",
+    )
+
+    paros = database.obtener_paros_de_sesion(sesion_id)
+    assert len(paros) == 1
+    assert paros[0]["folio"] == 1040, (
+        "el paro del corte de luz perdio el folio del trabajo en curso"
+    )
+
+
+# ---------------------------------------------------------------------------
+# El corte de luz NO es un paro de produccion (reportes)
+# ---------------------------------------------------------------------------
+
+
+def _causa_id_de(database, descripcion):
+    for causa in database.listar_causas_paro(activas_solo=True):
+        if str(causa["descripcion"]).strip().lower() == descripcion:
+            return causa["id"]
+    raise AssertionError(f"falta la causa '{descripcion}'")
+
+
+def test_corte_de_luz_no_cuenta_como_paro_de_produccion(db):
+    """`listar_sesiones_por_fecha` no debe sumar el corte de luz a `num_paros`.
+
+    Es una omision del operador al apagar sin cerrar sesion, no una falla de
+    la maquina: contarla penaliza la disponibilidad del turno. El paro de luz
+    SI se registra (esta en la hoja Paros), solo queda fuera del agregado.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+
+    # Un paro real de maquina y el corte de luz de la sesion.
+    database.finalizar_paro(database.iniciar_paro(sesion_id, None),
+                            _causa_id_de(database, "mantenimiento"), operador_id)
+    database.finalizar_paro(database.iniciar_paro(sesion_id, None),
+                            _causa_id_de(database, "computadora apagada"),
+                            operador_id)
+    database.cerrar_sesion(sesion_id, 10)
+
+    # La sesion arranca hoy (ZONA de la planta), asi que se consulta el dia
+    # local de `ahora_local()`.
+    sesiones = database.listar_sesiones_por_fecha(database.ahora_local()[:10])
+    assert len(sesiones) == 1
+    assert sesiones[0]["num_paros"] == 1, (
+        "solo el paro de maquina debe contar; el corte de luz se excluye"
+    )
+
+
+def test_espera_tampoco_cuenta_y_el_sin_causa_si(db):
+    """Los tres casos del filtro `CAUSAS_NO_PRODUCTIVAS` en una sola sesion.
+
+    - espera y corte de luz: NO cuentan (no son paros de la maquina);
+    - paro sin causa: SI cuenta. No sabemos que fue y esconderlo seria peor
+      que medirlo de mas.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+
+    database.finalizar_paro(database.iniciar_paro(sesion_id, None),
+                            _causa_id_de(database, "esperando trabajo"),
+                            operador_id)
+    database.finalizar_paro(database.iniciar_paro(sesion_id, None),
+                            _causa_id_de(database, "computadora apagada"),
+                            operador_id)
+    # Sin causa: `iniciar_paro` la deja NULL y `finalizar_paro` la respeta.
+    database.finalizar_paro(database.iniciar_paro(sesion_id, None), None,
+                            operador_id)
+    database.cerrar_sesion(sesion_id, 10)
+
+    sesiones = database.listar_sesiones_por_fecha(database.ahora_local()[:10])
+    assert sesiones[0]["num_paros"] == 1, (
+        "solo el paro sin causa cuenta: los otros dos no son paros utiles"
+    )
+
+
+def test_el_corte_de_luz_aparece_en_el_detalle_del_reporte(db):
+    """Excluido del agregado, NO del detalle: el corte queda en la hoja Paros.
+
+    Es lo que pedio el operador: 'que si aparezca pero que no se sume'. El
+    reporte lista el paro con su duracion; solo lo saca de Nº/Min y
+    disponibilidad.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+    database.finalizar_paro(database.iniciar_paro(sesion_id, None),
+                            _causa_id_de(database, "computadora apagada"),
+                            operador_id)
+    database.cerrar_sesion(sesion_id, 10)
+
+    paros = database.obtener_paros_de_sesion(sesion_id)
+    assert len(paros) == 1
+    assert paros[0]["descripcion"] == "Computadora apagada", (
+        "el corte de luz debe seguir visible en el detalle de la sesion"
+    )
+
+
+def test_el_paro_posterior_al_cierre_no_hereda_el_folio(db):
+    """Cerrar el trabajo y despues abrir un paro: el paro va SIN folio.
+
+    Regresion de la incidencia reportada: al cerrar el trabajo y apagar la
+    maquina, el paro de "Computadora apagada" aparecia con el folio del
+    trabajo recien cerrado. Los dos eventos caen en el MISMO segundo, asi que
+    el backfill por solape los confundia.
+
+    El caso real: el segmento del folio 28 termino 10:12:40 y el paro empezo
+    10:12:40. Con `>=` el backfill loNhilo ahi y le colgo el folio.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+    database.abrir_trabajo(1020, sesion_id, "PZA-Z", 100)
+
+    # Se cierra el trabajo y, en el mismo segundo, arranca el paro.
+    database.cerrar_trabajo_modalidad(1020, 5, 100, modalidad="parcial",
+                                      detectados=5)
+    paro_id = database.iniciar_paro(sesion_id, None)
+    database.finalizar_paro(paro_id,
+                            _causa_id_de(database, "computadora apagada"),
+                            operador_id)
+
+    paros = database.obtener_paros_de_sesion(sesion_id)
+    assert len(paros) == 1
+    assert paros[0]["folio"] is None, (
+        "el paro abrio DESPUES de cerrar el trabajo: no debe heredar su folio"
+    )
+    assert paros[0]["descripcion"] == "Computadora apagada"
+
+
+def test_el_paro_que_parte_dentro_del_trabajo_si_lleva_folio(db):
+    """Contraste del anterior: el solape REAL si debe vincular el folio.
+
+    Si el paro arranca con el trabajo aun abierto, el backfill tiene que
+    colgarlo. Sin este test, un arreglo que apague el backfill entero
+    pasaria el de arriba y dejaria paros huerfanos.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+    database.abrir_trabajo(1021, sesion_id, "PZA-Y", 100)
+
+    # El paro arranca con el folio 1021 aun cargado, pero se registra sin
+    # folio (como cuando el folio se carga a mitad de un paro ya abierto).
+    paro_id = database.iniciar_paro(sesion_id, None)
+    database.finalizar_paro(paro_id, _causa_id_de(database, "mantenimiento"),
+                            operador_id)
+
+    paros = database.obtener_paros_de_sesion(sesion_id)
+    assert paros[0]["folio"] == 1021, (
+        "el paro solapa el segmento abierto: debe quedar vinculado"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Apagon con la maquina EN MARCHA: el paro se reconstruye (backfill)
+# ---------------------------------------------------------------------------
+
+
+def test_registrar_ultimo_corte_persiste_el_ancla(db):
+    """El HAL lo lleva en memoria; sin persistirlo se pierde con la luz."""
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+    database.registrar_ultimo_corte(sesion_id, "2026-09-29 10:05:00")
+
+    sesion = database.obtener_sesion_interrumpida()
+    assert sesion is not None
+    assert sesion["id"] == sesion_id
+    assert sesion["ultimo_corte"] == "2026-09-29 10:05:00"
+
+
+def test_crear_paro_por_apagon_cubre_el_intervalo_del_hueco(db):
+    """El paro reconstruido va del ultimo corte al reinicio, no desde el
+    reinicio (que daria cero y dejaria el hueco sin medir)."""
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+    database.abrir_trabajo(1030, sesion_id, "PZA-AP", 50)
+
+    paro_id = database.crear_paro_por_apagon(
+        sesion_id, 1030, "2026-09-29 10:05:00", operador_id,
+        _causa_id_de(database, "computadora apagada"),
+        fin="2026-09-29 10:12:40",
+    )
+
+    paro = database.obtener_paros_de_sesion(sesion_id)[0]
+    assert paro["id"] == paro_id
+    assert paro["inicio_paro"] == "2026-09-29 10:05:00"
+    assert paro["fin_paro"] == "2026-09-29 10:12:40"
+    assert paro["descripcion"] == "Computadora apagada"
+    assert paro["folio"] == 1030, "debe quedar ligado al trabajo en curso"
+
+
+def test_crear_paro_por_apagon_no_inventa_un_intervalo_negativo(db):
+    """Un ancla posterior al reinicio (reloj desfasado) no genera negativo.
+
+    Se degrada a un paro de un instante. Un `inicio > fin` sucioaria el
+    reporte con duraciones negativas.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+
+    database.crear_paro_por_apagon(
+        sesion_id, None, "2026-09-29 23:59:00", operador_id,
+        _causa_id_de(database, "computadora apagada"),
+        fin="2026-09-29 10:12:40",
+    )
+
+    paro = database.obtener_paros_de_sesion(sesion_id)[0]
+    assert paro["inicio_paro"] == paro["fin_paro"] == "2026-09-29 10:12:40"
+
+
+def test_crear_paro_por_apagon_sin_ancla_no_usa_el_inicio_de_sesion(db):
+    """Sin `ultimo_corte` el paro dura cero; no se mide desde el login.
+
+    Medir desde el inicio de la sesion inventaria horas de paro que el
+    operador no hizo y contaminaria la disponibilidad del turno.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+
+    database.crear_paro_por_apagon(
+        sesion_id, None, None, operador_id,
+        _causa_id_de(database, "computadora apagada"),
+        fin="2026-09-29 10:12:40",
+    )
+
+    paro = database.obtener_paros_de_sesion(sesion_id)[0]
+    assert paro["inicio_paro"] == "2026-09-29 10:12:40"
+
+
+def test_el_paro_apagon_no_cuenta_como_paro_de_produccion(db):
+    """Reconstruir el paro no lo reintroduce en los agregados de maquina.
+
+    El corte de luz es una omision del operador, no una falla: aparece en la
+    hoja Paros pero fuera de Nº paros, Min paro y disponibilidad.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+    database.crear_paro_por_apagon(
+        sesion_id, None, "2026-09-29 10:05:00", operador_id,
+        _causa_id_de(database, "computadora apagada"),
+        fin="2026-09-29 10:12:40",
+    )
+    database.cerrar_sesion(sesion_id, 10)
+
+    sesiones = database.listar_sesiones_por_fecha(database.ahora_local()[:10])
+    assert sesiones[0]["num_paros"] == 0, (
+        "el corte de luz no es un paro de produccion"
+    )
+    # Pero sigue visible en el detalle.
+    paros = database.obtener_paros_de_sesion(sesion_id)
+    assert len(paros) == 1
+    assert paros[0]["descripcion"] == "Computadora apagada"
+
+
+# ---------------------------------------------------------------------------
 # Sesiones
 # ---------------------------------------------------------------------------
 
