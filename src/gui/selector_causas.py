@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.database import CAUSAS_OCULTAS_EN_SELECTOR, listar_causas_paro
+from src.database import causas_visibles_en_selector
 from src.gui.croquis_zonas import ZonaCanvas
 
 log = logging.getLogger(__name__)
@@ -193,14 +193,9 @@ class SelectorCausaZona(QFrame):
         return col_causas
 
     def _cargar_causas(self):
-        # "Primera pieza" y "Computadora apagada" son IMPLICITAS (las pone y
-        # las quita el sistema: el reinicio tras un apagón cierra el paro en
-        # curso con la segunda). No deben elegirse a mano en un paro normal.
-        self._causas = [
-            c for c in listar_causas_paro(activas_solo=True)
-            if str(c["descripcion"]).strip().lower()
-            not in CAUSAS_OCULTAS_EN_SELECTOR
-        ]
+        # "Primera pieza", "Computadora apagada" y "Esperando trabajo" son
+        # IMPLICITAS (las pone y las quita el sistema): no se eligen a mano.
+        self._causas = causas_visibles_en_selector()
         self._refrescar_causas()
 
     def _refrescar_causas(self):

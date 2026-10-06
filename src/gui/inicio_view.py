@@ -99,6 +99,7 @@ latch PAUSE inicial del HAL deja la maquina fisicamente detenida.
 """
 
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -1091,10 +1092,11 @@ class InicioView(QWidget):
             return None
         return trabajo["folio"] if trabajo is not None else None
 
-    def _pausar_maquina(self, motivo="manual"):
+    def _pausar_maquina(self, motivo="manual", inicio_hace_s=None):
         self.controlador.maquina_pausada()
         self._en_paro = True
-        self.paro_id = iniciar_paro(self.sesion_id, self._folio_activo())
+        self.paro_id = iniciar_paro(self.sesion_id, self._folio_activo(),
+                                    inicio_hace_s=inicio_hace_s)
         self._refrescar_estado_maquina()
         log.info("Paro %s registrado (%s)", self.paro_id, motivo)
         self._estado("Maquina en PARO. Indica el motivo y autoriza.", "procesando")
@@ -1536,21 +1538,34 @@ class InicioView(QWidget):
         en cero). El ancla es el ULTIMO ARRANQUE: la corrida que se corta
         empezo ahi, no en el corte anterior. Tomar el min con el ultimo corte
         alargaba el paro hacia atras (hasta el corte previo, que pudovenir de
-        una corrida ya cerrada); el corte solo sirve de respaldo si el HAL no
-        expone arranque.
+        una corrida ya cerrada); por eso el corte solo es RESPALDO: si el HAL
+        no expone arranque, o si la maquina esta DETENIDA (el HAL devuelve
+        inf y no hay arranque nuevo que anclar) se conserva el ultimo corte
+        conocido.
+
+        El cuerpo va en try/finally: una excepcion NO debe romper la cadena
+        de `QTimer.singleShot`, o los respaldos ante apagones se detendrian
+        en silencio hasta reiniciar la app.
         """
-        if self.sesion_id is not None:
-            actualizar_cortes_sesion(self.sesion_id, self.controlador.cortes_totales())
-            ancla = self._momento_ultimo_arranque() or self._momento_ultimo_corte()
-            if ancla:
-                registrar_ultimo_corte(self.sesion_id, ancla)
-        if self._trabajo is not None:
-            actualizar_detectados(
-                self._trabajo["folio"], self._cortes_trabajo()
+        try:
+            if self.sesion_id is not None:
+                actualizar_cortes_sesion(self.sesion_id,
+                                         self.controlador.cortes_totales())
+                ancla = (self._momento_ultimo_arranque()
+                         or self._momento_ultimo_corte())
+                if ancla:
+                    registrar_ultimo_corte(self.sesion_id, ancla)
+            if self._trabajo is not None:
+                actualizar_detectados(
+                    self._trabajo["folio"], self._cortes_trabajo()
+                )
+        except Exception:  # noqa: BLE001 - el proximo checkpoint debe llegar
+            log.warning("Fallo el checkpoint de cortes (sesion %s)",
+                        self.sesion_id, exc_info=True)
+        finally:
+            QTimer.singleShot(
+                config.CORTES_GUARDAR_INTERVALO_MS, self._checkpoint_cortes
             )
-        QTimer.singleShot(
-            config.CORTES_GUARDAR_INTERVALO_MS, self._checkpoint_cortes
-        )
 
     def _momento_ultimo_corte(self):
         """Timestamp local del ultimo corte real, o None si el HAL no lo da."""
@@ -1558,23 +1573,28 @@ class InicioView(QWidget):
         return ts
 
     def _momento_ultimo_arranque(self):
-        """Timestamp local del ultimo arranque/reanudacion, o None."""
+        """Timestamp local del ultimo arranque/reanudacion, o None si la
+        maquina esta DETENIDA (el HAL devuelve inf) o no expone el dato."""
         return self._segundos_desde(self.controlador.segundos_desde_arranque)
 
     def _segundos_desde(self, getter):
         """Convierte 'hace N segundos' (o None) a timestamp local 'YYYY-MM-DD
-        HH:MM:SS'. Devuelve None si el HAL no expone ese dato."""
+        HH:MM:SS'. Devuelve None si el dato no es medible.
+
+        `segundos_desde_arranque` devuelve `inf` con la maquina DETENIDA, y
+        `timedelta(seconds=inf)` lanza OverflowError: sin filtrarlo aqui, el
+        checkpoint revienta justo en `_momento_ultimo_arranque` (reportado en
+        produccion con la maquina apagada).
+        """
         try:
-            segundos = getter()
+            segundos = float(getter())
         except Exception:  # noqa: BLE001 - un checkpoint no debe fallar
             log.debug("El HAL no expone segundos desde un evento", exc_info=True)
             return None
-        if segundos is None or segundos < 0:
+        if not math.isfinite(segundos) or segundos < 0:
             return None
         ahora = datetime.strptime(ahora_local(), "%Y-%m-%d %H:%M:%S")
-        return (ahora - timedelta(seconds=float(segundos))).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        return (ahora - timedelta(seconds=segundos)).strftime("%Y-%m-%d %H:%M:%S")
 
     def _verificar_inactividad(self):
         timeout = config.PARO_IDLE_TIMEOUT_S
@@ -1594,10 +1614,14 @@ class InicioView(QWidget):
         desde_arranque = getattr(
             self.controlador, "segundos_desde_arranque", lambda: float("inf")
         )()
-        if min(sin_corte, desde_arranque) >= timeout:
+        ancla = min(sin_corte, desde_arranque)
+        if ancla >= timeout:
             self._paro_idle_triggado = True
-            log.info("Sin cortes por %s s; abriendo paro automatico", timeout)
-            self._pausar_maquina(motivo="automatico")
+            log.info("Sin cortes por %s s; abriendo paro automatico "
+                     "(inicio retrotraido %s s)", timeout, ancla)
+            # El paro se contabiliza desde el ancla (ultimo corte o salida
+            # del ultimo evento), no desde aqui: el minuto muerto cuenta.
+            self._pausar_maquina(motivo="automatico", inicio_hace_s=ancla)
 
     def _maquina_en_marcha(self):
         return not self.controlador.maquina_detenida()

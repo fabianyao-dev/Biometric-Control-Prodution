@@ -346,7 +346,7 @@ subgraph G["G · PRODUCCION — estado Maquina LISTA"]
   G0["Los cortes del HAL se acumulan y cuentan para el folio de la sesion"]
   G1{"_verificar_meta_trabajo :2134 — confirmados globales mas lo cortado en esta sesion alcanza cantidad_total?"}
   G2{"_verificar_inactividad :1579 — el menor de segundos sin corte y segundos desde arranque es mayor o igual a 60 s?"}
-  G3["_pausar_maquina con motivo automatico"]
+  G3["_pausar_maquina :1094 con motivo automatico — iniciar_paro con `inicio_hace_s`=ancla: `inicio_paro` retrotrae al ultimo corte o a la salida del ultimo evento (el minuto muerto cuenta)"]
   G0 --> G1
   G1 -->|"no"| G2
   G2 -->|"si"| G3 --> H0
@@ -642,7 +642,7 @@ class A4,B0,B3,B6,C1,C3,C7,D0,D3,D5,D6,E2,E4,E7,E9,E14,F1,F4,F5,F6,F10,G1,G2,H1,
 | Sin causas de paro configuradas | `inicio_view.py:1105` | Avisa y deja la máquina detenida |
 | Sin causa "Primera pieza" | `inicio_view.py:1690` | El modo Primera pieza no está disponible |
 | `PRIMERA_PIEZA_TIMEOUT_S` (900 s) | `inicio_view.py:1682` | La salida exige rol con `autorizar_paro`, incluso al dueño de la sesión |
-| Cierre por meta no cancelable | `modalidades_cierre.py:131` | No se puede dejar un trabajo Abierto con la meta cumplida |
+| Cierre por meta no cancelable | `modalidades_cierre.py:168` | No se puede dejar un trabajo Abierto con la meta cumplida |
 | `aplicacion_puede_cerrarse` | `inicio_view.py:766` | Con la máquina detenida sí se permite salir aunque quede sesión `Activa` |
 
 ## Permisos que gobiernan el flujo

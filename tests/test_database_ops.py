@@ -20,6 +20,7 @@ Convenciones de la API (ver `src/database.py`):
 """
 
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -254,14 +255,54 @@ def test_las_causas_por_defecto_existen(db):
     """Las tres causas que siembra `init_db()` deben existir siempre.
 
     'Primera pieza' y 'Esperando trabajo' las abre y cierra el sistema solas
-    (por eso la vista las oculta del selector, en `selector_causas.py:196`),
-    pero si faltan, el modo Primera pieza avisa y se apaga.
+    (por eso `causas_visibles_en_selector` las oculta), pero si faltan, el
+    modo Primera pieza avisa y se apaga.
     """
     import src.database as database
 
     descripciones = {c["descripcion"] for c in database.listar_causas_paro()}
     for esperada in database.CAUSAS_PARO_POR_DEFECTO:
         assert esperada in descripciones, f"falta la causa por defecto '{esperada}'"
+
+
+def test_el_selector_oculta_las_causas_implicitas(db):
+    """`causas_visibles_en_selector` es lo que el operador puede elegir.
+
+    Las implicitas ('Primera pieza', 'Computadora apagada' y 'Esperando
+    trabajo') las pone y las quita el sistema: no deben salir como opcion en
+    el selector de paro. Pero la causa SIGUE existiendo en BD, porque el
+    sistema la busca por descripcion (reporte y espera entre trabajos).
+    """
+    import src.database as database
+
+    visibles = {
+        str(c["descripcion"]).strip().lower()
+        for c in database.causas_visibles_en_selector()
+    }
+    for oculta in database.CAUSAS_OCULTAS_EN_SELECTOR:
+        assert oculta not in visibles, f"'{oculta}' no debe verse en el selector"
+
+    # Una causa normal si se sigue ofreciendo.
+    assert "mantenimiento" in visibles
+
+    activas = {
+        str(c["descripcion"]).strip().lower()
+        for c in database.listar_causas_paro(activas_solo=True)
+    }
+    assert "esperando trabajo" in activas
+
+
+def test_una_causa_nueva_si_aparece_en_el_selector(db):
+    """Dar de alta una causa normal la hace elegible de inmediato."""
+    import src.database as database
+
+    assert database.agregar_causa_paro("Falta de material") is True
+
+    visibles = {
+        str(c["descripcion"]).strip().lower()
+        for c in database.causas_visibles_en_selector()
+    }
+    assert "falta de material" in visibles
 
 
 def test_requiere_zona_se_persiste(db):
@@ -968,6 +1009,139 @@ def test_el_paro_apagon_no_cuenta_como_paro_de_produccion(db):
     paros = database.obtener_paros_de_sesion(sesion_id)
     assert len(paros) == 1
     assert paros[0]["descripcion"] == "Computadora apagada"
+
+
+# ---------------------------------------------------------------------------
+# Auto-paro por inactividad: el minuto muerto SI se contabiliza
+# ---------------------------------------------------------------------------
+
+
+def _paro_crudo(database, paro_id):
+    conn = database.obtener_conexion()
+    try:
+        fila = conn.execute(
+            "SELECT * FROM paros_produccion WHERE id=?", (paro_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert fila is not None, f"el paro {paro_id} no existe"
+    return dict(fila)
+
+
+def _ts(texto):
+    return datetime.strptime(texto, "%Y-%m-%d %H:%M:%S")
+
+
+def _mover_inicio_sesion(database, sesion_id, hace_s):
+    """Atrasa `sesiones_produccion.fecha_inicio`.
+
+    Los tests abren la sesion hace milisegundos, asi que el clamp al inicio
+    de la sesion taparia cualquier retroceso mayor que eso.
+    """
+    momento = (_ts(database.ahora_local()) - timedelta(seconds=hace_s)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    conn = database.obtener_conexion()
+    try:
+        conn.execute(
+            "UPDATE sesiones_produccion SET fecha_inicio=? WHERE id=?",
+            (momento, sesion_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_iniciar_paro_con_ancla_lo_retrotrae_al_ultimo_evento(db):
+    """`inicio_hace_s` mueve `inicio_paro` atras: el auto-paro por inactividad
+    contabiliza el minuto muerto desde el ultimo corte / salida de evento."""
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+    _mover_inicio_sesion(database, sesion_id, 3600)
+
+    antes = database.ahora_local()
+    paro_id = database.iniciar_paro(sesion_id, None, inicio_hace_s=60)
+    despues = database.ahora_local()
+
+    inicio = _ts(_paro_crudo(database, paro_id)["inicio_paro"])
+    # El ancla corre entre (antes - 60 s) y (despues - 60 s).
+    assert inicio >= _ts(antes) - timedelta(seconds=60)
+    assert inicio <= _ts(despues) - timedelta(seconds=60)
+
+
+def test_iniciar_paro_sin_ancla_sigue_empezando_ahora(db):
+    """Regresion: PARO manual, espera y Primera pieza NO se retrotraen."""
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+
+    antes = database.ahora_local()
+    paro_id = database.iniciar_paro(sesion_id, None)
+    despues = database.ahora_local()
+
+    inicio = _paro_crudo(database, paro_id)["inicio_paro"]
+    assert antes <= inicio <= despues, (
+        f"esperaba entre {antes} y {despues}, llego {inicio}"
+    )
+
+
+def test_iniciar_paro_con_ancla_no_antecede_al_inicio_de_sesion(db):
+    """Una gracia de horas (o un reloj raro) nunca inventa paro antes del
+    login: el piso es `sesiones_produccion.fecha_inicio`."""
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+
+    paro_id = database.iniciar_paro(sesion_id, None, inicio_hace_s=10800)
+
+    conn = database.obtener_conexion()
+    try:
+        sesion = conn.execute(
+            "SELECT fecha_inicio FROM sesiones_produccion WHERE id=?",
+            (sesion_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert _paro_crudo(database, paro_id)["inicio_paro"] == sesion["fecha_inicio"]
+
+
+def test_iniciar_paro_con_ancla_no_solapa_el_paro_anterior(db):
+    """El ancla del auto-paro (ultimo corte) puede ser vieja: jamas invade el
+    `fin_paro` del paro previo de la misma sesion (intervalos sin solape)."""
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+    previo = database.iniciar_paro(sesion_id, None)
+    database.finalizar_paro(
+        previo, _causa_id_de(database, "mantenimiento"), operador_id
+    )
+    fin_previo = _paro_crudo(database, previo)["fin_paro"]
+
+    paro_id = database.iniciar_paro(sesion_id, None, inicio_hace_s=300)
+
+    assert _paro_crudo(database, paro_id)["inicio_paro"] == fin_previo
+
+
+def test_iniciar_paro_con_ancla_infinita_degrada_a_ahora(db):
+    """Un HAL que devuelva inf no revienta el paro ni inventa un hueco
+    gigante: el registro se hace igual, sin retroceso."""
+    import src.database as database
+
+    operador_id = _crear_operador(database, "Raul Hernandez")
+    sesion_id = database.abrir_sesion(operador_id)
+
+    antes = database.ahora_local()
+    paro_id = database.iniciar_paro(sesion_id, None, inicio_hace_s=float("inf"))
+    despues = database.ahora_local()
+
+    inicio = _paro_crudo(database, paro_id)["inicio_paro"]
+    assert antes <= inicio <= despues
 
 
 # ---------------------------------------------------------------------------

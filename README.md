@@ -131,7 +131,9 @@ Estados de la máquina en la vista **Inicio**:
 1. **EN ESPERA** → el operador pulsa PLAY, coloca su huella; se abre la sesión
    y la máquina pasa a **LISTA**.
 2. **LISTA** → la máquina cuenta cortes. Si no hay cortes durante
-   `PARO_IDLE_TIMEOUT_S`, se dispara un **paro automático**.
+   `PARO_IDLE_TIMEOUT_S`, se dispara un **paro automático** cuyo
+   `inicio_paro` se retrotrae al último corte o a la salida del último
+   evento (el minuto muerto cuenta como paro).
 3. **PARO** → el operador (o un rol autorizado) elige la causa y coloca su
    huella; al autorizar, la máquina **reanuda**. El modal de paro **no se puede
    cerrar** hasta autorizar.

@@ -35,7 +35,7 @@ Politicas:
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from src.config import DB_PATH, ZONA_HORARIA
@@ -80,8 +80,12 @@ CAUSAS_PARO_POR_DEFECTO = ["Primera pieza", "mantenimiento", "Esperando trabajo"
                           "Computadora apagada"]
 
 # Causas que NUNCA se ofrecen al operador en el selector: las pone y las
-# quita el sistema. Se comparan en minusculas sin espacios.
-CAUSAS_OCULTAS_EN_SELECTOR = ("primera pieza", "computadora apagada")
+# quita el sistema. "Esperando trabajo" es implicita porque la abre/cierra el
+# flujo entre trabajos (_abrir_espera_trabajo/_cerrar_espera_trabajo), no el
+# operador. Se comparan en minusculas sin espacios.
+CAUSAS_OCULTAS_EN_SELECTOR = (
+    "primera pieza", "computadora apagada", "esperando trabajo",
+)
 
 # Causas que NO son paros de PRODUCCION: el reporte las lista una fila en la
 # hoja Paros, pero no las suma a minutos/paros de maquina (contaminarian
@@ -1166,6 +1170,20 @@ def listar_causas_paro(activas_solo=True):
     return rows
 
 
+def causas_visibles_en_selector():
+    """Causas activas que SI se ofrecen al operador en el selector de paro.
+
+    Excluye las implicitas (`CAUSAS_OCULTAS_EN_SELECTOR`): las que el sistema
+    pone y quita solo. Vivo en la capa de datos (no en el widget) para poder
+    probarla sin Qt.
+    """
+    ocultas = CAUSAS_OCULTAS_EN_SELECTOR
+    return [
+        c for c in listar_causas_paro(activas_solo=True)
+        if str(c["descripcion"]).strip().lower() not in ocultas
+    ]
+
+
 def guardar_causa_paro(causa_id: int, descripcion: str,
                        requiere_zona: bool = False):
     """Actualiza la descripcion y la regla de negocio `requiere_zona` de una
@@ -1797,13 +1815,22 @@ def paros_de_segmento(sesion_id: int, inicio: str, fin: str | None = None):
 # Paros de produccion
 # ---------------------------------------------------------------------------
 
-def iniciar_paro(sesion_id: int, folio: int | None = None) -> int:
+def iniciar_paro(sesion_id: int, folio: int | None = None,
+                 inicio_hace_s: float | None = None) -> int:
     """Crea un paro 'en curso' (sin causa ni fin). Devuelve id.
 
     `folio` es el trabajo activo al iniciar el paro (o None si no hay folio
     cargado: Primera pieza sin trabajo con permiso `iniciar_primera_pieza` o
     espera de QR). Si se pasa un folio inexistente se guarda NULL para no
     violar la FK.
+
+    `inicio_hace_s` retrotrae `inicio_paro` ese numero de segundos: es el
+    auto-paro por inactividad, que contabiliza el minuto muerto anclado al
+    evento mas reciente (ultimo corte real, arranque/reanudacion o salida del
+    ultimo paro). El valor acotado nunca antecede al inicio de la sesion ni
+    al fin del ultimo paro cerrado de la misma sesion, para no solapar
+    intervalos. Sin el parametro el paro empieza 'ahora' (PARO manual,
+    espera de trabajo, Primera pieza).
     """
     conn = obtener_conexion()
     if folio is not None:
@@ -1817,16 +1844,58 @@ def iniciar_paro(sesion_id: int, folio: int | None = None) -> int:
             ).fetchone()
             if existe is None:
                 folio = None
+    inicio = ahora_local()
+    if inicio_hace_s is not None:
+        inicio = _inicio_paro_retrotraido(conn, sesion_id, inicio,
+                                           inicio_hace_s)
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO paros_produccion (sesion_id, folio, inicio_paro) "
         "VALUES (?, ?, ?)",
-        (sesion_id, folio, ahora_local()),
+        (sesion_id, folio, inicio),
     )
     conn.commit()
     nuevo_id = cur.lastrowid
     conn.close()
     return nuevo_id
+
+
+def _inicio_paro_retrotraido(conn, sesion_id, ahora: str,
+                             inicio_hace_s) -> str:
+    """'ahora' menos `inicio_hace_s` segundos, acotado al intervalo valido de
+    la sesion: [fecha_inicio de la sesion, ahora] y sin invadir el fin del
+    ultimo paro cerrado. Devuelve 'YYYY-MM-DD HH:MM:SS'."""
+    try:
+        hace = max(float(inicio_hace_s), 0.0)
+    except (TypeError, ValueError):
+        hace = 0.0
+    try:
+        limite = (
+            datetime.strptime(ahora, "%Y-%m-%d %H:%M:%S")
+            - timedelta(seconds=hace)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+    except (OverflowError, OSError, ValueError):
+        # Ancla absurda o infinita (HAL raro): degrada a 'ahora', igual que
+        # `crear_paro_por_apagon` con un intervalo imposible.
+        limite = ahora
+    candidatos = [limite]
+    sesion = conn.execute(
+        "SELECT fecha_inicio FROM sesiones_produccion WHERE id=?",
+        (sesion_id,),
+    ).fetchone()
+    if sesion is not None and sesion["fecha_inicio"]:
+        candidatos.append(sesion["fecha_inicio"])
+    previo = conn.execute(
+        "SELECT MAX(fin_paro) AS fin FROM paros_produccion "
+        "WHERE sesion_id=? AND fin_paro IS NOT NULL",
+        (sesion_id,),
+    ).fetchone()
+    if previo is not None and previo["fin"]:
+        candidatos.append(previo["fin"])
+    # Piso en el inicio de sesion/paro previo y techo en el reloj actual:
+    # un ancla futura (reloj desfasado) degrada a 'ahora', como en
+    # `crear_paro_por_apagon`.
+    return min(max(candidatos), ahora)
 
 
 def finalizar_paro(paro_id: int, causa_id: int, operador_id: int,
