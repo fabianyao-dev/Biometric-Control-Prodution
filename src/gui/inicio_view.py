@@ -50,7 +50,9 @@ marcada 'maquina encendida' (Administracion -> Zonas), la maquina REPRENDE con
 el conteo suspendido y los cortes van a excluidos; en cualquier otro caso
 (zona normal o causa que no requiere zona) la maquina se queda DETENIDA. En
 ambos casos, al pulsar SALIR DE PARO se cierra el paro y la maquina queda
-ENCENDIDA (si estaba detenida, se enciende automaticamente).
+ENCENDIDA (si estaba detenida, se enciende automaticamente). El estado de la
+maquina muestra la causa elegida entre parentesis ('Maquina: PARO (Causa)');
+que la maquina siga en marcha se distingue por el resplandor y el tooltip.
 
 SEGURO ANTI-CORRIDA: durante el modo los cortes van a un acumulado temporal.
 Si se detecta una rafaga (mas de SEGURO_RAFAGA_CORTES cortes dentro de
@@ -68,13 +70,16 @@ escanear cuando este listo con ESCANEAR TRABAJO (visible solo sin trabajo
 cargado y maquina en marcha). Al aceptar se registra/retoma el trabajo en la
 tabla `trabajos` (folio unico: re-escanear uno Abierto retoma su conteo; uno
 Cerrado se rechaza), se salen las piezas de prueba (mismo descarte del modo)
-y los cortes empiezan a contar para ese trabajo (total - baseline). El
+y los cortes empiezan a contar para ese trabajo ARRANCANDO EN 1 (total -
+baseline, con la Primera pieza contando como la primera pieza del folio; un
+folio retomado conserva su avance y no repite el +1). El
 marcador muestra NUMERO DE PARTE arriba, los digitos al centro y CANTIDAD/
 META abajo; la linea inferior de estado resume sesion, folio, parte,
-cantidad, meta, ciclos totales y setup. 'Cerrado' SOLO
-al alcanzar la cantidad_total: ahi suena la alarma, se guarda la cantidad
-confirmada en el dialogo de cierre y vuelve a Primera pieza para el
-siguiente QR. El cierre por el boton de MAQUINA con trabajo carga el dialogo
+cantidad, meta, ciclos totales y setup. 'Cerrado' SOLO al alcanzar la
+cantidad_total, y ahora SOLO via cierre manual: EL AUTO-CIERRE POR META ESTA
+INHABILITADO (`_verificar_meta_trabajo` quedo comentado en
+`_refrescar_contador`), asi que ni la alarma ni el dialogo de cierre se abren
+solos. El cierre por el boton de MAQUINA con trabajo carga el dialogo
 de cierre (#5). Lo mismo al cerrar sesion: el parcial queda Abierto. Tras un
 apagon el trabajo se retoma escaneando su QR, que lo reactiva desde su
 checkpoint.
@@ -201,6 +206,7 @@ class InicioView(QWidget):
         # MARCHA con el conteo suspendido (los cortes van a excluidos).
         self._modo_paro = False
         self._modo_paro_causa_id = None
+        self._modo_paro_causa_desc = None
         self._modo_paro_zona_id = None
         self._modo_paro_maquina_encendida = False
         # Estado actual del boton PARO (PARO vs SALIR DE MANTENIMIENTO/
@@ -546,6 +552,7 @@ class InicioView(QWidget):
         self._mantenimiento_zona_id = None
         self._modo_paro = False
         self._modo_paro_causa_id = None
+        self._modo_paro_causa_desc = None
         self._modo_paro_zona_id = None
         self._modo_paro_maquina_encendida = False
         self._fijar_switch(False)
@@ -1055,6 +1062,7 @@ class InicioView(QWidget):
         self.paro_id = None
         self._modo_paro = False
         self._modo_paro_causa_id = None
+        self._modo_paro_causa_desc = None
         self._modo_paro_zona_id = None
         self._modo_paro_maquina_encendida = False
         self._en_paro = False
@@ -1187,7 +1195,7 @@ class InicioView(QWidget):
             else:
                 self._autorizado_autenticado(
                     id_operador, nombre, causa_id, zona_id, zona_maquina,
-                    zona_nombre
+                    zona_nombre, causa_desc
                 )
 
         self._modal_abierto = True
@@ -1226,7 +1234,7 @@ class InicioView(QWidget):
 
     def _autorizado_autenticado(self, id_operador, nombre, causa_id=None,
                                 zona_id=None, zona_maquina=False,
-                                zona_nombre=None):
+                                zona_nombre=None, causa_desc=None):
         """Paro autorizado: entra al MODO PARO (unico, para toda causa salvo
         'mantenimiento', que tiene su propio modo).
 
@@ -1242,6 +1250,9 @@ class InicioView(QWidget):
         """
         self._modo_paro = True
         self._modo_paro_causa_id = causa_id
+        self._modo_paro_causa_desc = (
+            causa_desc or self._causa_descripcion(causa_id) or "(sin causa)"
+        )
         self._modo_paro_zona_id = zona_id
         self._modo_paro_maquina_encendida = bool(zona_maquina)
         self._en_paro = True
@@ -1284,6 +1295,17 @@ class InicioView(QWidget):
         for causa in listar_causas_paro(activas_solo=True):
             if str(causa["descripcion"]).strip().lower() == objetivo:
                 return causa["id"]
+        return None
+
+    def _causa_descripcion(self, causa_id):
+        """Descripcion de una causa por su id, o None si no existe. Se consulta
+        SIN filtrar por activo: una causa puede desactivarse mientras el paro
+        sigue abierto y el estado del modo PARO debe seguir mostrandola."""
+        if causa_id is None:
+            return None
+        for causa in listar_causas_paro(activas_solo=False):
+            if causa["id"] == causa_id:
+                return str(causa["descripcion"])
         return None
 
     def _validar_mantenimiento(self, id_operador, nombre, causa_id=None):
@@ -1457,7 +1479,11 @@ class InicioView(QWidget):
     def _refrescar_contador(self):
         self._refrescar_labels_cortes()
         self._verificar_rafaga_arranque()
-        self._verificar_meta_trabajo()
+        # Auto-finalizacion por meta INHABILITADA: al alcanzar la
+        # cantidad_total ya NO se abre solo el dialogo de cierre; el cierre
+        # es manual (boton de MAQUINA). El metodo se conserva intacto para
+        # reactivarlo descomentando esta linea.
+        # self._verificar_meta_trabajo()
         self._refrescar_estado_maquina()
         self._verificar_inactividad()
         self._verificar_timeout_primera_pieza()
@@ -1778,7 +1804,11 @@ class InicioView(QWidget):
             # Salida del modo con trabajo cargado: aqui ARRANCA el conteo
             # del folio (los cortes de setup quedaron descartados) y la
             # maquina sigue en marcha para producir. El segmento tambien
-            # arranca aqui (no en el QR).
+            # arranca aqui (no en el QR). El conteo arranca en 1 (la Primera
+            # pieza es la primera pieza del trabajo); un folio retomado con
+            # avance conserva su cantidad y NO recibe el +1 otra vez.
+            if self._cortes_trabajo() <= 0:
+                self._baseline_trabajo -= 1
             recortar_inicio_segmento(
                 self._trabajo["folio"], self.sesion_id
             )
@@ -2159,6 +2189,11 @@ class InicioView(QWidget):
         """Meta alcanzable: abre el cierre con cantidad a confirmar sin detener
         la maquina.
 
+        AUTO-FINALIZACION INHABILITADA: la llamada desde
+        `_refrescar_contador` quedo comentada, asi que este metodo NO se
+        invoca (el cierre al llegar a la meta es manual, boton de MAQUINA).
+        Se conserva intacto para reactivarlo.
+
         Llamado desde `_refrescar_contador` (hilo principal). Cuando lo
         confirmado global mas lo cortado en ESTA sesion alcanza la
         cantidad_total se abre el mismo cierre con input editable que el boton
@@ -2167,8 +2202,8 @@ class InicioView(QWidget):
         maquina SIGUE EN MARCHA y contando mientras se resuelve el cierre
         (el operador la detiene al confirmar); lo que se guarda es el numero
         confirmado, no el conteo en vivo. Un
-        trabajo solo pasa a 'Cerrado' aqui (o en el cierre manual) al
-        alcanzarse la meta.
+        trabajo solo pasa a 'Cerrado' al alcanzarse la meta (hoy: solo en el
+        cierre manual).
         """
         if self._trabajo is None or self._modal_abierto or self._en_paro:
             return
@@ -2439,10 +2474,10 @@ class InicioView(QWidget):
         # del chequeo generico de `_en_paro` para que no lo oculte.
         if self._modo_paro:
             en_marcha = self._modo_paro_maquina_encendida
+            causa_txt = self._modo_paro_causa_desc or "(sin causa)"
             return dict(
                 clave="modo_paro" if en_marcha else "modo_paro_detenida",
-                texto=("Maquina: PARO (EN MARCHA)" if en_marcha
-                       else "Maquina: PARO"),
+                texto=f"Maquina: PARO ({causa_txt})",
                 badge="procesando", icono=sp.SP_MediaStop,
                 btn_icono=sp.SP_MediaStop, btn_estilo="Power",
                 btn_on=en_marcha,
