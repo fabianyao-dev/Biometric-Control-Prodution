@@ -75,6 +75,7 @@ def test_se_cubre_al_menos_la_app_completa():
         "src.hardware.modbus_controller",
         "src.hardware.simulacion_controller",
         "src.reportes.export_dia",
+        "src.reportes.export_auto",
     ):
         assert esperado in MODULOS, f"faltaba {esperado}"
 

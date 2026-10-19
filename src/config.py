@@ -227,6 +227,10 @@ CONFIG_POR_DEFECTO = {
     "SEGURO_RAFAGA_SEGUNDOS": 7,
     "SEGURO_RAFAGA_CORTES": 5,
     "PRIMERA_PIEZA_TIMEOUT_S": 900,
+    # Exportacion automatica del reporte del dia (ver EXPORT_AUTO_CONFIG).
+    "EXPORT_AUTO_ACTIVO": 1,
+    "EXPORT_CADA_HORA": 1,
+    "EXPORT_DIR_AUTO": "",
 }
 
 
@@ -354,6 +358,23 @@ UPDATE_SOURCE = os.environ.get("UPDATE_SOURCE", "").strip()
 
 # Timeout de las consultas/descargas HTTP al servidor de actualizaciones.
 UPDATE_TIMEOUT_S = _env_int("UPDATE_TIMEOUT_S", 8)
+
+
+# --- Exportacion automatica del reporte del dia a Excel (opcional) ---
+# La app puede generar los reportes sola, sin que nadie entre a Sesiones:
+#   - cada hora: snapshot PARCIAL del dia en curso (para que un supervisor
+#     vea el turno en vivo; lleva filas 'En curso');
+#   - cierre FINAL del dia: se dispara al cerrar la ultima sesion del dia o
+#     al cerrar la app (mientras la PC sigue encendida), y al arrancar si un
+#     dia terminado quedo pendiente (catch-up). No se espera a una hora fija
+#     porque el fin de turno varia.
+# `dir` vacio => <carpeta de datos>/exportaciones (junto a la BD, para que
+# sobreviva a las actualizaciones del .exe). Pon `activo` en 0 para apagarla.
+EXPORT_AUTO_CONFIG = {
+    "activo": _env_bool("EXPORT_AUTO_ACTIVO", True),
+    "cada_hora": _env_bool("EXPORT_CADA_HORA", True),
+    "dir": os.environ.get("EXPORT_DIR_AUTO", "").strip(),
+}
 
 
 # --- Modbus TCP (PC Fanless Windows) ---

@@ -77,8 +77,17 @@ def _min_entre(inicio, fin):
     return round((dt_fin - dt_ini).total_seconds() / 60.0, 1)
 
 
-def _tabla(ws, ref, nombre):
-    """Convierte un rango con encabezado en Tabla oficial de Excel."""
+def _tabla(ws, ref, nombre, filas):
+    """Convierte un rango con encabezado en Tabla oficial de Excel.
+
+    `filas` es el numero de filas de datos del rango. Una tabla de Excel con
+    SOLO el encabezado (sin filas de datos) es invalida: Excel se niega a abrir
+    el archivo (lo reporta como "contenido problematico" y lo repara quitando
+    la tabla). Por eso, si `filas` es 0 no se crea la tabla; la hoja queda con
+    su encabezado y sin autofiltro, que es lo unico valido.
+    """
+    if filas == 0:
+        return
     from openpyxl.worksheet.table import Table, TableStyleInfo
 
     tab = Table(displayName=nombre, ref=ref)
@@ -267,7 +276,7 @@ def exportar_dia(fecha: str, ruta_destino: str):
     ws_ses.sheet_properties.tabColor = "1F4E78"
     for r in range(2, 2 + len(filas_sesion)):
         ws_ses.cell(row=r, column=7).number_format = "0.0"
-    _tabla(ws_ses, f"A1:H{1 + len(filas_sesion)}", "TblSesiones")
+    _tabla(ws_ses, f"A1:H{1 + len(filas_sesion)}", "TblSesiones", len(filas_sesion))
 
     # ---- Paros ----
     ws_par = wb.create_sheet("Paros")
@@ -279,7 +288,7 @@ def exportar_dia(fecha: str, ruta_destino: str):
     ws_par.sheet_properties.tabColor = "C00000"
     for r in range(2, 2 + len(filas_paro)):
         ws_par.cell(row=r, column=9).number_format = "0.0"
-    _tabla(ws_par, f"A1:J{1 + len(filas_paro)}", "TblParos")
+    _tabla(ws_par, f"A1:J{1 + len(filas_paro)}", "TblParos", len(filas_paro))
 
     # ---- Trabajos (todo por segmento, nada acumulado) ----
     ws_tra = wb.create_sheet("Trabajos")
@@ -295,7 +304,7 @@ def exportar_dia(fecha: str, ruta_destino: str):
     for r in range(2, 2 + len(filas_trabajo)):
         ws_tra.cell(row=r, column=9).number_format = "0%"
         ws_tra.cell(row=r, column=15).number_format = "0.0"
-    _tabla(ws_tra, f"A1:O{1 + len(filas_trabajo)}", "TblTrabajos")
+    _tabla(ws_tra, f"A1:O{1 + len(filas_trabajo)}", "TblTrabajos", len(filas_trabajo))
 
     # ---- Resumen (KPIs con formulas + top causas estatico) ----
     ws_res = wb.create_sheet("Resumen", 0)
@@ -421,9 +430,18 @@ def exportar_dia(fecha: str, ruta_destino: str):
             chart.title = "Min paro por causa"
             chart.y_axis.title = "Min"
             n = len(por_causa)
-            # Bloque "Por causa": datos desde b2+1, col C = min
-            chart.add_data(Reference(ws_cru, min_col=3, min_row=b2, max_row=b2 + n), titles_from_data=True)
-            chart.set_categories(Reference(ws_cru, min_col=1, min_row=b2 + 1, max_row=b2 + n))
+            # Bloque "Por causa": `b2` es la PRIMERA fila de datos, asi que el
+            # encabezado (titulo de la serie) esta en `b2-1` y los datos van de
+            # `b2` a `b2+n-1`. Con `min_row=b2` el titulo salia del primer
+            # valor (la leyenda mostraba un numero), se perdia la causa con
+            # mas minutos y se colaba la fila en blanco como barra fantasma.
+            chart.add_data(
+                Reference(ws_cru, min_col=3, min_row=b2 - 1, max_row=b2 + n - 1),
+                titles_from_data=True,
+            )
+            chart.set_categories(
+                Reference(ws_cru, min_col=1, min_row=b2, max_row=b2 + n - 1)
+            )
             chart.height = 7.5
             ws_cru.add_chart(chart, f"A{fila}")
         except Exception:

@@ -13,6 +13,10 @@ __pycache__/
 *.sqlite
 *.sqlite3
 
+# Reportes generados por la exportacion automatica (en dev viven en la raiz;
+# en produccion, dentro de la carpeta de datos WTSControlData)
+exportaciones/
+
 # Distribution / packaging
 .Python
 build/

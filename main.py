@@ -16,7 +16,9 @@ queue.Queue() drenada en el hilo principal (QTimer).
 
 import logging
 import os
+import queue
 import sys
+import threading
 import time
 
 import qtawesome as qta
@@ -56,8 +58,18 @@ from src.gui.util import desplazamiento_tactil
 from src.hardware.biometric_service import BiometricService
 from src.hardware.modbus_controller import ModbusController
 from src.hardware.simulacion_controller import SimulacionController
+from src.reportes.export_auto import ProgramadorExport
 
 log = logging.getLogger(__name__)
+
+# Cada cuanto se revisa si toca un export automatico (snapshot por hora o
+# cierre de dias terminados). 60 s no es critico: el cierre del dia EN CURSO
+# no depende de este tick, lo dispara el cierre de sesion al instante.
+EXPORT_REVISION_MS = 60000
+
+# Segundos que se le dan al export que este volando cuando la app se cierra
+# (si se va la luz, el archivo sale bien igual; solo falta el ultimo paso).
+EXPORT_CIERRE_ESPERA_S = 10
 
 # Iconos del header via qtawesome (fuentes incluidas en el paquete; ver
 # requirements.txt). GOTCHA de empaquetado PyInstaller: incluir qtawesome
@@ -140,6 +152,29 @@ class App(QMainWindow):
         self._timer_avisos.timeout.connect(self._revisar_avisos)
         self._timer_avisos.start()
         self._revisar_avisos()
+
+        # Exportacion automatica a Excel: snapshot por hora (para monitoreo
+        # en vivo) y cierre del dia. El trabajo pesado (armar el workbook)
+        # corre en un hilo; el resultado se drena por queue en el hilo de la
+        # GUI, como el resto de la app. El cierre del dia EN CURSO no espera
+        # al tick: lo dispara el cierre de sesion (senal `sesion_cambiada`).
+        self._export_prog = ProgramadorExport.desde_config()
+        self._export_cola = queue.Queue()
+        self._export_ahora = None
+        self._export_en_vuelo = False
+        self._export_hoy_confirmado = ""
+        self._timer_export = QTimer(self)
+        self._timer_export.setInterval(EXPORT_REVISION_MS)
+        self._timer_export.timeout.connect(self._revisar_export)
+        self._timer_export.start()
+        # Primer intento poco despues de arrancar: cubre el catch-up de los
+        # dias que no se exportaron porque la PC estuvo apagada.
+        QTimer.singleShot(5000, self._revisar_export)
+        if self._export_prog.activo:
+            log.info(
+                "Export automatico activo (cada_hora=%s, dir=%s)",
+                self._export_prog.cada_hora, self._export_prog.dir_auto,
+            )
 
         # Siempre en pantalla completa; desactivar con BIOMETRICO_KIOSKO=0.
         self.kiosko = os.environ.get("BIOMETRICO_KIOSKO") != "0"
@@ -261,6 +296,17 @@ class App(QMainWindow):
             self._sesion_nombre if self._sesion_nombre else "Iniciar sesion"
         )
         self._refrescar_boton_sesion()
+        if not self._sesion_nombre:
+            # Se acaba de cerrar una sesion: si era la ultima del dia, el
+            # cierre del reporte sale YA (con la PC todavia encendida) en vez
+            # de esperar al siguiente tick; si no lo es, no hay nada que
+            # hacer. Se difiere un tick porque el primer aviso llega DENTRO
+            # del constructor de InicioView (antes del programador de export).
+            # El "ya exportado" se invalida aqui: la sesion que se cierra
+            # puede ser una reapertura (turno extendido) con datos nuevos.
+            self._export_hoy_confirmado = ""
+            QTimer.singleShot(
+                0, lambda: self._revisar_export(incluir_hoy=True))
 
     def _refrescar_boton_sesion(self):
         if self._sesion_nombre:
@@ -567,6 +613,119 @@ class App(QMainWindow):
         log.info("Vista activa: %s", nombre)
 
     # ------------------------------------------------------------------
+    # Exportacion automatica a Excel
+    # ------------------------------------------------------------------
+
+    def _revisar_export(self, incluir_hoy: bool = False):
+        """Drena el export anterior y, si toca, lanza el siguiente.
+
+        Un solo trabajo en vuelo a la vez: los jobs se confirman de a uno, y
+        el estado (`ultimo_dia`) solo avanza cuando el archivo se genero bien.
+
+        `incluir_hoy` lo usan los eventos (cierre de sesion / de la app) para
+        pedir ademas el cierre del dia EN CURSO, que el tick no pide nunca.
+        """
+        if not hasattr(self, "_export_prog"):
+            return  # llego un aviso de sesion antes de armar el programador
+        self._drenar_export()
+        if self._export_en_vuelo or not self._export_prog.activo:
+            return
+        try:
+            ahora = self._export_prog.ahora()
+            trabajos = self._export_prog.pendientes(ahora, incluir_hoy=incluir_hoy)
+        except Exception:  # noqa: BLE001 - un reporte nunca debe tumbar la app
+            log.error("No se pudo planificar el export automatico",
+                      exc_info=True)
+            return
+        if not trabajos:
+            return
+        self._export_ahora = ahora
+        self._export_en_vuelo = True
+        threading.Thread(
+            target=self._exportar_en_hilo, args=(trabajos[0],), daemon=True
+        ).start()
+
+    def _exportar_en_hilo(self, trabajo):
+        """Hilo secundario: arma el Excel. Nunca toca widgets."""
+        try:
+            ok, mensaje = self._export_prog.ejecutar(trabajo, self._export_ahora)
+        except Exception as e:  # noqa: BLE001 - se reporta, no se propaga
+            ok, mensaje = False, f"error inesperado: {e}"
+        self._export_cola.put((trabajo, ok, mensaje))
+
+    def _drenar_export(self):
+        """Recoge los resultados del hilo y confirma/loguea cada trabajo."""
+        etiquetas = {"hora": "snapshot por hora", "hoy": "cierre de hoy",
+                     "dia": "cierre del dia", "catchup": "recuperacion"}
+        while True:
+            try:
+                trabajo, ok, mensaje = self._export_cola.get_nowait()
+            except queue.Empty:
+                return
+            self._export_en_vuelo = False
+            etiqueta = etiquetas.get(trabajo.tipo, trabajo.tipo)
+            if ok:
+                self._export_prog.confirmar(trabajo, self._export_ahora)
+                if trabajo.tipo == "hoy":
+                    # No repetirlo en el cierre de la app (si el archivo ya
+                    # esta bueno, volver a escribirlo solo lo ensucia).
+                    self._export_hoy_confirmado = trabajo.fecha
+                log.info("Export automatico (%s %s): %s",
+                         etiqueta, trabajo.fecha, mensaje)
+            else:
+                log.warning("Export automatico FALLO (%s %s): %s",
+                            etiqueta, trabajo.fecha, mensaje)
+
+    def _exportar_antes_de_salir(self):
+        """Ultima oportunidad: deja el reporte del dia listo antes de salir.
+
+        La app se cierra para apagar la PC, asi que a partir de aqui ya no
+        habra mas ticks ni senales que disparen el export. Si el cierre de
+        sesion no alcanzo a generarlo (o fallo), se genera aqui mismo: bloquea
+        el hilo de la GUI unos segundos, justo antes de morir, y es un precio
+        aceptable para no empujar el problema a la mañana siguiente.
+        """
+        if not getattr(self, "_export_prog", None) or not self._export_prog.activo:
+            return
+        try:
+            # Deja terminar el export que este volando (p. ej. el del cierre
+            # de sesion de hace un segundo) para no pisarnos el mismo archivo.
+            limite = time.monotonic() + EXPORT_CIERRE_ESPERA_S
+            while self._export_en_vuelo and time.monotonic() < limite:
+                self._drenar_export()
+                if not self._export_en_vuelo:
+                    break
+                time.sleep(0.2)
+            if self._export_en_vuelo:
+                log.warning(
+                    "Export en curso sin terminar al salir; el cierre del "
+                    "dia lo retoma el proximo arranque.")
+                return
+            ahora = self._export_prog.ahora()
+            trabajos = self._export_prog.pendientes(ahora, incluir_hoy=True)
+            if self._export_hoy_confirmado:
+                trabajos = [
+                    t for t in trabajos
+                    if not (t.tipo == "hoy" and t.fecha == self._export_hoy_confirmado)
+                ]
+        except Exception:  # noqa: BLE001 - un reporte nunca debe impedir salir
+            log.error("No se pudo preparar el cierre del reporte", exc_info=True)
+            return
+
+        for trabajo in trabajos:
+            try:
+                ok, mensaje = self._export_prog.ejecutar(trabajo, ahora)
+            except Exception as e:  # noqa: BLE001 - se reporta, no se propaga
+                ok, mensaje = False, f"error inesperado: {e}"
+            if ok:
+                self._export_prog.confirmar(trabajo, ahora)
+                log.info("Export de cierre (%s %s): %s",
+                         trabajo.tipo, trabajo.fecha, mensaje)
+            else:
+                log.warning("Export de cierre FALLO (%s %s): %s",
+                            trabajo.tipo, trabajo.fecha, mensaje)
+
+    # ------------------------------------------------------------------
     # Cierre
     # ------------------------------------------------------------------
 
@@ -582,6 +741,10 @@ class App(QMainWindow):
         if vista is not None and not vista.aplicacion_puede_cerrarse():
             evento.ignore()
             return
+        # Ultima oportunidad del reporte del dia: a partir de aqui ya no hay
+        # ticks ni senales (la PC se va a apagar), asi que lo que falte se
+        # genera ahora, con la app todavia viva.
+        self._exportar_antes_de_salir()
         # cleanup() deja el coil PAUSE en paro sostenido si hay enlace, para
         # que la maquina nunca quede cortando sin supervision (7.2.2).
         self.controlador.cleanup()

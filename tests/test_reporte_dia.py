@@ -278,3 +278,102 @@ def test_un_paro_de_maquina_en_el_mismo_lugar_si_cuenta(db, tmp_path):
             "un paro de maquina dentro del segmento debe contar")
     finally:
         wb.close()
+
+
+# ---------------------------------------------------------------------------
+# Integridad del archivo generado
+#
+# Estos dos casos NO los detecta openpyxl (tolera tablas y graficos mal
+# formados), pero Excel real SI: el libro deja de abrirse o el grafico miente.
+# Por eso se validan los rangos ya escritos en el .xlsx.
+# ---------------------------------------------------------------------------
+
+
+def _tablas(wb):
+    """[(hoja, nombre, ref)] de todas las tablas oficiales del libro."""
+    return [
+        (hoja, nombre, ref)
+        for hoja in wb.sheetnames
+        for nombre, ref in wb[hoja].tables.items()
+    ]
+
+
+def test_un_dia_sin_paros_ni_trabajos_no_crea_tablas_invalidas(db, tmp_path):
+    """Un dia con sesion pero sin paros ni trabajos debe poder abrirse.
+
+    openpyxl tolera una tabla de Excel con SOLO el encabezado (ref A1:J1),
+    pero Excel la rechaza: el libro sale "con contenido problematico" y no se
+    puede abrir. La hoja debe quedar con su encabezado y SIN tabla.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database)
+    sesion_id = database.abrir_sesion(operador_id)
+    database.cerrar_sesion(sesion_id, 0)
+
+    ruta = str(tmp_path / "vacio.xlsx")
+    ok, msg, _ = exportar_dia(database.ahora_local()[:10], ruta)
+    assert ok, f"el export fallo: {msg}"
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(ruta)
+    try:
+        assert not wb["Paros"].tables, "Paros vacio no debe llevar tabla"
+        assert not wb["Trabajos"].tables, "Trabajos vacio no debe llevar tabla"
+        # Guardia general: ninguna tabla puede cubrir solo su encabezado.
+        for hoja, nombre, ref in _tablas(wb):
+            filas = int(ref.split(":")[1][1:]) - int(ref.split(":")[0][1:])
+            assert filas >= 1, (
+                f"{hoja}!{nombre} no tiene filas de datos ({ref}): Excel "
+                f"rechaza el archivo")
+    finally:
+        wb.close()
+
+
+def test_el_grafico_de_cruces_usa_el_encabezado_y_todas_las_causas(db, tmp_path):
+    """El grafico debe alinear serie, categorias y valores con la tabla.
+
+    Regresion: con la referencia apuntando a la primera fila de DATOS, la
+    leyenda mostraba el primer valor, la causa con mas minutos desaparecia del
+    grafico y se colaba la fila en blanco como barra fantasma. Se valida
+    contra los rangos del bloque 'Por causa' ya escritos en la hoja.
+    """
+    import src.database as database
+
+    operador_id = _crear_operador(database)
+    sesion_id = database.abrir_sesion(operador_id)
+    database.finalizar_paro(
+        database.iniciar_paro(sesion_id, None),
+        _causa_id_de(database, "mantenimiento"), operador_id)
+    database.finalizar_paro(
+        database.iniciar_paro(sesion_id, None),
+        _causa_id_de(database, "primera pieza"), operador_id)
+    database.cerrar_sesion(sesion_id, 0)
+
+    ruta = str(tmp_path / "grafico.xlsx")
+    ok, msg, _ = exportar_dia(database.ahora_local()[:10], ruta)
+    assert ok, f"el export fallo: {msg}"
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(ruta)
+    try:
+        ws = wb["Cruces"]
+        fila_titulo = next(
+            c.row for c in ws["A"] if c.value == "Por causa")
+        encabezado = fila_titulo + 1
+        primera = encabezado + 1
+        causas = 0
+        while ws.cell(row=primera + causas, column=1).value:
+            causas += 1
+        assert causas == 2, "el bloque debe tener las dos causas"
+        ultima = primera + causas - 1
+
+        serie = ws._charts[0].series[0]
+        assert serie.tx.strRef.f == f"'Cruces'!C{encabezado}", (
+            "la leyenda debe usar el encabezado, no el primer valor")
+        assert serie.cat.numRef.f == f"'Cruces'!$A${primera}:$A${ultima}"
+        assert serie.val.numRef.f == f"'Cruces'!$C${primera}:$C${ultima}"
+    finally:
+        wb.close()
