@@ -92,7 +92,7 @@ def crear_controlador():
     """Fabrica del HAL: Modbus TCP si hay MODBUS_HOST, si no SimulacionController.
 
     En la PC Fanless Windows se configura MODBUS_HOST en .env y la planta
-    maneja reles y contador via el modulo Advantech. Sin MODBUS_HOST (o en
+    maneja reles y contador via el PLC (Modbus TCP). Sin MODBUS_HOST (o en
     simulacion) se usa SimulacionController, que corre en simulacion (sin
     hardware).
     """

@@ -5,8 +5,19 @@ Sustituye a SimulacionController manteniendo EXACTAMENTE la misma interfaz
 publica (ver docstring de simulacion_controller.py), para que la GUI jamas se
 entere de que el hardware cambio de simulacion a red.
 
+MODOS DE COMANDO (el hardware cambio de modulo Advantech a PLC Zelio):
+    - "coil" (por defecto): el PC escribe coils con FC05
+      (write_single_coil). Es el caso del modulo Advantech WISE-4060LAN.
+    - "registro": el Zelio Logic 2 con modulo Ethernet SR3NET01BD NO
+      expone coils, solo 4 palabras de ENTRADA (J1..J4, dirs 16-19, que
+      escribe el master) y 4 de SALIDA (O1..O4, dirs 20-23, que lee el
+      master). START y PAUSE se escriben como un BIT dentro de una palabra J
+      (FC06, write_single_register). La PC es la unica que escribe esas
+      palabras, asi que mantiene el valor vigente en memoria y reescribe la
+      palabra completa (sin read-modify-write).
+
 Diseno (decisiones de planta):
-    - EL CONTADOR DE CORTES VIVE EN EL MODULO. El modulo Advantech cuenta los
+    - EL CONTADOR DE CORTES VIVE EN EL PLC/MODULO. El hardware cuenta los
       pulsos del sensor en un contador interno de alta velocidad (por
       hardware); la PC NUNCA detecta flancos localmente, porque Windows no es
       un SO en tiempo real y un micro-congelamiento del proceso perderia
@@ -78,7 +89,13 @@ except ImportError:  # pragma: no cover - pyModbusTCP en requirements.txt
 class ModbusController:
     """Controlador de reles y contador de cortes via Modbus TCP."""
 
-    def __init__(self, modbus_config=None):
+    def __init__(self, modbus_config=None, iniciar_polling=True):
+        """Controlador del HAL.
+
+        `iniciar_polling=False` deja el controlador sin el hilo de fondo del
+        polling (lo usan las pruebas automatizadas, que inyectan un cliente
+        falso y comprueban las escrituras a mano).
+        """
         cfg = dict(modbus_config or config.MODBUS_CONFIG)
 
         self._host = cfg.get("host", "").strip()
@@ -97,17 +114,31 @@ class ModbusController:
         self._start_invertido = bool(cfg.get("start_coil_invertido", False))
         self._pause_invertido = bool(cfg.get("pause_coil_invertido", False))
 
+        # Modo de comando: "coil" (FC05, modulo Advantech) o "registro"
+        # (FC06, Zelio SR3NET01BD: el comando es un bit de una palabra J).
+        self._cmd_mode = str(cfg.get("cmd_mode", "coil")).strip().lower()
+        self._start_register = int(cfg.get("start_register", 16))
+        self._start_bit = int(cfg.get("start_bit", 0))
+        self._pause_register = int(cfg.get("pause_register", 17))
+        self._pause_bit = int(cfg.get("pause_bit", 0))
+
         self._bits = 16 * self._counter_words
         self._max_valor = (1 << self._bits) - 1
 
         self._lock = threading.Lock()          # estado compartido con la UI
-        self._lock_modbus = threading.Lock()   # socket: un request a la vez
+        # RLock (reentrante): `_conectar()` se puede llamar desde dentro de
+        # `_secuencia_marcha`, que ya tiene el lock (MARCHA sin enlace).
+        self._lock_modbus = threading.RLock()  # socket: un request a la vez
         self._stop = threading.Event()
 
         self._modbus = None
         self._conectado = False
         self._cortes = 0
         self._ultimo_contador = 0
+        # Valor vigente de cada palabra J escrita (modo "registro"): permite
+        # poner o quitar un bit sin read-modify-write, porque la PC es la
+        # unica que escribe esas palabras.
+        self._reg_j = {}
         # Exclusion de cortes (modo "Primera pieza"): con el conteo
         # suspendido los deltas van a `_cortes_excluidos`, NO a `_cortes`.
         # Viven solo en memoria y se pierden al retomar (piezas de prueba/
@@ -134,7 +165,8 @@ class ModbusController:
                 log.error("pyModbusTCP no instalado; Modbus en simulacion.")
                 self._simulacion = True
             else:
-                self._arrancar_polling()
+                if iniciar_polling:
+                    self._arrancar_polling()
 
     # ------------------------------------------------------------------
     # Conexion y polling
@@ -174,10 +206,10 @@ class ModbusController:
     def _combinar_regs(self, regs):
         """Junta los registros de 16 bits en un valor.
 
-        El WISE-4060LAN guarda el valor de 32 bits con la palabra MENOS
+        El hardware publica el valor de 32 bits con la palabra MENOS
         significativa en el primer registro (little-endian: 40001=low,
-        40002=high). Configurable con MODBUS_COUNTER_LITTLE_ENDIAN por si un
-        modelo distinto usa big-endian (alta primero).
+        40002=high). Configurable con MODBUS_COUNTER_LITTLE_ENDIAN por si el
+        PLC lo publica al reves (big-endian: alta primero).
         """
         registros = regs[: self._counter_words]
         if self._counter_little_endian:
@@ -188,24 +220,31 @@ class ModbusController:
         return valor
 
     def _aplicar_paro_inicial(self, cliente):
-        """Latch PAUSE en su nivel activo la primera vez que se establece el
-        enlace, dejando la maquina detenida (como si estuviera en paro) hasta
-        que el operador la inicie.
+        """Latch de PARO en su nivel activo la primera vez que se establece
+        el enlace, dejando la maquina detenida (como si estuviera en paro)
+        hasta que el operador la inicie.
 
         Solo se aplica una vez por ejecucion: en reconexiones posteriores la
         maquina podria estar en marcha y no debe pararse por una caida de red.
         """
         if self._pausa_inicial_aplicada:
             return
-        try:
-            cliente.write_single_coil(
-                self._pause_coil, self._nivel_activo(self._pause_invertido)
-            )
+        if self._maquina_en_marcha:
+            # El operador ya ordeno MARCHA (p. ej. pulso INICIAR nada mas
+            # abrir la app): latchear el PARO aqui lo pisaria y la maquina
+            # NO arrancaria. Se marca como aplicado para que una reconexion
+            # posterior tampoco latchee el PARO con la maquina en marcha.
+            log.info("Inicio en PARO omitido: ya hay MARCHA ordenada.")
             self._pausa_inicial_aplicada = True
-            log.info("Inicio en PARO: coil PAUSE (%s) latch activo.",
-                     self._pause_coil)
-        except Exception as e:  # noqa: BLE001
-            log.warning("No se pudo latchear PAUSE al iniciar: %s", e)
+            return
+        ok = self._escribir_bajo(cliente, self._destino_pause(), True,
+                                 self._pause_invertido)
+        if ok:
+            self._pausa_inicial_aplicada = True
+            log.info("Inicio en PARO: %s latch activo.",
+                     self._descripcion_pause())
+        else:
+            log.warning("No se pudo latchear el PARO al iniciar.")
 
     def _bucle_polling(self):
         """Ciclo de polling: leer contador, sumar delta, reconectar si cae."""
@@ -389,8 +428,14 @@ class ModbusController:
             self._cortes = int(total)
 
     # ------------------------------------------------------------------
-    # Relees: START pulso momentaneo, PAUSE latch (paro sostenido)
+    # Salidas: START (pulso momentaneo) y PAUSE (latch sostenido)
     # ------------------------------------------------------------------
+    # Dos modos de comando con el MISMO contrato publico:
+    #   - "coil"     : modulo Advantech (FC05, write_single_coil).
+    #   - "registro" : Zelio SR3NET01BD (FC06, write_single_register): el
+    #                  comando es un BIT dentro de una palabra J. START y
+    #                  PAUSE pueden vivir en palabras distintas (J1 y J2 por
+    #                  defecto) o compartir una misma con bits distintos.
 
     @staticmethod
     def _nivel_activo(invertido):
@@ -402,29 +447,98 @@ class ModbusController:
         """Nivel logico del coil en reposo (sin accion)."""
         return invertido
 
+    @staticmethod
+    def _valor_registro(activo, invertido):
+        """Valor 1/0 de la palabra segun la polaridad del cableado.
+
+        Sin invertir: la accion es el bit a 1. Invertido (logica NC): la
+        accion es el bit a 0.
+        """
+        if invertido:
+            return 0 if activo else 1
+        return 1 if activo else 0
+
+    def _destino_start(self):
+        """Destino de la salida de MARCHA: ("coil", n) o ("registro", reg, bit)."""
+        if self._cmd_mode == "registro":
+            return ("registro", self._start_register, self._start_bit)
+        return ("coil", self._start_coil)
+
+    def _destino_pause(self):
+        """Destino de la salida de PARO: ("coil", n) o ("registro", reg, bit)."""
+        if self._cmd_mode == "registro":
+            return ("registro", self._pause_register, self._pause_bit)
+        return ("coil", self._pause_coil)
+
+    def _descripcion_start(self):
+        """Texto legible del destino de MARCHA (para el log)."""
+        if self._cmd_mode == "registro":
+            return f"registro {self._start_register} bit {self._start_bit}"
+        return f"coil {self._start_coil}"
+
+    def _descripcion_pause(self):
+        """Texto legible del destino de PARO (para el log)."""
+        if self._cmd_mode == "registro":
+            return f"registro {self._pause_register} bit {self._pause_bit}"
+        return f"coil {self._pause_coil}"
+
     def maquina_lista(self):
         """Arranca la maquina: suelta el rele de PARO (por si quedo en latch)
         y pulsa START."""
         if self._maquina_en_marcha:
             return
-        # El PARO es sostenido: garantizar que este en reposo antes de arrancar
-        # (idempotente; tambien cubre recuperacion tras cerrar la app en paro).
-        self._escribir_coil(
-            self._pause_coil, self._nivel_reposo(self._pause_invertido)
-        )
-        log.info("-> MARCHA: pulso coil START (%s).", self._start_coil)
+        log.info("-> MARCHA: pulso %s.", self._descripcion_start())
         self._maquina_en_marcha = True
         self._ultimo_arranque = time.time()
-        self._pulso_coil(self._start_coil, invertido=self._start_invertido)
+        if self._simulacion:
+            return
+        threading.Thread(target=self._secuencia_marcha, daemon=True).start()
+
+    def _secuencia_marcha(self):
+        """Suelta el latch de PARO y luego pulsa START, en ese orden y desde
+        un solo hilo.
+
+        El orden importa: si el PARO se soltara DESPUES del pulso, la maquina
+        podria no arrancar (el boton de marcha quedaria anterior al de paro).
+        """
+        with self._lock_modbus:
+            cliente = self._modbus
+            if cliente is None or not self._conectado:
+                # Todavia no hay enlace (el operador pulsa MARCHA nada mas
+                # abrir la app): se conecta aqui o la orden se perderia.
+                log.info("MARCHA sin enlace: se intenta conectar.")
+                if not self._conectar():
+                    log.warning("Modbus sin conexion: no se pudo arrancar.")
+                    return
+                cliente = self._modbus
+            # 1) PARO a reposo (idempotente; tambien cubre la recuperacion
+            #    tras cerrar la app con la maquina en paro).
+            self._escribir_bajo(cliente, self._destino_pause(), False,
+                                self._pause_invertido)
+            # 2) Pulso de MARCHA.
+            self._pulso_bajo(cliente, self._destino_start(),
+                              self._start_invertido, self._pulso_ms)
 
     def maquina_pausada(self):
-        """Para la maquina con PARO SOSTENIDO: deja el coil PAUSE en su nivel
-        activo y lo mantiene hasta reanudar (latch)."""
-        log.info("-> PARO: latch coil PAUSE (%s) activo.", self._pause_coil)
+        """Para la maquina con PARO SOSTENIDO: deja la salida de PARO en su
+        nivel activo y lo mantiene hasta reanudar (latch)."""
+        log.info("-> PARO: latch %s activo.", self._descripcion_pause())
         self._maquina_en_marcha = False
-        self._escribir_coil(
-            self._pause_coil, self._nivel_activo(self._pause_invertido)
-        )
+        if self._simulacion:
+            return
+        destino = self._destino_pause()
+        invertido = self._pause_invertido
+
+        def _escribir():
+            with self._lock_modbus:
+                cliente = self._modbus
+                if cliente is None or not self._conectado:
+                    log.warning("Modbus sin conexion: no se pudo escribir "
+                                "la salida de PARO.")
+                    return
+                self._escribir_bajo(cliente, destino, True, invertido)
+
+        threading.Thread(target=_escribir, daemon=True).start()
 
     def reprisar_maquina(self):
         """Reanuda la produccion tras un paro autorizado (suelta el latch
@@ -434,71 +548,91 @@ class ModbusController:
     def maquina_detenida(self) -> bool:
         return not self._maquina_en_marcha
 
-    def _escribir_coil(self, coil, valor):
-        """Escribe el coil y LO MANTIENE en `valor` (latch), en un hilo de
-        fondo. No regresa solo a reposo: la transicion la decide el estado de
-        la maquina (paro/arranque). En modo simulacion es un no-op silencioso.
+    # ------------------------------------------------------------------
+    # Escrituras de bajo nivel (el socket ya esta bloqueado por el
+    # llamador: el hilo de polling y las acciones comparten el lock)
+    # ------------------------------------------------------------------
+
+    def _palabra_con_bit(self, registro, bit, puesto):
+        """Valor de la palabra J con el bit puesto (o quitado).
+
+        El cache local evita el read-modify-write: la PC es la unica que
+        escribe las palabras J, asi que puede mantener el valor vigente en
+        memoria y reescribir la palabra completa.
         """
-        if self._simulacion:
-            return
+        palabra = self._reg_j.get(registro, 0)
+        if puesto:
+            palabra |= (1 << bit)
+        else:
+            palabra &= ~(1 << bit) & 0xFFFF
+        return palabra
 
-        def _escribir():
-            with self._lock_modbus:
-                cliente = self._modbus
-                if not self._conectado or cliente is None:
-                    log.warning("Modbus sin conexion: no se pudo escribir "
-                                "el coil %s.", coil)
-                    return
-                try:
-                    cliente.write_single_coil(coil, valor)
-                    log.info("Coil %s -> %s (latch).", coil, valor)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("Fallo escribir el coil %s: %s", coil, e)
-                    self._desconectar()
+    def _escribir_bajo(self, cliente, destino, activa, invertido):
+        """Escribe el estado de una salida y lo MANTIENE (latch).
 
-        threading.Thread(target=_escribir, daemon=True).start()
-
-    def _pulso_coil(self, coil, invertido=False):
-        """Pulso momentaneo del coil (solo START) en un hilo de fondo.
-
-        Por defecto (invertido=False): True durante PULSO_DURACION_MS (rele
-        energizado, contacto cerrado, simula presionar el boton) y luego False
-        (rele desenergizado). Con invertido=True se invierte la polaridad:
-        el pulso activo es False y el reposo es True (para cableados donde la
-        maquina actua cuando el circuito se ABRE; p. ej. boton NA en serie o
-        logica NC). El lock del socket serializa los pulsos y el polling para
-        no solapar dos relevadores. En modo simulacion no hay socket: los
-        pulsos son un no-op silencioso.
+        `activa` es la intencion LOGICA (True = arrancar / parar, False =
+        reposo). `invertido` invierte la polaridad del cableado. Devuelve
+        True si la escritura se confirmo.
         """
-        if self._simulacion:
-            return
+        if destino[0] == "registro":
+            bit_puesto = self._valor_registro(activa, invertido) == 1
+            return self._escribir_registro_bajo(cliente, destino[1],
+                                                 destino[2], bit_puesto)
+        nivel = (self._nivel_activo(invertido) if activa
+                 else self._nivel_reposo(invertido))
+        return self._escribir_coil_bajo(cliente, destino[1], nivel)
 
+    def _escribir_coil_bajo(self, cliente, coil, valor):
+        """Escribe un coil. pyModbusTCP devuelve False ante cualquier error
+        sin lanzar excepcion, asi que se verifica el retorno."""
+        try:
+            ok = cliente.write_single_coil(coil, valor)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Fallo escribir el coil %s: %s", coil, e)
+            self._desconectar()
+            return False
+        if not ok:
+            log.error("El modulo rechazo escribir el coil %s.", coil)
+            self._desconectar()
+            return False
+        log.info("Coil %s -> %s (latch).", coil, valor)
+        return True
+
+    def _escribir_registro_bajo(self, cliente, registro, bit, puesto):
+        """Escribe un bit de una palabra J (Zelio SR3NET01BD)."""
+        palabra = self._palabra_con_bit(registro, bit, puesto)
+        try:
+            ok = cliente.write_single_register(registro, palabra)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Fallo escribir el registro %s: %s", registro, e)
+            self._desconectar()
+            return False
+        if not ok:
+            log.error("El modulo rechazo escribir el registro %s.", registro)
+            self._desconectar()
+            return False
+        self._reg_j[registro] = palabra
+        log.info("Registro %s -> %s (bit %s = %s).", registro, palabra, bit,
+                 puesto)
+        return True
+
+    def _pulso_bajo(self, cliente, destino, invertido, duracion_ms):
+        """Pulso momentaneo de una salida (solo MARCHA): activa, espera y
+        vuelve a reposo."""
+        if destino[0] == "registro":
+            bit_activo = self._valor_registro(True, invertido) == 1
+            if not self._escribir_registro_bajo(cliente, destino[1],
+                                                  destino[2], bit_activo):
+                return False
+            time.sleep(duracion_ms / 1000.0)
+            return self._escribir_registro_bajo(cliente, destino[1],
+                                                 destino[2], not bit_activo)
         nivel_activo = self._nivel_activo(invertido)
         nivel_reposo = self._nivel_reposo(invertido)
-
-        def _pulso():
-            with self._lock_modbus:
-                cliente = self._modbus
-                if not self._conectado or cliente is None:
-                    log.warning("Modbus sin conexion: no se pudo pulsar "
-                                "el coil %s.", coil)
-                    return
-                try:
-                    cliente.write_single_coil(coil, nivel_activo)
-                    log.info("Coil %s PULSO (%s ms, activo=%s).", coil,
-                             self._pulso_ms, nivel_activo)
-                    time.sleep(self._pulso_ms / 1000.0)
-                    cliente.write_single_coil(coil, nivel_reposo)
-                    log.info("Coil %s a reposo (%s).", coil, nivel_reposo)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("Fallo el pulso del coil %s: %s", coil, e)
-                    try:
-                        cliente.write_single_coil(coil, nivel_reposo)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    self._desconectar()
-
-        threading.Thread(target=_pulso, daemon=True).start()
+        if not self._escribir_coil_bajo(cliente, destino[1], nivel_activo):
+            return False
+        time.sleep(duracion_ms / 1000.0)
+        return self._escribir_coil_bajo(cliente, destino[1], nivel_reposo)
 
     # ------------------------------------------------------------------
     # Cierre
@@ -508,13 +642,13 @@ class ModbusController:
         """Detiene el polling, ASEGURA el paro y cierra el socket. Idempotente.
 
         La maquina NUNCA debe quedar cortando sin supervision al morir la
-        app: si hay enlace vivo se escribe el latch PAUSE (paro sostenido)
+        app: si hay enlace vivo se escribe el latch de PARO (paro sostenido)
         ANTES de desconectar. Con la maquina ya detenida re-latchear es
-        inocuo (el rele queda energizado, su estado seguro desde el arranque).
-        La escritura es SINCRONA bajo `_lock_modbus`, asi que espera a que un
-        pulso START en vuelo termine antes de tocar PAUSE; se verifica el
-        retorno porque pyModbusTCP devuelve False ante cualquier error sin
-        lanzar (ver Diagnostico 7.2.1).
+        inocuo (la salida queda energizada, su estado seguro desde el
+        arranque). La escritura es SINCRONA bajo `_lock_modbus`, asi que
+        espera a que un pulso START en vuelo termine antes de tocar el PARO;
+        se verifica el retorno porque pyModbusTCP devuelve False ante
+        cualquier error sin lanzar (ver Diagnostico 7.2.1).
         """
         if self._cleaned:
             return
@@ -524,24 +658,15 @@ class ModbusController:
             cliente = self._modbus
             if (not self._simulacion and self._conectado
                     and cliente is not None):
-                try:
-                    ok = cliente.write_single_coil(
-                        self._pause_coil,
-                        self._nivel_activo(self._pause_invertido),
-                    )
-                    if ok:
-                        log.info("Cierre seguro: coil PAUSE (%s) latch "
-                                 "activo; maquina asegurada en paro.",
-                                 self._pause_coil)
-                    else:
-                        log.error(
-                            "Cierre: el modulo rechazo escribir PAUSE (%s); "
-                            "VERIFICAR LA MAQUINA MANUALMENTE.",
-                            self._pause_coil,
-                        )
-                except Exception as e:  # noqa: BLE001 - cerrar no debe fallar
-                    log.error("Cierre: fallo asegurar PAUSE (%s); VERIFICAR "
-                              "LA MAQUINA MANUALMENTE.", e)
+                ok = self._escribir_bajo(cliente, self._destino_pause(),
+                                         True, self._pause_invertido)
+                if ok:
+                    log.info("Cierre seguro: %s latch activo; maquina "
+                             "asegurada en paro.", self._descripcion_pause())
+                else:
+                    log.error("Cierre: no se pudo asegurar el PARO (%s); "
+                              "VERIFICAR LA MAQUINA MANUALMENTE.",
+                              self._descripcion_pause())
             self._maquina_en_marcha = False
             self._desconectar()
         log.info("ModbusController detenido (hilo de polling finalizado).")

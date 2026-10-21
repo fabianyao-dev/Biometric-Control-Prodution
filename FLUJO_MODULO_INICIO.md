@@ -173,11 +173,11 @@ subgraph A["A · ARRANQUE"]
   A2["main.py:681 — init_db: crea y migra SQLite"]
   A3["main.py:115 — BiometricService: carga SDK DigitalPersona"]
   A4{"main.py:87 — MODBUS_HOST definido?"}
-  A5["ModbusController — HAL real, modulo Advantech WISE-4060LAN"]
+  A5["ModbusController — HAL real, PLC Zelio (SR3NET01BD) por Modbus TCP"]
   A6["SimulacionController — HAL simulado, sin hardware"]
   A7["main.py:546 — mostrar_vista crea el InicioView (una sola vez)"]
   A8["inicio_view.py:227 — _crear_interfaz, _cerrar_sesion_interrumpida, _refrescar_contador, _checkpoint_cortes"]
-  A9["modbus_controller.py:190 — latch PAUSE: la maquina arranca DETENIDA"]
+  A9["modbus_controller.py:220 — latch de PARO: la maquina arranca DETENIDA"]
   A10["main.py:689 — splash finish, ventana en pantalla completa (kiosko)"]
   A1 --> A2 --> A3 --> A4
   A4 -->|"si"| A5
@@ -556,7 +556,7 @@ subgraph L["L · SALIR DE LA APLICACION"]
   L0["Sidebar Salir, o cierre de la ventana (tambien Alt F4)"]
   L1{"main.py:582 — aplicacion_puede_cerrarse :751 — la maquina esta en marcha?"}
   L2["BLOQUEADO: detén la maquina con PARO antes de cerrar el programa"]
-  L3["controlador.cleanup — deja el coil PAUSE latcheado en paro sostenido"]
+  L3["controlador.cleanup — deja el PARO latcheado en paro sostenido (coil o palabra J)"]
   L4["La sesion queda Activa: al arrancar se recupera por el camino B, como un corte de luz"]
   L5["app.exec termina y el bloque finally libera el HAL"]
   L0 --> L1
@@ -574,7 +574,7 @@ subgraph M["M · PROCESOS DE FONDO"]
   M3["actualizar_cortes_sesion, registrar_ultimo_corte y actualizar_detectados — respaldo ante apagones"]
   M4["main.py:142 — timer de avisos de 3 s"]
   M5["biometria no disponible, lector desconectado del USB, HAL en simulacion, Modbus sin comunicacion, sin operadores registrados"]
-  M6["HAL — el CONTADOR DE CORTES vive en el modulo Modbus por flancos; Windows solo lo lee"]
+  M6["HAL — el CONTADOR DE CORTES vive en el PLC (palabras O); Windows solo lo lee por red"]
   M7["Seguro anti-corrida — _verificar_rafaga_arranque :2192, solo con conteo suspendido"]
   M8{"Mas de 5 cortes excluidos en los ultimos 7 s?"}
   M9["Alarma y pregunta: ya empezo a correr la maquina? :2275"]

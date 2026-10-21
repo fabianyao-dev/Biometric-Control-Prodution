@@ -1,24 +1,34 @@
 """
-simulador_modbus.py - Emulador Modbus TCP del modulo Advantech (pruebas).
+simulador_modbus.py - Emulador Modbus TCP (pruebas sin hardware).
 
-Servidor Modbus TCP que imita el comportamiento del modulo real (contador
-interno + coils START/PAUSE) para probar ModbusController, test_modbus.py y la
-GUI SIN hardware. Corre en un proceso aparte ("en paralelo") mientras la app
-se conecta por red (MODBUS_HOST=127.0.0.1).
+Servidor Modbus TCP que imita el hardware de planta para probar
+ModbusController, test_modbus.py y la GUI SIN PLC. Corre en un proceso
+aparte ("en paralelo") mientras la app se conecta por red
+(MODBUS_HOST=127.0.0.1).
+
+Emula los DOS modos de comando del HAL:
+
+    - "coil"     : modulo Advantech WISE-4060LAN. START/PAUSE son coils
+                   (FC05) y el contador se lee en holding registers.
+    - "registro" : Zelio Logic 2 + modulo Ethernet SR3NET01BD. START/PAUSE
+                   son BITS dentro de las palabras J (dir 16-19) y el
+                   contador se lee de las palabras O (dir 20-23), igual que
+                   en el PLC real.
 
 Comportamiento emulado:
     - Registro contador (MODBUS_COUNTER_REGISTER, little-endian como el
-      WISE-4060LAN: palabra baja primero) que sube solo a `--velocidad`
+      hardware real: palabra baja primero) que sube solo a `--velocidad`
       cortes/segundo y/o +1 por Enter. El wraparound del contador se replica
       como en el modulo real.
-    - Coils START/PAUSE (MODBUS_START_COIL / MODBUS_PAUSE_COIL): cada
-      escritura se imprime en consola con marca de tiempo, para verificar
-      que los pulsos son momentaneos (~PULSO_DURACION_MS).
+    - START/PAUSE (coil o bit de palabra J): cada escritura se imprime en
+      consola con marca de tiempo, para verificar que los pulsos son
+      momentaneos (~PULSO_DURACION_MS).
     - Cualquier escritura a registros de holding se loguea (p. ej. un reset
       externo del contador).
 
 Uso:
     venv\\Scripts\\python test\\simulador_modbus.py              # 127.0.0.1:502, +2 cortes/seg
+    venv\\Scripts\\python test\\simulador_modbus.py --modo registro
     venv\\Scripts\\python test\\simulador_modbus.py --velocidad 0   # arranca en pausa (solo manual)
     venv\\Scripts\\python test\\simulador_modbus.py --port 5020 --inicial 100
 
@@ -58,7 +68,9 @@ def _log(*args):
 class BancoModbus(DataBank):
     """DataBank del modulo simulado: contador auto-incremental + log de coils."""
 
-    def __init__(self, palabras_contador, start_coil, pause_coil, counter_register):
+    def __init__(self, palabras_contador, start_coil, pause_coil,
+                 counter_register, modo="coil", start_register=16,
+                 start_bit=0, pause_register=17, pause_bit=0):
         super().__init__()
         self._palabras = int(palabras_contador)
         self._start_coil = int(start_coil)
@@ -67,15 +79,21 @@ class BancoModbus(DataBank):
         self._bits = 16 * self._palabras
         self._max_valor = (1 << self._bits) - 1
 
+        # Modo "registro" (Zelio SR3NET01BD): los comandos son bits dentro
+        # de las palabras J (dir 16-19) y el contador vive en las palabras
+        # O (dir 20-23).
+        self._modo = str(modo).strip().lower()
+        self._start_register = int(start_register)
+        self._start_bit = int(start_bit)
+        self._pause_register = int(pause_register)
+        self._pause_bit = int(pause_bit)
+
         self._contador = 0
         self._acumulado = 0.0
         self._velocidad_objetivo = 0.0
         self._auto = False
         self._stop = threading.Event()
         self._th_contador = None
-
-    # ------------------------------------------------------------------
-    # Contador
     # ------------------------------------------------------------------
 
     def iniciar_contador(self, inicial, velocidad):
@@ -162,6 +180,21 @@ class BancoModbus(DataBank):
 
     def on_holding_registers_change(self, address, from_value, to_value,
                                     srv_info):
+        if self._modo == "registro":
+            # El master escribio una palabra J: se muestran los bits de
+            # comando (START/PAUSE) que llevan.
+            if address in (self._start_register, self._pause_register):
+                bits = []
+                if address == self._start_register:
+                    bits.append(f"START={(to_value >> self._start_bit) & 1}")
+                if address == self._pause_register:
+                    bits.append(f"PAUSE={(to_value >> self._pause_bit) & 1}")
+                _log(f"[{_marca()}] Escritura palabra J (dir {address}) = "
+                     f"{to_value} -> " + " ".join(bits))
+                return
+            if address != self._counter_register:
+                _log(f"[{_marca()}] Escritura registro {address} = {to_value}")
+                return
         if address == self._counter_register:
             _log(f"[{_marca()}] Registro contador sobrescrito: {to_value}")
 
@@ -207,19 +240,31 @@ def _bucle_comandos(banco):
 def main():
     cfg = config.MODBUS_CONFIG
     parser = argparse.ArgumentParser(
-        description="Emulador Modbus TCP del modulo Advantech"
+        description="Emulador Modbus TCP (Advantech o Zelio SR3NET01BD)"
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=cfg["port"])
+    parser.add_argument("--modo", choices=["coil", "registro"],
+                        default=str(cfg.get("cmd_mode", "coil")).strip().lower(),
+                        help="Mapa emulado (por defecto, el del .env)")
     parser.add_argument("--velocidad", type=float, default=2.0,
                         help="Cortes/segundo automaticos (0 = solo manual)")
     parser.add_argument("--inicial", type=int, default=0,
                         help="Valor inicial del contador")
+    parser.add_argument("--contador", type=int, default=None,
+                        help="Direccion del registro contador "
+                             "(por defecto, MODBUS_COUNTER_REGISTER)")
     args = parser.parse_args()
 
+    contador = (args.contador if args.contador is not None
+                else cfg["counter_register"])
     banco = BancoModbus(
         cfg["counter_words"], cfg["start_coil"], cfg["pause_coil"],
-        cfg["counter_register"],
+        contador, modo=args.modo,
+        start_register=cfg.get("start_register", 16),
+        start_bit=cfg.get("start_bit", 0),
+        pause_register=cfg.get("pause_register", 17),
+        pause_bit=cfg.get("pause_bit", 0),
     )
     servidor = ModbusServer(host=args.host, port=args.port, no_block=True,
                             data_bank=banco)
@@ -231,10 +276,16 @@ def main():
 
     banco.iniciar_contador(args.inicial, args.velocidad)
     _log(f"Simulador Modbus en {args.host}:{args.port} "
-         f"(unit_id={cfg['unit_id']})")
-    _log(f"  contador: reg {cfg['counter_register']} x{cfg['counter_words']} "
+         f"(unit_id={cfg['unit_id']}, modo {args.modo})")
+    _log(f"  contador: reg {contador} x{cfg['counter_words']} "
          f"words, inicial {args.inicial}, {args.velocidad} cortes/seg")
-    _log(f"  coils: START={cfg['start_coil']} PAUSE={cfg['pause_coil']}")
+    if args.modo == "registro":
+        _log(f"  palabras J dir 16-19 | START: palabra "
+             f"{cfg.get('start_register', 16)} bit {cfg.get('start_bit', 0)} | "
+             f"PAUSE: palabra {cfg.get('pause_register', 17)} "
+             f"bit {cfg.get('pause_bit', 0)}")
+    else:
+        _log(f"  coils: START={cfg['start_coil']} PAUSE={cfg['pause_coil']}")
     _log(AYUDA)
     try:
         seguir = _bucle_comandos(banco)

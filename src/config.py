@@ -378,28 +378,54 @@ EXPORT_AUTO_CONFIG = {
 
 
 # --- Modbus TCP (PC Fanless Windows) ---
-# Contador interno de alta velocidad del modulo Advantech: el PC solo hace
-# polling por red; NUNCA cuenta flancos localmente (Windows no es RTOS y un
+# El CONTADOR de cortes vive en el modulo/PLC: el PC solo hace polling por
+# red; NUNCA cuenta flancos localmente (Windows no es RTOS y un
 # micro-congelamiento perderia cortes). Sin `MODBUS_HOST` o con
 # `MODBUS_SIMULACION=1` se cae a modo simulacion.
+#
+# Hay DOS modos de comando (`MODBUS_CMD_MODE`), porque el hardware cambio:
+#   - "coil"     : modulo Advantech WISE-4060LAN (FC05, coils 16-19).
+#   - "registro" : Zelio Logic 2 SR3 + modulo Ethernet SR3NET01BD. Este
+#                  NO expone coils: solo 4 palabras de ENTRADA (J1..J4, dirs
+#                  16-19, escritura del master) y 4 de SALIDA (O1..O4, dirs
+#                  20-23, solo lectura). Los comandos van como un BIT dentro
+#                  de una palabra J.
 MODBUS_CONFIG = {
     "host": os.environ.get("MODBUS_HOST", "").strip(),
     "port": _env_int("MODBUS_PORT", 502),
     "unit_id": _env_int("MODBUS_UNIT_ID", 1),
     "timeout": 2.0,
+    # Modo de escritura de los comandos: "coil" (FC05) o "registro" (FC06).
+    "cmd_mode": os.environ.get("MODBUS_CMD_MODE", "coil").strip().lower(),
     "start_coil": _env_int("MODBUS_START_COIL", 0),
     "pause_coil": _env_int("MODBUS_PAUSE_COIL", 1),
+    # Modo "registro": palabra J y bit de cada comando (0 = bit0).
+    # Por defecto J1=16 START, J2=17 PAUSE (J3/J4 libres para reset y
+    # heartbeat). START y PAUSE pueden compartir palabra con bits distintos.
+    "start_register": _env_int("MODBUS_START_REGISTER", 16),
+    "start_bit": _env_int("MODBUS_START_BIT", 0),
+    "pause_register": _env_int("MODBUS_PAUSE_REGISTER", 17),
+    "pause_bit": _env_int("MODBUS_PAUSE_BIT", 0),
     "counter_register": _env_int("MODBUS_COUNTER_REGISTER", 0),
-    "counter_words": _env_int("MODBUS_COUNTER_WORDS", 2),
+    # MEDIDO en el PLC real (SR3NET01BD): el contador de cortes esta en O1
+    # y es de 16 bits. O2 NO es la palabra alta del contador: es la palabra
+    # de PULSOS del PLC (se enciende un instante en cada corte y se apaga
+    # solo). Por eso se lee SOLO O1: combinar O1+O2 como 32 bits daria un
+    # valor corrupto (+65536 en el instante del pulso), el HAL descartaria
+    # el salto y se PIERDEN cortes. El HAL solo necesita deltas y el
+    # wraparound a 65535 lo resuelve (`_max_valor`).
+    "counter_words": _env_int("MODBUS_COUNTER_WORDS", 1),
     "counter_little_endian": _env_bool("MODBUS_COUNTER_LITTLE_ENDIAN", True),
     "poll_ms": _env_int("MODBUS_POLL_MS", 500),
     "pulso_duracion_ms": _env_int("PULSO_DURACION_MS", 300),
     "max_delta": _env_int("MODBUS_COUNTER_MAX_DELTA", 10000),
     "modo_simulacion": _env_bool("MODBUS_SIMULACION", not bool(os.environ.get("MODBUS_HOST", "").strip())),
-    # Polaridad del nivel activo por coil (START pulso / PAUSE latch). Por
-    # defecto el nivel activo es True (rele energizado/contacto cerrado). Si
-    # el cableado de la maquina es al reves (la maquina actua cuando el
-    # circuito se ABRE), poner 1 invierte: activo = False, reposo = True.
+    # Polaridad del nivel activo por senal (START pulso / PAUSE latch), igual
+    # en los dos modos. Por defecto el nivel activo es True (rele energizado /
+    # contacto cerrado). Si el cableado de la maquina es al reves (la maquina
+    # actua cuando el circuito se ABRE), poner 1 invierte: activo = False,
+    # reposo = True. En modo "registro" la inversion equivale a invertir el
+    # bit (activo = bit a 0).
     "start_coil_invertido": _env_bool("MODBUS_START_COIL_INVERTIDO", False),
     "pause_coil_invertido": _env_bool("MODBUS_PAUSE_COIL_INVERTIDO", False),
 }

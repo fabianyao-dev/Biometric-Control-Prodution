@@ -239,6 +239,9 @@ __marimo__/
 # Documento local de estimacion/avance de cambios (no se versiona)
 Estimacion_cambios.md
 
+# Respaldo de la configuracion de red que hace test\red_plc_directo.ps1
+test/red_plc_backup.json
+
 # Notas locales/borradores (no se versionan)
 mensajes_error_huella.md
 PLAN_MODULARIZACION.md

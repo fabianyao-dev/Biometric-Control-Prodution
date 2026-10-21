@@ -2,7 +2,7 @@
 simulacion_controller.py - HAL de relevadores y contador de cortes (simulacion).
 
 El hardware real (relevadores y contador de cortes) se controla via Modbus
-TCP con el modulo Advantech (ver modbus_controller.py). SimulacionController
+TCP con el PLC (ver modbus_controller.py). SimulacionController
 queda como HAL de fallback y desarrollo: cuando no hay MODBUS_HOST la GUI corre
 en modo simulacion, los pulsos a los relevadores solo se registran en el log
 y los cortes se suman con simular_corte(). Mantiene el mismo contrato que
