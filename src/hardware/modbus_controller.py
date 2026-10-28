@@ -119,8 +119,8 @@ class ModbusController:
         self._cmd_mode = str(cfg.get("cmd_mode", "coil")).strip().lower()
         self._start_register = int(cfg.get("start_register", 16))
         self._start_bit = int(cfg.get("start_bit", 0))
-        self._pause_register = int(cfg.get("pause_register", 17))
-        self._pause_bit = int(cfg.get("pause_bit", 0))
+        self._pause_register = int(cfg.get("pause_register", 16))
+        self._pause_bit = int(cfg.get("pause_bit", 1))
 
         self._bits = 16 * self._counter_words
         self._max_valor = (1 << self._bits) - 1
@@ -139,6 +139,31 @@ class ModbusController:
         # poner o quitar un bit sin read-modify-write, porque la PC es la
         # unica que escribe esas palabras.
         self._reg_j = {}
+        # Torre de luces (señalizacion): comparte la palabra de comando con
+        # MARCHA (bit0) y PARO (bit1), por eso los bits de la torre empiezan
+        # en 2. El HAL nunca escribe la palabra completa a cero: siempre
+        # preserva los bits que no le pertenecen.
+        self._tower_register = int(cfg.get("tower_register", 16))
+        self._tower_hb_register = int(cfg.get("tower_heartbeat_register", 19))
+        self._tower_green_bit = int(cfg.get("tower_green_bit", 2))
+        self._tower_amber_bit = int(cfg.get("tower_amber_bit", 3))
+        self._tower_red_bit = int(cfg.get("tower_red_bit", 4))
+        self._tower_alarm_bit = int(cfg.get("tower_alarm_bit", 5))
+        self._tower_hb_bit = int(cfg.get("tower_heartbeat_bit", 0))
+        self._tower_alarm_on_ms = int(cfg.get("tower_alarm_pulso_on_ms", 500))
+        self._tower_alarm_off_ms = int(cfg.get("tower_alarm_pulso_off_ms", 500))
+        self._tower_alarm_duracion_s = float(cfg.get("tower_alarm_duracion_s", 3))
+        self._tower_hb_ms = int(cfg.get("tower_heartbeat_ms", 2000))
+        # Estado actual de la torre
+        self._torre_verde = False
+        self._torre_ambar = False
+        self._torre_roja = False
+        self._torre_alarma_activa = False
+        self._alarma_encendida = False
+        self._heartbeat_estado = False
+        self._ultimo_hb = time.time()
+        self._alarma_inicio = 0.0
+        self._alarma_fin = 0.0
         # Exclusion de cortes (modo "Primera pieza"): con el conteo
         # suspendido los deltas van a `_cortes_excluidos`, NO a `_cortes`.
         # Viven solo en memoria y se pierden al retomar (piezas de prueba/
@@ -193,6 +218,12 @@ class ModbusController:
                 self._modbus = cliente
                 self._conectado = True
                 self._ultimo_contador = lectura
+                # Fuerza a reescribir J3 aunque el color deseado sea el
+                # mismo que ya creia el HAL: tras (re)conectar el PLC pudo
+                # quedarse con un estado viejo.
+                self._torre_verde = None
+                self._torre_ambar = None
+                self._torre_roja = None
                 self._aplicar_paro_inicial(cliente)
                 log.info("Modbus conectado a %s:%s (contador=%s).",
                          self._host, self._port, lectura)
@@ -249,6 +280,7 @@ class ModbusController:
     def _bucle_polling(self):
         """Ciclo de polling: leer contador, sumar delta, reconectar si cae."""
         reintento = 1.0
+        ultimo_hb = 0.0
         while not self._stop.is_set():
             if not self._conectado:
                 if self._conectar():
@@ -258,6 +290,11 @@ class ModbusController:
                     reintento = min(reintento * 2, 5.0)
                     continue
             self._poll_contador()
+            ahora = time.time()
+            if ahora - ultimo_hb >= self._tower_hb_ms / 1000.0:
+                self._conmutar_heartbeat()
+                ultimo_hb = ahora
+            self._gestionar_alarma()
             self._stop.wait(self._poll_ms / 1000.0)
 
     def _poll_contador(self):
@@ -305,6 +342,29 @@ class ModbusController:
                 cliente.close()
             except Exception:  # noqa: BLE001
                 pass
+        # Al caer el enlace la torre debe quedar sin señal; el heartbeat del
+        # PLC la apagara por watchdog. Se marca el estado como DESCONOCIDO
+        # (None) para que, al reconectar, el primer `establecer_torre()`
+        # reescriba J3 aunque el color deseado sea "apagada" (si no, el PLC
+        # se quedaria con el ultimo color que alcanzo a recibir).
+        self._torre_verde = None
+        self._torre_ambar = None
+        self._torre_roja = None
+        self._torre_alarma_activa = False
+        self._alarma_encendida = False
+        self._alarma_fin = 0.0
+        # La palabra de la torre es la MISMA que la de los comandos (dir 16):
+        # NO se puede borrar del cache, o la siguiente escritura perderia el
+        # latch de PARO y la maquina quedaria habilitada. Se limpian solo los
+        # bits de la torre y se conservan marcha/paro.
+        actual = self._reg_j.get(self._tower_register)
+        if actual is not None:
+            limpia = actual
+            for bit in (self._tower_green_bit, self._tower_amber_bit,
+                        self._tower_red_bit, self._tower_alarm_bit):
+                limpia = self._con_bit(limpia, bit, False)
+            self._reg_j[self._tower_register] = limpia
+        self._reg_j.pop(self._tower_hb_register, None)
 
     def conectado(self) -> bool:
         """True si hay enlace Modbus activo (para alerta en la UI)."""
@@ -553,6 +613,13 @@ class ModbusController:
     # llamador: el hilo de polling y las acciones comparten el lock)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _con_bit(palabra, bit, puesto):
+        """Devuelve `palabra` con el bit indicado puesto o quitado."""
+        if puesto:
+            return (palabra | (1 << bit)) & 0xFFFF
+        return palabra & ~(1 << bit) & 0xFFFF
+
     def _palabra_con_bit(self, registro, bit, puesto):
         """Valor de la palabra J con el bit puesto (o quitado).
 
@@ -560,12 +627,7 @@ class ModbusController:
         escribe las palabras J, asi que puede mantener el valor vigente en
         memoria y reescribir la palabra completa.
         """
-        palabra = self._reg_j.get(registro, 0)
-        if puesto:
-            palabra |= (1 << bit)
-        else:
-            palabra &= ~(1 << bit) & 0xFFFF
-        return palabra
+        return self._con_bit(self._reg_j.get(registro, 0), bit, puesto)
 
     def _escribir_bajo(self, cliente, destino, activa, invertido):
         """Escribe el estado de una salida y lo MANTIENE (latch).
@@ -635,6 +697,137 @@ class ModbusController:
         return self._escribir_coil_bajo(cliente, destino[1], nivel_reposo)
 
     # ------------------------------------------------------------------
+    # Torre de luces (J3) y heartbeat (J4)
+    # ------------------------------------------------------------------
+
+    def establecer_torre(self, verde=False, ambar=False, roja=False):
+        """Fija el estado de la torre. Idempotente: repetir el mismo estado
+        no genera trafico Modbus.
+
+        La vista Inicio decide el color; aqui solo se ejecuta. Una sola
+        escritura por cambio (los tres bits van en la MISMA palabra J).
+        """
+        verde, ambar, roja = bool(verde), bool(ambar), bool(roja)
+        if (self._torre_verde == verde and self._torre_ambar == ambar
+                and self._torre_roja == roja):
+            return
+        self._torre_verde = verde
+        self._torre_ambar = ambar
+        self._torre_roja = roja
+        if self._simulacion or not self._conectado or self._modbus is None:
+            return
+        palabra = self._reg_j.get(self._tower_register, 0)
+        palabra = self._con_bit(palabra, self._tower_green_bit, verde)
+        palabra = self._con_bit(palabra, self._tower_amber_bit, ambar)
+        palabra = self._con_bit(palabra, self._tower_red_bit, roja)
+        cliente = self._modbus
+        with self._lock_modbus:
+            self._escribir_registro_torre(cliente, self._tower_register,
+                                          palabra)
+        log.info("Torre: verde=%s ambar=%s roja=%s (reg %s = %s).",
+                 verde, ambar, roja, self._tower_register, palabra)
+
+    def _escribir_registro_torre(self, cliente, registro, palabra):
+        """Escribe una palabra J de la torre.
+
+        Un fallo aqui NO desconecta ni detiene la maquina: la torre es
+        senalizacion, no seguridad. Se registra y se reintenta al siguiente
+        cambio de estado.
+        """
+        try:
+            ok = cliente.write_single_register(registro, palabra)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Torre: fallo escribir registro %s: %s", registro, e)
+            return False
+        if not ok:
+            log.warning("Torre: el modulo rechazo el registro %s.", registro)
+            return False
+        self._reg_j[registro] = palabra
+        return True
+
+    def _escribir_bit_torre(self, cliente, bit, puesto):
+        palabra = self._palabra_con_bit(self._tower_register, bit, puesto)
+        return self._escribir_registro_torre(cliente, self._tower_register,
+                                             palabra)
+
+    def _apagar_torre_bajo(self, cliente):
+        """Apaga los bits de la torre PRESERVANDO el resto de la palabra.
+
+        La palabra de la torre es la MISMA que la de los comandos (dir 16 en
+        el PLC real), asi que escribir 0 ahi borraria el latch de PARO y
+        dejaria la maquina potencialmente habilitada. Se limpian solo los
+        cuatro bits de la torre y se conservan marcha (bit0) y paro (bit1).
+        """
+        actual = self._reg_j.get(self._tower_register, 0)
+        palabra = actual
+        for bit in (self._tower_green_bit, self._tower_amber_bit,
+                    self._tower_red_bit, self._tower_alarm_bit):
+            palabra = self._con_bit(palabra, bit, False)
+        if palabra == actual:
+            return True
+        return self._escribir_registro_torre(cliente, self._tower_register,
+                                             palabra)
+
+    def _escribir_alarma(self, encendida):
+        """Enciende o apaga el bit de alarma de la torre."""
+        self._alarma_encendida = bool(encendida)
+        if self._simulacion or not self._conectado or self._modbus is None:
+            return
+        cliente = self._modbus
+        with self._lock_modbus:
+            self._escribir_bit_torre(cliente, self._tower_alarm_bit,
+                                     self._alarma_encendida)
+
+    def pulso_alarma(self):
+        """Arranca la alarma discontinua (solo al ENTRAR en rojo).
+
+        El parpadeo lo ejecuta `_gestionar_alarma()` desde el hilo de
+        polling; aqui solo se abre la ventana de tiempo. Es idempotente
+        mientras la ventana siga abierta.
+        """
+        if self._torre_alarma_activa:
+            return
+        self._torre_alarma_activa = True
+        self._alarma_inicio = time.time()
+        self._alarma_fin = self._alarma_inicio + self._tower_alarm_duracion_s
+        self._alarma_encendida = False
+        log.info("Torre: alarma discontinua durante %.1f s.",
+                 self._tower_alarm_duracion_s)
+
+    def _gestionar_alarma(self):
+        """Parpadea el bit de alarma mientras dure la ventana.
+
+        Conmutar en cada tick (en vez de calcular la fase) garantiza que la
+        senal sea DISCONTINUA aunque el sondeo no caiga exacto: con
+        `_poll_ms` de 500 ms el resultado es 500 ms encendida / 500 ms
+        apagada, que es justo el requisito.
+        """
+        if not self._torre_alarma_activa:
+            return
+        if time.time() >= self._alarma_fin:
+            self._torre_alarma_activa = False
+            self._escribir_alarma(False)
+            log.info("Torre: fin de la alarma.")
+            return
+        self._escribir_alarma(not self._alarma_encendida)
+
+    def _conmutar_heartbeat(self):
+        """Conmuta el heartbeat de J4 para el watchdog del PLC."""
+        if self._simulacion or not self._conectado or self._modbus is None:
+            return
+        palabra = self._palabra_con_bit(self._tower_hb_register,
+                                       self._tower_hb_bit,
+                                       not self._heartbeat_estado)
+        cliente = self._modbus
+        with self._lock_modbus:
+            ok = self._escribir_registro_torre(cliente,
+                                               self._tower_hb_register,
+                                               palabra)
+        if ok:
+            self._heartbeat_estado = not self._heartbeat_estado
+            self._ultimo_hb = time.time()
+
+    # ------------------------------------------------------------------
     # Cierre
     # ------------------------------------------------------------------
 
@@ -667,6 +860,14 @@ class ModbusController:
                     log.error("Cierre: no se pudo asegurar el PARO (%s); "
                               "VERIFICAR LA MAQUINA MANUALMENTE.",
                               self._descripcion_pause())
+                # Apagar la torre y el heartbeat al cerrar la app: la torre
+                # no debe quedar encendida sin supervision. La torre vive en
+                # la MISMA palabra que los comandos, asi que se limpian solo
+                # sus bits (escribir 0 borraria el latch de PARO recien
+                # puesto). El heartbeat sí se deja en cero.
+                self._apagar_torre_bajo(cliente)
+                self._escribir_registro_torre(cliente, self._tower_hb_register,
+                                              0)
             self._maquina_en_marcha = False
             self._desconectar()
         log.info("ModbusController detenido (hilo de polling finalizado).")

@@ -133,7 +133,10 @@ Estados de la máquina en la vista **Inicio**:
 2. **LISTA** → la máquina cuenta cortes. Si no hay cortes durante
    `PARO_IDLE_TIMEOUT_S`, se dispara un **paro automático** cuyo
    `inicio_paro` se retrotrae al último corte o a la salida del último
-   evento (el minuto muerto cuenta como paro).
+   evento (el minuto muerto cuenta como paro). Aparte, la **tolerancia de la
+   torre de luces** es `PRIMERA_PIEZA_TIMEOUT_S`: cualquier paro real
+   (manual, automático, modo PARO o Mantenimiento) se queda en ámbar ese
+   tiempo y luego pasa a **rojo con alarma/buzzer** hasta que se resuelve.
 3. **PARO** → el operador (o un rol autorizado) elige la causa y coloca su
    huella; al autorizar, la máquina **reanuda**. El modal de paro **no se puede
    cerrar** hasta autorizar.

@@ -52,8 +52,8 @@ El NET01BD **no expone coils**. Medido con un sondeo palabra a palabra:
 |---|---|---|---|
 | 16 | J1XT1 | PC -> PLC | bit 0 = **START** (pulso de 300 ms) |
 | 17 | J2XT1 | PC -> PLC | bit 0 = **PARO** (latch sostenido) |
-| 18 | J3XT1 | PC -> PLC | libre (reset / heartbeat) |
-| 19 | J4XT1 | PC -> PLC | libre |
+| 18 | J3XT1 | PC -> PLC | **torre**: bit0=verde, bit1=ambar, bit2=roja, bit3=alarma |
+| 19 | J4XT1 | PC -> PLC | bit0 = **heartbeat** (la PC lo conmuta cada 2 s) |
 | 20 | O1XT1 | PLC -> PC | **contador de cortes (16 bits)** |
 | 21 | O2XT1 | PLC -> PC | **pulsos** (destella en cada corte) |
 | 22 | O3XT1 | PLC -> PC | libre |
@@ -129,8 +129,92 @@ cuenta por el delta de O1, que no pierde nada.
   - `J2 bit0` -> salida "boton rojo" (pausa). Aqui si es un **nivel
     sostenido** (latch): la PC lo mantiene en 1 hasta que se reanuda.
   - El contador de la entrada fisica -> **O1** (16 bits).
-- La torre (verde / ambar / roja) y la alarma las maneja el PLC: la app no
-  las escribe.
+- La torre (verde / ambar / roja) y la alarma las maneja el **PLC a partir de
+  los bits de J3**; la app solo escribe esos bits (ver seccion 4.1).
+
+### 4.1 Torre de luces y heartbeat (requisitos del FBD)
+
+La PC **no puede escribir** las salidas O, asi que la torre viaja por J3 y el
+programa del PLC la copia a las salidas fisicas:
+
+| Bit de J3 (dir 18) | Salida del PLC | Significado |
+|---|---|---|
+| bit0 | Q3 | verde: maquina en marcha |
+| bit1 | Q4 | ambar: detenida (cualquier causa) |
+| bit2 | Q5 | roja: detenida mas alla del tiempo de tolerancia |
+| bit3 | Q6 | alarma: parpadeo de 3 s al ENTRAR en rojo |
+
+Requisitos del programa (FBD):
+
+1. Copiar **cada bit de J3 a su salida** de la torre (`J3.0 -> Q3`,
+   `J3.1 -> Q4`, `J3.2 -> Q5`, `J3.3 -> Q6`). No hace falta logica: la
+   decision del color es de la app.
+2. Copiar **J2.0 a Q2** (paro). La app escribe la logica **invertida**
+   (`MODBUS_PAUSE_COIL_INVERTIDO=1`): `J2.0 = 1` = maquina habilitada
+   (Q2 cerrado), `J2.0 = 0` = PARO (Q2 abierto, fail-safe). Si el cableado
+   del tablero es al reves, invertir la bobina y avisar para cambiar el .env.
+3. **Watchdog del heartbeat**: si `J4.0` (dir 19) no cambia durante ~10 s,
+   apagar Q2..Q6. Asi la maquina no queda habilitada (ni la torre encendida)
+   con la PC caida. La PC conmuta el bit cada 2 s (`TORRE_HEARTBEAT_MS`).
+4. Al cerrar la app se escriben **cero** a J3 y a J4 (torre apagada) antes de
+   soltar el enlace. J2 se latchea al PARO (cierre seguro).
+
+#### Estado medido en el PLC real (24/10/2026)
+
+| Ruta | Resultado |
+|---|---|
+| PC escribe J1/J2/J3/J4 y FC03 las devuelve | **OK** (el PLC guarda los valores) |
+| `J4.0` heartbeat conmutando cada 2.2 s | **OK** (medido) |
+| `J1.0` -> Q1 (marcha) | **OK**: el relevador Q1 pulsa con la app |
+| `J2.0` -> Q2 (paro) | **NO MAPEADO**: J2=0 durante 6 s y Q2 no se movio |
+| `J3.0..3` -> Q3..Q6 | **NO MAPEADO**: se probaron 1, 2, 4 y 8; ningun relevador |
+
+O sea: **hoy el FBD solo traduce J1**. Mientras no se agreguen las rutas 2 y
+1 de esta lista, el PARO de la app es solo logico (no detiene la maquina) y
+la torre no enciende.
+
+
+Comportamiento de la app (`src/gui/inicio_view.py`, `_estado_torre`):
+
+| Situacion | Verde | Ambar | Roja |
+|---|---|---|---|
+| Sin sesion | 0 | 0 | 0 |
+| Maquina en marcha (produciendo) | 1 | 0 | 0 |
+| Primera pieza / Mantenimiento / PARO con maquina encendida por zona | 0 | 1 | 0 |
+| Esperando trabajo (maquina apagada, sin paro abierto) | 0 | 1 | 0 |
+| Paro real menos de `PRIMERA_PIEZA_TIMEOUT_S` | 0 | 1 | 0 |
+| Paro real mas de `PRIMERA_PIEZA_TIMEOUT_S` | 0 | 0 | 1 |
+
+"Paro real" = un PARO abierto (manual o automatico) o el modo PARO, mas el
+modo Mantenimiento con la maquina detenida. La tolerancia es la MISMA para
+todos (`PRIMERA_PIEZA_TIMEOUT_S`, configurable en `.env`/`config.json`), no
+solo para Primera pieza, y el ancla se toma al detenerse la maquina
+(autorizar el paro NO reinicia el conteo). La espera de trabajo no se pone
+roja: no hay paro que resolver. **No confundir** con `PARO_IDLE_TIMEOUT_S`
+(60 s, el auto-paro por inactividad con la maquina en marcha sin cortes):
+son dos tiempos distintos.
+
+La alarma (`J1` bit5 -> Q6) solo se dispara en la **transicion a rojo** y
+parpadea 500 ms encendida / 500 ms apagada durante 3 s (`TORRE_ALARMA_*`). La
+roja (`J1` bit4 -> Q5) **permanece** hasta que se sale del paro.
+
+Claves de configuracion (`MODBUS_CONFIG`, con sus variables de entorno):
+
+| Clave | Env | Por defecto |
+|---|---|---|
+| `tower_register` | `MODBUS_TOWER_REGISTER` | 18 |
+| `tower_heartbeat_register` | `MODBUS_TOWER_HEARTBEAT_REGISTER` | 19 |
+| `tower_green_bit` / `amber` / `red` / `alarm` | `MODBUS_TOWER_*_BIT` | 0 / 1 / 2 / 3 |
+| `tower_heartbeat_bit` | `MODBUS_TOWER_HEARTBEAT_BIT` | 0 |
+| `tower_alarm_pulso_on_ms` / `off_ms` | `TORRE_ALARMA_PULSO_*_MS` | 500 / 500 |
+| `tower_alarm_duracion_s` | `TORRE_ALARMA_DURACION_S` | 3 |
+| `tower_heartbeat_ms` | `TORRE_HEARTBEAT_MS` | 2000 |
+| Tolerancia ambar -> rojo de la torre | `PRIMERA_PIEZA_TIMEOUT_S` | 900 |
+| Auto-paro por inactividad (NO es la tolerancia de la torre) | `PARO_IDLE_TIMEOUT_S` | 60 (fijo en codigo) |
+
+Para probar sin PLC: `venv\Scripts\python test\simulador_modbus.py --modo
+registro` imprime cada escritura de J3 con los nombres (`VERDE`, `AMBAR`,
+`ROJA`, `ALARMA`) y cada conmutacion de J4.
 
 ## 5. Verificacion desde la PC
 

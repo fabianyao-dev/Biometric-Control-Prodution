@@ -204,10 +204,20 @@ class SimulacionController:
     # Cierre
     # ------------------------------------------------------------------
 
+    def establecer_torre(self, verde=False, ambar=False, roja=False):
+        log.info("[SIM] Torre: verde=%s ambar=%s roja=%s", verde, ambar, roja)
+
+    def pulso_alarma(self):
+        log.info("[SIM] Torre ALARMA (3s discontinuos)")
+
     def cleanup(self):
         """Resetea el estado. Idempotente."""
         if getattr(self, "_cleaned", False):
             return
         self._cleaned = True
         self._maquina_en_marcha = False
+        try:
+            self.establecer_torre(False, False, False)
+        except Exception:
+            pass
         log.info("SimulacionController liberado")

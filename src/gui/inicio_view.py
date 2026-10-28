@@ -212,6 +212,11 @@ class InicioView(QWidget):
         # Estado actual del boton PARO (PARO vs SALIR DE MANTENIMIENTO/
         # SALIR DE PARO en rojo).
         self._boton_paro_especial = False
+        # Torre de luces: momento en que empezo el paro actual (para pasar de
+        # ambar a rojo al vencer PARO_IDLE_TIMEOUT_S) y ultimo color aplicado
+        # (para disparar la alarma solo al ENTRAR en rojo).
+        self._paro_inicio_momento = None
+        self._ultimo_color_rojo = None
         # Seguro anti-corrida en Primera pieza: ventana movil de cortes
         # excluidos para detectar una corrida no autorizada.
         self._muestras_rafaga = deque()
@@ -1067,6 +1072,13 @@ class InicioView(QWidget):
         self._modo_paro_maquina_encendida = False
         self._en_paro = False
         self._paro_idle_triggado = False
+        self._paro_inicio_momento = None
+        self._ultimo_color_rojo = None
+        try:
+            if hasattr(self.controlador, "establecer_torre"):
+                self.controlador.establecer_torre(False, False, False)
+        except Exception:
+            pass
         if self._primera_pieza:
             # El conteo sigue suspendido por el propio modo Primera pieza.
             self.controlador.suspender_conteo()
@@ -1103,6 +1115,10 @@ class InicioView(QWidget):
     def _pausar_maquina(self, motivo="manual", inicio_hace_s=None):
         self.controlador.maquina_pausada()
         self._en_paro = True
+        # Ancla de la torre: el paro arranca aqui aunque el operador tarde en
+        # autorizarlo (pasada la tolerancia se enciende la roja y la alarma).
+        if self._paro_inicio_momento is None:
+            self._paro_inicio_momento = time.time()
         self.paro_id = iniciar_paro(self.sesion_id, self._folio_activo(),
                                     inicio_hace_s=inicio_hace_s)
         self._refrescar_estado_maquina()
@@ -1257,6 +1273,9 @@ class InicioView(QWidget):
         self._modo_paro_maquina_encendida = bool(zona_maquina)
         self._en_paro = True
         self._paro_idle_triggado = False
+        # El ancla de la torre ya la fijo `_pausar_maquina` (o la fija
+        # `_actualizar_tolerancia_paro` en el siguiente ciclo): autorizar el
+        # paro NO reinicia la tolerancia ni rearma la alarma.
         if zona_maquina:
             self.controlador.reprisar_maquina()
             self.controlador.suspender_conteo()
@@ -1484,10 +1503,28 @@ class InicioView(QWidget):
         # es manual (boton de MAQUINA). El metodo se conserva intacto para
         # reactivarlo descomentando esta linea.
         # self._verificar_meta_trabajo()
+        self._actualizar_tolerancia_paro()
         self._refrescar_estado_maquina()
         self._verificar_inactividad()
         self._verificar_timeout_primera_pieza()
         QTimer.singleShot(config.REFRESCO_CONTADOR_MS, self._refrescar_contador)
+
+    def _actualizar_tolerancia_paro(self):
+        """Ancla (y rearma) el comienzo del paro para la torre de luces.
+
+        La torre pasa de ambar a ROJA cuando el paro lleva mas de
+        `PRIMERA_PIEZA_TIMEOUT_S` (la "tolerancia de paro" del .env). El
+        ancla se toma en cuanto hay un paro real con la maquina DETENIDA,
+        sin importar su origen (PARO manual, auto-paro por inactividad,
+        modo PARO o Mantenimiento); al volver a la marcha se rearma para
+        que la alarma suene en el SIGUIENTE paro.
+        """
+        if (self.sesion_id is None or not self._paro_real_abierto()
+                or self._maquina_en_marcha()):
+            self._paro_inicio_momento = None
+            return
+        if self._paro_inicio_momento is None:
+            self._paro_inicio_momento = time.time()
 
     def _verificar_timeout_primera_pieza(self):
         """Aviso informativo (una sola vez) al superar el timeout del modo."""
@@ -2558,6 +2595,10 @@ class InicioView(QWidget):
             self.resplandor_maquina.set_resplandor("exito")
         else:
             self.resplandor_maquina.detener_resplandor()
+        try:
+            self._actualizar_torre()
+        except Exception:
+            log.debug("No se pudo actualizar la torre de luces", exc_info=True)
         self._fila_switch.setVisible(
             self.sesion_id is not None
             and not self._en_paro
@@ -2598,6 +2639,82 @@ class InicioView(QWidget):
         else:
             self.btn_paro.setText("PARO")
             aplicar_estilo_boton(self.btn_paro, "")
+
+    def _estado_torre(self):
+        """Decide el estado de la torre (funcion pura, testable).
+
+        - Sin sesion: apagada.
+        - Maquina en marcha: VERDE, o AMBAR si hay un modo que suspende la
+          produccion (Primera pieza, Mantenimiento o PARO con la maquina
+          encendida por zona).
+        - Maquina detenida con un paro real: AMBAR dentro de la tolerancia y
+          ROJA (mas la alarma de Q6) al vencerla.
+        - Maquina detenida sin paro real (espera de trabajo, Primera pieza
+          con la maquina apagada): AMBAR. No se pone roja porque no hay
+          paro que resolver y no debe estar sonando entre trabajos.
+        """
+        if not getattr(self, "sesion_id", None):
+            return (False, False, False)
+        if self._maquina_en_marcha():
+            if (self._modo_mantenimiento or self._modo_paro
+                    or self._primera_pieza):
+                return (False, True, False)
+            return (True, False, False)
+        if self._paro_real_abierto() and self._tolerancia_paro_vencida():
+            return (False, False, True)
+        return (False, True, False)
+
+    def _paro_real_abierto(self):
+        """True si hay un paro registrado que la torre debe vigilar.
+
+        Cubre el PARO antes y despues de autorizarlo (`_en_paro` /
+        `_modo_paro`) y el modo Mantenimiento: son paros que alguien tiene
+        que resolver. NO cubre la espera de trabajo ni Primera pieza con la
+        maquina apagada, donde no hay paro, solo la maquina esperando el
+        siguiente folio.
+        """
+        return bool(self._en_paro or self._modo_paro
+                    or self._modo_mantenimiento)
+
+    def _tolerancia_paro_vencida(self):
+        """True si el paro lleva mas de `PRIMERA_PIEZA_TIMEOUT_S`.
+
+        Ese es el valor de "tolerancia de paro" que se configura en el
+        `.env`/`config.json` (el mismo que endurece la salida de Primera
+        pieza). NO es `PARO_IDLE_TIMEOUT_S`, que es el minuto del auto-paro
+        por inactividad. 0 = sin roja (se queda en ambar).
+        """
+        try:
+            timeout = float(config.PRIMERA_PIEZA_TIMEOUT_S)
+        except Exception:  # noqa: BLE001 - la torre nunca debe romper la UI
+            return False
+        if not timeout or timeout <= 0:
+            return False
+        if self._paro_inicio_momento is None:
+            return False
+        try:
+            desde = time.time() - self._paro_inicio_momento
+        except Exception:  # noqa: BLE001 - ancla corrupta: se queda en ambar
+            return False
+        return desde >= timeout
+
+    def _actualizar_torre(self):
+        v, a, r = self._estado_torre()
+        ctrl = getattr(self, "controlador", None)
+        if ctrl is None:
+            return
+        try:
+            if hasattr(ctrl, "establecer_torre"):
+                ctrl.establecer_torre(v, a, r)
+        except Exception:
+            log.debug("establecer_torre fallo", exc_info=True)
+        if r and getattr(self, "_ultimo_color_rojo", None) != "rojo":
+            try:
+                if hasattr(ctrl, "pulso_alarma"):
+                    ctrl.pulso_alarma()
+            except Exception:
+                log.debug("pulso_alarma fallo", exc_info=True)
+        self._ultimo_color_rojo = "rojo" if r else None
 
     def _icono_estado(self, estilo, sp):
         self.icono_estado.setPixmap(estilo.standardIcon(sp).pixmap(22, 22))

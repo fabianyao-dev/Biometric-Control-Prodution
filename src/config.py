@@ -210,19 +210,45 @@ def leer_config(clave, por_defecto=None):
 CONFIG_POR_DEFECTO = {
     "UPDATE_SOURCE": "",
     "UPDATE_TIMEOUT_S": 8,
+    # Modbus: valores MEDIDOS en el PLC real (Zelio SR3 + SR3NET01BD,
+    # 24/10/2026). Una config heredada del modulo Advantech (modo "coil",
+    # contador en la palabra 0, 2 palabras) NO funciona con el Zelio: los
+    # comandos y la torre no salen y el contador pierde un corte por pulso.
     "MODBUS_HOST": "",
     "MODBUS_PORT": 502,
     "MODBUS_UNIT_ID": 1,
+    # "registro" = FC06 sobre las palabras J (el NET01BD no expone coils).
+    "MODBUS_CMD_MODE": "registro",
     "MODBUS_START_COIL": 0,
     "MODBUS_PAUSE_COIL": 1,
-    "MODBUS_COUNTER_REGISTER": 0,
-    "MODBUS_COUNTER_WORDS": 2,
+    "MODBUS_START_REGISTER": 16,
+    "MODBUS_START_BIT": 0,
+    "MODBUS_PAUSE_REGISTER": 16,
+    "MODBUS_PAUSE_BIT": 1,
+    # El contador vive en O1 (dir 20) y es de 16 bits: O2 es la palabra de
+    # PULSOS, no la palabra alta. Leer 2 palabras pierde cortes.
+    "MODBUS_COUNTER_REGISTER": 20,
+    "MODBUS_COUNTER_WORDS": 1,
     "MODBUS_COUNTER_LITTLE_ENDIAN": 1,
     "MODBUS_POLL_MS": 500,
     "PULSO_DURACION_MS": 300,
     "MODBUS_COUNTER_MAX_DELTA": 10000,
     "MODBUS_START_COIL_INVERTIDO": 0,
     "MODBUS_PAUSE_COIL_INVERTIDO": 0,
+    # Torre de luces: comparte la palabra de comando J1 (dir 16) con marcha
+    # (bit0) y paro (bit1); bit2=verde (Q3), bit3=ambar (Q4), bit4=roja (Q5),
+    # bit5=alarma/buzzer (Q6).
+    "MODBUS_TOWER_REGISTER": 16,
+    "MODBUS_TOWER_GREEN_BIT": 2,
+    "MODBUS_TOWER_AMBER_BIT": 3,
+    "MODBUS_TOWER_RED_BIT": 4,
+    "MODBUS_TOWER_ALARM_BIT": 5,
+    "MODBUS_TOWER_HEARTBEAT_REGISTER": 19,
+    "MODBUS_TOWER_HEARTBEAT_BIT": 0,
+    "TORRE_HEARTBEAT_MS": 2000,
+    "TORRE_ALARMA_DURACION_S": 3,
+    "TORRE_ALARMA_PULSO_ON_MS": 500,
+    "TORRE_ALARMA_PULSO_OFF_MS": 500,
     "SEGURO_PARO_SEGUNDOS": 3,
     "SEGURO_RAFAGA_SEGUNDOS": 7,
     "SEGURO_RAFAGA_CORTES": 5,
@@ -400,12 +426,17 @@ MODBUS_CONFIG = {
     "start_coil": _env_int("MODBUS_START_COIL", 0),
     "pause_coil": _env_int("MODBUS_PAUSE_COIL", 1),
     # Modo "registro": palabra J y bit de cada comando (0 = bit0).
-    # Por defecto J1=16 START, J2=17 PAUSE (J3/J4 libres para reset y
-    # heartbeat). START y PAUSE pueden compartir palabra con bits distintos.
+    # MEDIDO en el PLC real (24/10/2026): el FBD del Zelio traduce UNA SOLA
+    # palabra de comando, J1 (dir 16), con los bits 0-5:
+    #   bit0(1)=Q1 marcha, bit1(2)=Q2 paro, bit2(4)=Q3 torre verde,
+    #   bit3(8)=Q4 torre ambar, bit4(16)=Q5 torre roja, bit5(32)=Q6 alarma.
+    # J2/J3/J4 (dirs 17/18/19) NO controlan nada en el programa actual.
+    # Por eso START, PAUSE y TORRE comparten la palabra 16 y el HAL mantiene
+    # el valor vigente en `_reg_j` para no pisar los bits de los demas.
     "start_register": _env_int("MODBUS_START_REGISTER", 16),
     "start_bit": _env_int("MODBUS_START_BIT", 0),
-    "pause_register": _env_int("MODBUS_PAUSE_REGISTER", 17),
-    "pause_bit": _env_int("MODBUS_PAUSE_BIT", 0),
+    "pause_register": _env_int("MODBUS_PAUSE_REGISTER", 16),
+    "pause_bit": _env_int("MODBUS_PAUSE_BIT", 1),
     "counter_register": _env_int("MODBUS_COUNTER_REGISTER", 0),
     # MEDIDO en el PLC real (SR3NET01BD): el contador de cortes esta en O1
     # y es de 16 bits. O2 NO es la palabra alta del contador: es la palabra
@@ -419,7 +450,10 @@ MODBUS_CONFIG = {
     "poll_ms": _env_int("MODBUS_POLL_MS", 500),
     "pulso_duracion_ms": _env_int("PULSO_DURACION_MS", 300),
     "max_delta": _env_int("MODBUS_COUNTER_MAX_DELTA", 10000),
-    "modo_simulacion": _env_bool("MODBUS_SIMULACION", not bool(os.environ.get("MODBUS_HOST", "").strip())),
+    "modo_simulacion": _env_bool(
+        "MODBUS_SIMULACION",
+        not bool(os.environ.get("MODBUS_HOST", "").strip()),
+    ),
     # Polaridad del nivel activo por senal (START pulso / PAUSE latch), igual
     # en los dos modos. Por defecto el nivel activo es True (rele energizado /
     # contacto cerrado). Si el cableado de la maquina es al reves (la maquina
@@ -428,7 +462,58 @@ MODBUS_CONFIG = {
     # bit (activo = bit a 0).
     "start_coil_invertido": _env_bool("MODBUS_START_COIL_INVERTIDO", False),
     "pause_coil_invertido": _env_bool("MODBUS_PAUSE_COIL_INVERTIDO", False),
+    # Torre de luces (señalizacion) - comparte la palabra de comando J1 (dir 16)
+    # con marcha (bit0) y paro (bit1):
+    #   bit2=verde, bit3=ambar, bit4=roja, bit5=alarma
+    # J4 (dir 19): heartbeat bit0 (conmutado por la PC cada TORRE_HEARTBEAT_MS).
+    # El programa del PLC NO usa J4 (no hay watchdog); se mantiene por si se
+    # agrega despues.
+    "tower_register": _env_int("MODBUS_TOWER_REGISTER", 16),
+    "tower_heartbeat_register": _env_int("MODBUS_TOWER_HEARTBEAT_REGISTER", 19),
+    "tower_green_bit": _env_int("MODBUS_TOWER_GREEN_BIT", 2),
+    "tower_amber_bit": _env_int("MODBUS_TOWER_AMBER_BIT", 3),
+    "tower_red_bit": _env_int("MODBUS_TOWER_RED_BIT", 4),
+    "tower_alarm_bit": _env_int("MODBUS_TOWER_ALARM_BIT", 5),
+    "tower_heartbeat_bit": _env_int("MODBUS_TOWER_HEARTBEAT_BIT", 0),
+    "tower_alarm_pulso_on_ms": _env_int("TORRE_ALARMA_PULSO_ON_MS", 500),
+    "tower_alarm_pulso_off_ms": _env_int("TORRE_ALARMA_PULSO_OFF_MS", 500),
+    "tower_alarm_duracion_s": _env_int("TORRE_ALARMA_DURACION_S", 3),
+    "tower_heartbeat_ms": _env_int("TORRE_HEARTBEAT_MS", 2000),
+    "tower_heartbeat_timeout_s": _env_int("TORRE_HEARTBEAT_TIMEOUT_S", 10),
 }
+
+
+def _avisar_config_modbus_heredada(cfg):
+    """Avisa si la config de Modbus sigue siendo la del modulo viejo.
+
+    El `.env` de desarrollo se actualiza a mano, pero en PRODUCCION la fuente
+    es `config.json`: si viene de una version anterior (Advantech) conserva
+    sus valores y la siembra de `CONFIG_POR_DEFECTO` no los pisa (solo agrega
+    las claves que faltan). Con el Zelio eso significa comandos/torre que no
+    salen (modo coil) o un contador que pierde un corte por pulso (2
+    palabras). Se avisa en el log; la correccion es editar `config.json`.
+    """
+    if not cfg.get("host"):
+        return
+    if cfg.get("cmd_mode") != "registro":
+        log.warning(
+            "Modbus: MODBUS_CMD_MODE=%r con el PLC Zelio (host %s). El "
+            "NET01BD no expone coils: MARCHA/PARO y la torre no saldrian. "
+            "Pon MODBUS_CMD_MODE=registro (ver MAPA_MODBUS_ZELIO.md).",
+            cfg.get("cmd_mode"), cfg.get("host"),
+        )
+        return
+    if cfg.get("counter_words") != 1 or cfg.get("counter_register") < 16:
+        log.warning(
+            "Modbus: contador en registro %s con %s palabra(s). MEDIDO en el "
+            "PLC: el contador esta en O1 (dir 20) y es de 16 bits (O2 es la "
+            "palabra de PULSOS). Usa MODBUS_COUNTER_REGISTER=20 y "
+            "MODBUS_COUNTER_WORDS=1 o se pierde un corte por pulso.",
+            cfg.get("counter_register"), cfg.get("counter_words"),
+        )
+
+
+_avisar_config_modbus_heredada(MODBUS_CONFIG)
 
 
 # Cada cuanto se guarda en la BD el total de cortes de la sesion activa, como
@@ -437,6 +522,8 @@ CORTES_GUARDAR_INTERVALO_MS = 30000
 
 # Tiempo sin recibir cortes (en segundos) con la maquina en marcha que
 # dispara automaticamente el modal de seleccion de paro. 0 = desactivado.
+# OJO: NO es la tolerancia de la torre de luces. La torre usa
+# `PRIMERA_PIEZA_TIMEOUT_S` (ver abajo): son dos tiempos distintos.
 PARO_IDLE_TIMEOUT_S = 60
 
 # Seguro anti-paro / anti-apagado: bloquea el boton PARO y el apagado (cierre
@@ -456,6 +543,11 @@ SEGURO_RAFAGA_CORTES = _env_int("SEGURO_RAFAGA_CORTES", 5)
 # del modo, la salida (para iniciar produccion) exige autorizacion de un rol
 # con `autorizar_paro` (supervisor/admin). La maquina NO se apaga ni se sale
 # del modo automaticamente; solo se endurece la autorizacion. 0 = desactivado.
+# Es TAMBIEN la tolerancia de la torre de luces: un paro real (manual,
+# automatico, modo PARO o Mantenimiento con la maquina detenida) se queda en
+# ambar este tiempo y luego pasa a roja (Q5) + alarma/buzzer (Q6). Por eso se
+# llama "tolerancia de paro" en la operacion. NO confundir con
+# `PARO_IDLE_TIMEOUT_S` (el minuto del auto-paro por inactividad).
 PRIMERA_PIEZA_TIMEOUT_S = _env_int("PRIMERA_PIEZA_TIMEOUT_S", 900)
 
 # Selector de causa de paro: cuadricula con las causas mas usadas.

@@ -59,8 +59,16 @@ def _controlador(monkeypatch, **extra):
         "pause_coil": 17,
         "start_register": 16,
         "start_bit": 0,
-        "pause_register": 17,
-        "pause_bit": 0,
+        # MEDIDO en el PLC real: un solo word de comando (dir 16) con
+        # bit0=marcha, bit1=paro, bit2..5=torre.
+        "pause_register": 16,
+        "pause_bit": 1,
+        "tower_register": 16,
+        "tower_green_bit": 2,
+        "tower_amber_bit": 3,
+        "tower_red_bit": 4,
+        "tower_alarm_bit": 5,
+        "tower_heartbeat_register": 19,
         "counter_register": 20,
         "counter_words": 2,
         "counter_little_endian": True,
@@ -90,11 +98,11 @@ def _esperar(condicion, timeout=2.0):
 # ----------------------------------------------------------------------
 
 def test_paro_inicial_latchea_la_palabra_de_pausa(monkeypatch):
-    """Al establecer el enlace, el PARO queda latched (J2 bit0 = 1)."""
+    """Al establecer el enlace, el PARO queda latched (J1 bit1 = 1)."""
     ctrl, cliente = _controlador(monkeypatch)
     ctrl._conectar()
 
-    assert cliente.escrituras == [("registro", 17, 1)]
+    assert cliente.escrituras == [("registro", 16, 0b10)]
     assert ctrl.conectado()
 
 
@@ -108,7 +116,7 @@ def test_marcha_suelta_el_paro_y_luego_pulsa_el_start(monkeypatch):
     assert _esperar(lambda: len(cliente.escrituras) >= 3)
 
     assert cliente.escrituras == [
-        ("registro", 17, 0),   # suelta el latch de PARO
+        ("registro", 16, 0),   # suelta el latch de PARO
         ("registro", 16, 1),   # pulso de MARCHA
         ("registro", 16, 0),   # vuelve a reposo
     ]
@@ -123,7 +131,7 @@ def test_paro_queda_latcheado_hasta_reanudar(monkeypatch):
     ctrl.maquina_pausada()
     assert _esperar(lambda: cliente.escrituras)
 
-    assert ("registro", 17, 1) in cliente.escrituras
+    assert ("registro", 16, 0b10) in cliente.escrituras
 
 
 def test_cierre_de_la_app_asegura_el_paro(monkeypatch):
@@ -137,7 +145,10 @@ def test_cierre_de_la_app_asegura_el_paro(monkeypatch):
 
     ctrl.cleanup()
 
-    assert ("registro", 17, 1) in cliente.escrituras
+    assert any(e[:2] == ("registro", 16) and e[2] & 0b10
+               for e in cliente.escrituras), (
+        "el cierre debe dejar el bit de PARO en 1"
+    )
 
 
 def test_start_y_pause_pueden_compartir_palabra(monkeypatch):
@@ -171,10 +182,10 @@ def test_el_paro_inicial_no_pisa_una_marcha_ya_ordenada(monkeypatch):
     ctrl.maquina_lista()   # MARCHA antes de que haya conexion
     assert _esperar(lambda: len(cliente.escrituras) >= 3)
 
-    # Ni latch de PARO (17=1) ni MARCHA perdida: se conecto y arranco.
-    assert ("registro", 17, 1) not in cliente.escrituras
+    # Ni latch de PARO (bit1 = 1) ni MARCHA perdida: se conecto y arranco.
+    assert ("registro", 16, 0b10) not in cliente.escrituras
     assert cliente.escrituras == [
-        ("registro", 17, 0),   # suelta el latch de PARO
+        ("registro", 16, 0),   # suelta el latch de PARO
         ("registro", 16, 1),   # pulso de MARCHA
         ("registro", 16, 0),   # vuelve a reposo
     ]
@@ -275,8 +286,10 @@ def test_polaridad_invertida_invierte_el_bit(monkeypatch):
     ctrl.maquina_pausada()
     assert _esperar(lambda: cliente.escrituras)
 
-    # Invertido: "paro" = bit a 0, "reposo" = bit a 1.
-    assert ("registro", 17, 0) in cliente.escrituras
+    # Invertido: "paro" = bit de PAUSE a 0, "reposo" = bit a 1.
+    escrituras = [e for e in cliente.escrituras if e[:2] == ("registro", 16)]
+    assert escrituras, "el paro debe escribir la palabra de comando"
+    assert escrituras[-1][2] & 0b10 == 0
 
 
 # ----------------------------------------------------------------------
@@ -353,3 +366,142 @@ def test_cleanup_es_idempotente(monkeypatch, modo):
     ctrl.cleanup()
 
     assert ctrl.conectado() is False
+
+
+# ----------------------------------------------------------------------
+# Torre de luces (J1, bits 2..5) y heartbeat (J4)
+# ----------------------------------------------------------------------
+
+def test_torre_escribe_los_tres_bits_en_la_misma_palabra(monkeypatch):
+    """Verde/ambar/roja viven en J1 (dir 16): una escritura por cambio.
+
+    La palabra conserva el latch de PARO (bit1), que se activa al conectar.
+    """
+    ctrl, cliente = _controlador(monkeypatch)
+    ctrl._conectar()
+    cliente.escrituras.clear()
+
+    ctrl.establecer_torre(True, False, False)
+    assert cliente.escrituras == [("registro", 16, 0b0_0110)]
+
+    ctrl.establecer_torre(False, True, False)
+    assert cliente.escrituras[-1] == ("registro", 16, 0b0_1010)
+
+    ctrl.establecer_torre(False, False, True)
+    assert cliente.escrituras[-1] == ("registro", 16, 0b1_0010)
+
+    ctrl.establecer_torre(False, False, False)
+    assert cliente.escrituras[-1] == ("registro", 16, 0b0_0010)
+
+
+def test_torre_es_idempotente(monkeypatch):
+    """Repetir el mismo estado no genera trafico Modbus."""
+    ctrl, cliente = _controlador(monkeypatch)
+    ctrl._conectar()
+    ctrl.establecer_torre(False, True, False)
+    cliente.escrituras.clear()
+
+    ctrl.establecer_torre(False, True, False)
+    ctrl.establecer_torre(False, True, False)
+
+    assert cliente.escrituras == []
+
+
+def test_torre_conserva_los_bits_de_comando_en_la_palabra(monkeypatch):
+    """Los bits de torre NO deben borrar otros bits de la misma palabra J."""
+    ctrl, cliente = _controlador(monkeypatch)
+    ctrl._conectar()          # latch de PARO: J1 bit1 = 1 (palabra = 0b10)
+    cliente.escrituras.clear()
+
+    ctrl.establecer_torre(True, False, False)
+
+    registro, palabra = cliente.escrituras[-1][1:]
+    assert registro == 16
+    assert palabra & 0b10, "el bit de PARO debe conservarse"
+    assert palabra & 0b100, "el verde debe encenderse"
+
+
+def test_alarma_parpadea_y_termina(monkeypatch):
+    """Al entrar en rojo la alarma se enciende y se apaga (discontinua) y
+    deja de sonar al cumplirse la duracion."""
+    ctrl, cliente = _controlador(monkeypatch, tower_alarm_duracion_s=0.3)
+    ctrl._conectar()
+    ctrl.establecer_torre(False, False, True)
+    cliente.escrituras.clear()
+
+    ctrl.pulso_alarma()
+    ctrl._gestionar_alarma()
+    # Primer tick: alarma ENCENDIDA junto con la roja.
+    assert cliente.escrituras[-1] == ("registro", 16, 0b11_0010)
+
+    ctrl._gestionar_alarma()
+    # Segundo tick: alarma APAGADA (la roja sigue).
+    assert cliente.escrituras[-1] == ("registro", 16, 0b1_0010)
+
+    time.sleep(0.35)
+    ctrl._gestionar_alarma()
+
+    assert ctrl._torre_alarma_activa is False
+    assert cliente.escrituras[-1] == ("registro", 16, 0b1_0010)
+
+
+def test_pulso_alarma_es_idempotente(monkeypatch):
+    """Mientras la ventana siga abierta no se reinicia el parpadeo."""
+    ctrl, cliente = _controlador(monkeypatch)
+    ctrl._conectar()
+
+    ctrl.pulso_alarma()
+    fin = ctrl._alarma_fin
+    ctrl.pulso_alarma()
+
+    assert ctrl._alarma_fin == fin
+
+
+def test_heartbeat_conmuta_el_bit_de_j4(monkeypatch):
+    """J4 (dir 19) bit0 debe cambiar en cada envio: el PLC lo vigila."""
+    ctrl, cliente = _controlador(monkeypatch)
+    ctrl._conectar()
+    cliente.escrituras.clear()
+
+    ctrl._conmutar_heartbeat()
+    ctrl._conmutar_heartbeat()
+    ctrl._conmutar_heartbeat()
+
+    assert cliente.escrituras == [
+        ("registro", 19, 1),
+        ("registro", 19, 0),
+        ("registro", 19, 1),
+    ]
+
+
+def test_cierre_apaga_la_torre_y_el_heartbeat(monkeypatch):
+    """Al cerrar la app la torre no puede quedar encendida."""
+    ctrl, cliente = _controlador(monkeypatch)
+    ctrl._conectar()
+    ctrl.establecer_torre(True, False, False)
+    ctrl._conmutar_heartbeat()
+    cliente.escrituras.clear()
+
+    ctrl.cleanup()
+
+    palabras = [e[2] for e in cliente.escrituras if e[:2] == ("registro", 16)]
+    assert palabras, "el cierre debe escribir la palabra de comando"
+    assert palabras[-1] & 0b111100 == 0, "los bits de torre/alarma quedan en 0"
+    assert palabras[-1] & 0b10, "el PARO sigue latcheado"
+    assert ("registro", 19, 0) in cliente.escrituras
+
+
+def test_torre_en_simulacion_no_toca_la_red(monkeypatch):
+    cliente = ClienteFalso()
+    monkeypatch.setattr(mod, "ModbusClient", lambda *a, **k: cliente)
+    ctrl = mod.ModbusController(
+        {"host": "", "modo_simulacion": True, "cmd_mode": "registro"},
+        iniciar_polling=False,
+    )
+
+    ctrl.establecer_torre(True, False, False)
+    ctrl.pulso_alarma()
+    ctrl._gestionar_alarma()
+    ctrl._conmutar_heartbeat()
+
+    assert cliente.escrituras == []

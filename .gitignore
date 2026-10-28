@@ -245,3 +245,5 @@ test/red_plc_backup.json
 # Notas locales/borradores (no se versionan)
 mensajes_error_huella.md
 PLAN_MODULARIZACION.md
+
+.agents/

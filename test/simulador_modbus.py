@@ -70,7 +70,8 @@ class BancoModbus(DataBank):
 
     def __init__(self, palabras_contador, start_coil, pause_coil,
                  counter_register, modo="coil", start_register=16,
-                 start_bit=0, pause_register=17, pause_bit=0):
+                 start_bit=0, pause_register=17, pause_bit=0,
+                 tower_register=18, tower_hb_register=19):
         super().__init__()
         self._palabras = int(palabras_contador)
         self._start_coil = int(start_coil)
@@ -87,6 +88,9 @@ class BancoModbus(DataBank):
         self._start_bit = int(start_bit)
         self._pause_register = int(pause_register)
         self._pause_bit = int(pause_bit)
+        # Torre de luces (J3) y heartbeat (J4) en el Zelio
+        self._tower_register = int(tower_register)
+        self._tower_hb_register = int(tower_hb_register)
 
         self._contador = 0
         self._acumulado = 0.0
@@ -192,6 +196,19 @@ class BancoModbus(DataBank):
                 _log(f"[{_marca()}] Escritura palabra J (dir {address}) = "
                      f"{to_value} -> " + " ".join(bits))
                 return
+            if address == self._tower_register:
+                luces = [nombre for nombre, bit in (
+                    ("VERDE", 0), ("AMBAR", 1), ("ROJA", 2), ("ALARMA", 3),
+                ) if (to_value >> bit) & 1]
+                encendidas = ", ".join(luces) if luces else "APAGADA"
+                _log(f"[{_marca()}] Torre J3 (dir {address}) = {to_value} "
+                     f"-> {encendidas}")
+                return
+            if address == self._tower_hb_register:
+                latido = (to_value >> 0) & 1
+                _log(f"[{_marca()}] Heartbeat J4 (dir {address}) = {to_value} "
+                     f"-> {latido}")
+                return
             if address != self._counter_register:
                 _log(f"[{_marca()}] Escritura registro {address} = {to_value}")
                 return
@@ -265,6 +282,8 @@ def main():
         start_bit=cfg.get("start_bit", 0),
         pause_register=cfg.get("pause_register", 17),
         pause_bit=cfg.get("pause_bit", 0),
+        tower_register=cfg.get("tower_register", 18),
+        tower_hb_register=cfg.get("tower_heartbeat_register", 19),
     )
     servidor = ModbusServer(host=args.host, port=args.port, no_block=True,
                             data_bank=banco)
@@ -284,6 +303,10 @@ def main():
              f"{cfg.get('start_register', 16)} bit {cfg.get('start_bit', 0)} | "
              f"PAUSE: palabra {cfg.get('pause_register', 17)} "
              f"bit {cfg.get('pause_bit', 0)}")
+        _log(f"  torre J3 (dir {cfg.get('tower_register', 18)}): "
+             f"bit0=verde bit1=ambar bit2=roja bit3=alarma | "
+             f"heartbeat J4 (dir {cfg.get('tower_heartbeat_register', 19)}): "
+             f"bit0")
     else:
         _log(f"  coils: START={cfg['start_coil']} PAUSE={cfg['pause_coil']}")
     _log(AYUDA)
