@@ -27,14 +27,14 @@ def test_segundos_desde_con_infinito_devuelve_none():
     `timedelta(seconds=inf)` lanza OverflowError; el valor no es medible y
     se descarta con None (el checkpoint sigue vivo).
     """
-    from src.gui.inicio_view import InicioView
+    from src.gui.modulos.corte.inicio_view import InicioView
 
     assert InicioView._segundos_desde(None, lambda: float("inf")) is None
 
 
 def test_segundos_desde_con_dato_invalido_devuelve_none():
     """Negativo, None o un HAL que revienta: nunca un timestamp."""
-    from src.gui.inicio_view import InicioView
+    from src.gui.modulos.corte.inicio_view import InicioView
 
     assert InicioView._segundos_desde(None, lambda: -1.0) is None
     assert InicioView._segundos_desde(None, lambda: None) is None
@@ -47,7 +47,7 @@ def test_segundos_desde_con_dato_invalido_devuelve_none():
 
 def test_segundos_desde_con_valor_finito_resta_los_segundos():
     from src.database import ahora_local
-    from src.gui.inicio_view import InicioView
+    from src.gui.modulos.corte.inicio_view import InicioView
 
     antes = ahora_local()
     ts = InicioView._segundos_desde(None, lambda: 90.0)
@@ -64,7 +64,7 @@ def test_checkpoint_se_reprograma_aunque_el_cuerpo_reviente(monkeypatch):
     Antes estaba DESPUES del cuerpo, asi que la primera excepcion (p. ej. el
     OverflowError del infinito) mataba todos los checkpoints siguientes.
     """
-    from src.gui import inicio_view as vista
+    from src.gui.modulos.corte import inicio_view as vista
 
     programadas = []
 
@@ -116,7 +116,7 @@ class _ControladorTorre:
 
 def _vista_torre(detenida=False, **attrs):
     """InicioView sin Qt: `_estado_torre` solo lee atributos."""
-    from src.gui.inicio_view import InicioView
+    from src.gui.modulos.corte.inicio_view import InicioView
 
     vista = InicioView.__new__(InicioView)
     vista.controlador = _ControladorTorre(detenida)
@@ -338,3 +338,42 @@ def test_actualizar_torre_aplica_el_color_decidido():
 
     assert vista.controlador.torre == [(True, False, False)]
     assert vista._ultimo_color_rojo is None
+
+
+def test_enviar_easy_num_part_llama_al_servicio():
+    from unittest.mock import MagicMock, patch
+
+    from src.gui.modulos.corte.inicio_view import InicioView
+
+    vista = type("VistaFalsa", (), {"_estado": MagicMock()})()
+    servicio = MagicMock()
+    with patch("src.gui.modulos.corte.inicio_view.config.EASY_CONFIG",
+              {"host": "192.168.1.84", "puerto": 5000,
+               "rutina": "buscar_easy", "timeout": 30}), \
+         patch("src.gui.modulos.corte.easy.service.desde_config", return_value=servicio):
+        InicioView._enviar_easy_num_part(vista, "PARTE-999")
+        servicio.ejecutar_rutina.assert_called_once()
+        args, kwargs = servicio.ejecutar_rutina.call_args
+        assert kwargs.get("callback") is not None
+
+
+def test_enviar_easy_num_part_callback_error_actualiza_estado():
+    from unittest.mock import MagicMock, patch
+
+    from src.gui.modulos.corte.inicio_view import InicioView
+
+    vista = type("VistaFalsa", (), {"_estado": MagicMock()})()
+    servicio = MagicMock()
+    with patch("src.gui.modulos.corte.inicio_view.config.EASY_CONFIG",
+              {"host": "192.168.1.84", "puerto": 5000,
+               "rutina": "buscar_easy", "timeout": 30}), \
+         patch("src.gui.modulos.corte.easy.service.desde_config", return_value=servicio), \
+         patch("src.gui.modulos.corte.inicio_view.QTimer.singleShot") as mock_single_shot:
+        InicioView._enviar_easy_num_part(vista, "PARTE-999")
+        cb = servicio.ejecutar_rutina.call_args[1]["callback"]
+        cb(False, "Easy: error de red")
+        mock_single_shot.assert_called_once()
+        fn = mock_single_shot.call_args[0][1]
+        fn()
+        vista._estado.assert_called_once_with("Easy: error de red", "error")
+

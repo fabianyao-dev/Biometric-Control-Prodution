@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from src.gui.util import centrar_y_ajustar
+from src.gui.componentes.util import centrar_y_ajustar
 
 # Etiquetas persistidas en `trabajos_sesiones.modalidad` (compatibilidad con
 # historial y con Sesiones). El guardado directo conserva 'parcial' (cantidad

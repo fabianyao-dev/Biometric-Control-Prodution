@@ -28,8 +28,8 @@ from PySide6.QtWidgets import (
 )
 
 from src.gui import style
-from src.gui.style import aplicar_estilo_boton
-from src.gui.util import icono_svg
+from ..style import aplicar_estilo_boton
+from .util import icono_svg
 
 log = logging.getLogger(__name__)
 

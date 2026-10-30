@@ -110,7 +110,7 @@ import time
 from collections import deque
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import Qt, QSize, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -118,7 +118,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
-    QSizePolicy,
     QStyle,
     QVBoxLayout,
     QWidget,
@@ -146,17 +145,18 @@ from src.database import (
     pausar_trabajo,
     recortar_inicio_segmento,
     registrar_ultimo_corte,
-    roles_con_permiso,
     rol_tiene_permiso_operador,
+    roles_con_permiso,
 )
-from src.gui.huella_modal import HuellaModal
-from src.gui.modalidades_cierre import (
+from src.gui.componentes.huella_modal import HuellaModal
+from .componentes.selector_causas import SelectorCausaZona
+from .componentes.modalidades_cierre import (
     MODALIDAD_FOLIO,
     ModalidadCierreDialog,
 )
-from src.gui.resplandor import Resplandor
+from src.gui.componentes.resplandor import Resplandor
+from src.gui.componentes.switch import Switch
 from src.gui.style import aplicar_estado, aplicar_estilo_boton
-from src.gui.switch import Switch
 
 log = logging.getLogger(__name__)
 
@@ -402,12 +402,26 @@ class InicioView(QWidget):
     def _aplicar_escala_fuente(self, factor=1.0):
         """Aplica escala a fuentes de widgets registrados."""
         from PySide6.QtGui import QFont
+
         from src.gui import style
         for widget, base_size in self._widgets_fuente:
             if widget is None:
                 continue
             new_size = max(8, int(base_size * factor))
             widget.setFont(QFont(style.FAMILIA_FUENTE, new_size))
+
+    def puede_cambiar_modulo(self):
+        """Indica si se puede cambiar de modulo sin perder trabajo."""
+        if getattr(self, "_modal_abierto", False):
+            return False, "Hay un modal abierto."
+        if getattr(self, "_trabajo", None) is not None:
+            return False, "Hay un trabajo cargado."
+        try:
+            if not self.controlador.maquina_detenida():
+                return False, "La maquina esta en marcha."
+        except Exception:  # noqa: BLE001
+            pass
+        return True, ""
 
     # ------------------------------------------------------------------
     # Sesion (boton del header): identidad + TOTALES
@@ -1176,6 +1190,7 @@ class InicioView(QWidget):
                 mostrar_cancelar=False,
                 cerrable=False,
                 pedir_causa=True,
+                selector_causas_cls=SelectorCausaZona,
                 on_confirmado=_on_confirmado,
                 on_cancelar=lambda: self._estado(
                     "Paro NO autorizado; maquina detenida.", "error"
@@ -2151,6 +2166,45 @@ class InicioView(QWidget):
         log.info("Trabajo %s (%s) cargado en espera por %s a la sesion %s "
                  "(retoma %s/%s)", res["folio"], res["num_part"], nombre,
                  self.sesion_id, guardada, res["cantidad_total"])
+        # Usar el numero de parte real del trabajo (res['num_part']) en lugar de enviar texto fijo o de busqueda
+        self._enviar_easy_num_part(res["num_part"])
+
+    def _enviar_easy_num_part(self, num_part):
+        """Notifica al agente Easy (estacion remota) el numero de parte escaneado.
+
+        Delega en ServicioEasy, que resuelve la rutina en la BD y elige el
+        protocolo (legacy o v2) segun config.EASY_CONFIG.
+        """
+        from .easy.service import desde_config
+
+        cfg = config.EASY_CONFIG
+        if not (cfg.get("host") or "").strip():
+            return
+
+        servicio = desde_config()
+
+        def _on_resultado(ok, error):
+            if not ok and error:
+                def _actualizar_ui():
+                    try:
+                        self._estado(error, "error")
+                    except RuntimeError:
+                        pass
+                QTimer.singleShot(0, _actualizar_ui)
+
+        _trabajo = getattr(self, "_trabajo", None)
+        _folio = None
+        if _trabajo is not None:
+            try:
+                _folio = _trabajo["folio"]
+            except Exception:  # noqa: BLE001
+                _folio = None
+        servicio.ejecutar_rutina(
+            cfg.get("rutina", "buscar_easy"), num_part,
+            folio=_folio,
+            sesion_id=getattr(self, "sesion_id", None),
+            callback=_on_resultado,
+        )
 
     def _entrar_primera_pieza_sin_trabajo(self, id_operador, nombre):
         """Huella SIN QR: entra a Primera pieza sin folio con la maquina
@@ -2744,3 +2798,22 @@ class InicioView(QWidget):
     def _estado(self, texto="", estado="info"):
         self.lbl_estado.setText(texto)
         aplicar_estado(self.lbl_estado, estado)
+
+MODULO_INFO = {
+    "clave": "corte",
+    "nombre": "Corte",
+    "icono": "mdi6.scissors",
+    "orden": 0,
+    "permiso": None,
+    "predeterminado": True,
+}
+
+
+def crear_vista(contexto):
+    return InicioView(
+        contexto.content, contexto.content, contexto.biometrico, contexto.controlador
+    )
+
+
+def admin_tabs(contexto):
+    return []

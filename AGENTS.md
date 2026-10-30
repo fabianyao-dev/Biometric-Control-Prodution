@@ -1,60 +1,101 @@
-# Guía Rápida para Agentes: Biometric-Control-Prodution
+# AGENTS.md — Biometric-Control-Prodution
 
-Este archivo contiene información crucial y específica del repositorio para que los agentes de OpenCode operen eficientemente y eviten errores comunes.
+App de escritorio (PySide6) para control de producción con biometría y PLC. Corre en Windows (PC fanless) y se empaqueta con PyInstaller. **No hay CI ni pre-commit**: los gates son locales.
 
-## Investigación y Contexto
+## Arranque y entorno
 
-Prioriza estas fuentes para entender el proyecto:
-
-- **Fuentes Ejecutables (Preferir sobre Prose):**
-  - Archivos de configuración (`README*`, `package.json`, `requirements.txt`, `*.spec`, `*.config.json`, `.env*`)
-  - Scripts de `test/` (ejecutables y manuales) y suite automatizada en `tests/`
-  - Flujos de CI/CD y pre-commit hooks
-  - Configuración de OpenCode local (`opencode.json`)
-- **Análisis de Código:** Si la arquitectura no está clara, inspecciona archivos clave que conectan el sistema (entrypoints, límites de paquetes, flujo de ejecución) en lugar de archivos aleatorios.
-
-## Extracción de Información Clave
-
-Busca hechos de alto impacto para un agente:
-
-- **Comandos Exactos:** Comandos de desarrollo, construcción, pruebas (unitarias, integración), linting, formateo y type checking. Incluye secuencias obligatorias (ej. `lint -> typecheck -> test`).
-- **Puntos de Entrada y Flujo:** Dónde inicia la aplicación (`python main.py` desde raíz), cómo se activan los HALs (Modbus vs. Simulación basado en `MODBUS_HOST`), y el punto de entrada para la GUI (`src/gui`).
-- **Quirks Específicos del Repo:**
-  - **Biometría (DigitalPersona):** Manejo de DLLs (`dpfpdd.dll`, `dpfj.dll`) en desarrollo vs. empaquetado (`_MEIPASS`, `os.add_dll_directory`). Tolerancia a ausencia de DLLs y hot-plug del lector. Filtrado de lectores por producto/fabricante (NO VID/`info.name`).
-  - **Hardware Abstraction Layer (HAL):** Interfaz común para `ModbusController` y `SimulacionController`. El contador de cortes VIVE EN EL MÓDULO Modbus (no detectar flancos en Windows RTOS). Módulo actual: Advantech WISE-4060LAN (IP `10.0.0.1`, mapa Modbus en `.env`, little-endian para contador ch0).
-  - **Empaquetado (PyInstaller):** Build `onedir` (`venv\Scripts\pyinstaller --noconfirm WTSControl.spec`), DLLs de SDK en `sdk/vendor/dpf/`, datos persistentes en `%USERPROFILE%\WTSControlData` (vía `BIOMETRICO_DIR_DATOS`), `config.json` en producción (migrado desde `.env`).
-  - **Actualizaciones:** Vía HTTP local a demanda. El updater (`WTSControlUpdater.exe`) se lanza como subproceso, con `cwd=config.DIR_DATOS` para evitar problemas de bloqueo de archivo.
-  - **Modo "Primera Pieza"**: Activado por defecto al abrir sesión. Suprime auto-paro por inactividad, maneja cortes temporales, y requiere huella para iniciar/finalizar. Usa escaneo QR para cargar trabajos.
-  - **Trabajos por QR:** Formato `folio|num_part|cantidad_total`. El separador es ESTRICTO: solo `|`. La validación vive en `parsear_qr()` (`src/gui/huella_modal.py`, función pura) y `abrir_trabajo()` (`src/database.py`); ambas rechazan el resto de símbolos. Manejo de trabajos abiertos/cerrados, reanudación y finalización.
-  - **Export automático a Excel (opcional):** `src/reportes/export_auto.py` genera un snapshot PARCIAL cada hora (monitoreo del supervisor) y el cierre FINAL del día. Cada día se guarda en su propia carpeta: `<dir>/<fecha>/Sesiones_<fecha>_parcial.xlsx` (en vivo, se sobrescribe cada hora) y `<dir>/<fecha>/Sesiones_<fecha>.xlsx` (cierre final). El cierre de un día NO depende de una hora fija (el fin de turno varía): se dispara al cerrar la última sesión del día (señal `sesion_cambiada` → `_revisar_export(incluir_hoy=True)`) y, como respaldo, al cerrar la app (`closeEvent` → `_exportar_antes_de_salir`, síncrono, con espera acotada al export en vuelo); al arrancar se reexportan los días terminados pendientes (catch-up, tope `DIAS_CATCHUP_MAX`). Un día solo se cierra cuando ya no tiene sesiones `Activa`, y el día EN CURSO no se "sella" (`ultimo_dia` solo avanza con días terminados, así un cierre fallido o un receso se recupera al día siguiente). Se controla desde `config.json`/`.env` (`EXPORT_AUTO_ACTIVO`, `EXPORT_CADA_HORA`, `EXPORT_DIR_AUTO`); el dir por defecto es `<carpeta de datos>/exportaciones`. Las decisiones (`decidir`, `decidir_hoy`) son puras; el QTimer, el hilo y los eventos viven en `main.py` (patrón hilo → `queue.Queue` → QTimer).
-  - **Seguridad:** Seguro anti-paro/apagado (`SEGURO_PARO_SEGUNDOS`), seguro anti-corrida (`SEGURO_RAFAGA_SEGUNDOS`/`CORTES`).
-  - **Torre de luces:** La decisión del color es de la GUI (`InicioView._estado_torre`); el HAL solo escribe los bits de J1 (verde 2 / ámbar 3 / roja 4 / alarma 5, compartiendo palabra con START bit0 y PARO bit1). La tolerancia ámbar→rojo+alarma es `PRIMERA_PIEZA_TIMEOUT_S` (la "tolerancia de paro" del `.env`/`config.json`; NO es `PARO_IDLE_TIMEOUT_S`, que es el auto-paro de 1 min) y aplica a TODO paro real (manual, automático, modo PARO y Mantenimiento con máquina detenida); la espera de trabajo sin paro se queda en ámbar. El parpadeo de la alarma lo ejecuta el hilo de polling del HAL (`pulso_alarma` solo abre la ventana).
-- **Base de Datos:** SQLite (`planta_corte.db`), timestamps en `America/Monterrey`, soft-delete (`activo=0`), manejo de múltiples huellas por operador, tabla `trabajos` (folio PK, estado 'Abierto'/'Cerrado').
-- **Configuración y Logs:** Carga vía `.env` (dev) o `config.json` (prod). Logs diarios rotados.
-- **Permisos y Roles:** Gestión en `Administración → Roles`. Verificación vía `rol_tiene_permiso_operador()`. El rol `mantenimiento` tiene `autorizar_paro` por defecto.
+- Windows + Python 3.12. Usa siempre `venv\Scripts\...`; el `python` global no tiene las dependencias.
+- `venv\Scripts\python main.py` desde la raíz. El proyecto **no se instala** como paquete: `tests/conftest.py` inyecta la raíz en `sys.path`.
+- Sin lector de huellas en desarrollo: `set MODO_DEV=true` antes de arrancar (omite la autenticación biométrica). Nunca en producción.
+- Config de desarrollo: `.env` en la raíz (copia `.env.example`). Producción: `config.json` en la carpeta de datos.
+- Carpeta de datos persistente: `%USERPROFILE%\WTSControlData` (override con `BIOMETRICO_DIR_DATOS`). Ahí viven `config.json`, `planta_corte.db` y `logs/`; nunca commitees nada de ahí.
+- `config.json` solo **agrega** claves faltantes (`setdefault`); no migra valores viejos. Si cambió el hardware, edita `config.json` a mano o los comandos no saldrán.
+- HAL: `crear_controlador()` en `main.py` devuelve `ModbusController` si hay `MODBUS_HOST`; si no, `SimulacionController`. La GUI y las pruebas no deben depender del HAL real.
 
 ## Comandos
 
-```bash
-# Suite automatizada: rápida, sin hardware y sin BD real
+```bat
+:: App (kiosco). Sin lector: set MODO_DEV=true primero
+venv\Scripts\python main.py
+
+:: Suite automatizada: rápida, sin hardware y sin BD real (~250 tests)
 venv\Scripts\python -m pytest -q
 
-# Lint
+:: Un archivo / un test / por palabra clave
+venv\Scripts\python -m pytest tests\test_qr_parser.py -q
+venv\Scripts\python -m pytest tests\test_export_auto.py -q -k decidir
+
+:: Lint de la suite (gate práctico)
 venv\Scripts\ruff check tests\
 
-# Build
+:: Build: el updater SIEMPRE primero, luego la app
+venv\Scripts\pyinstaller --noconfirm tools\updater.spec
 venv\Scripts\pyinstaller --noconfirm WTSControl.spec
+
+:: Release completo: bump version.txt + updater + app + verificación + manifest/zip en release/
+venv\Scripts\python tools\hacer_version.py 1.1.19
 ```
 
-- **`test/` NO es `tests/`:** `test/` son scripts MANUALES de diagnóstico (tocan hardware y BD real, y hacen `sys.exit(1)`); `tests/` es la suite automatizada. `pyproject.toml` fija `testpaths = ["tests"]` para que pytest no recolecte `test/`.
-- **La suite nunca toca la BD real:** `tests/conftest.py` redirige `DB_PATH`/`LOG_DIR` a un temporal **antes** de importar `src`. Sin eso, `src/config.py` resuelve `DB_PATH` a `<raiz>/planta_corte.db` (el `.env` de dev lo deja vacío a propósito) y los tests migrarían la BD de la planta.
-- **Límites de capa verificados por test:** `tests/test_arquitectura.py` falla si `src/domain/` importa Qt/SQLite, si `src/hardware/` importa `src/gui/`, o si `src/gui/` toca `biometric_sdk` sin pasar por `BiometricService`.
-- **Refactor en curso:** la arquitectura objetivo es Ports & Adapters. `tests/test_arquitectura.py` y `tests/test_smoke_imports.py` ya vigilan las fronteras, así que no se pueden romper en silencio.
+- **Lint:** `ruff check .` **no está limpio** (deuda preexistente en `main.py`, `src/gui/*`, `src/database.py`, etc., y `Easy/` no está excluido). No lo uses como criterio de "todo bien" ni reformatees archivos ajenos; el gate es `ruff check tests\`. Config: 100 columnas, `py312`, reglas `F,E,W,I`.
+- Si `ruff check tests\` falla en archivos que no tocaste, es deuda/WIP ajeno: repórtalo en vez de barrer el repo. Lo que agregues tú debe quedar limpio.
 
-## Reglas de Escritura
+## Tests: `tests/` ≠ `test/`
 
-- **Concisión:** Incluye solo información verificada y de alto impacto que un agente podría pasar por alto.
-- **Verificabilidad:** Prefiere comandos y configuraciones sobre documentación narrativa.
-- **Idioma:** Todo el contenido en español.
-- **Omisión:** Excluye consejos genéricos, tutoriales largos, o información obvia del lenguaje/framework.
-- **Formato:** Secciones cortas, listas con viñetas.
+- `tests/` es la suite automática (`pyproject.toml` fija `testpaths = ["tests"]`).
+- `test/` son **scripts manuales de planta**: tocan hardware/BD real, arrancan el HAL y hacen `sys.exit(1)`. Nunca los metas en pytest ni los ejecutes sin hardware.
+- `tests/conftest.py` redirige `DB_PATH` y `LOG_DIR` a un temporal **antes** de importar `src`, y define `MODBUS_HOST=""`, `MODO_DEV=true`, `QT_QPA_PLATFORM=offscreen`. Sin ese blindaje, un test que importe `src` migraría la BD real de la planta.
+- Cualquier test nuevo debe usar los fixtures de BD (`db_temporal`, `bd_limpia`); no abras `src.database.DB_PATH` directamente.
+- `tests/test_arquitectura.py` vigila fronteras: `src/domain/` puro (sin Qt/SQLite/red/`os.environ`), `src/hardware/` no importa `src.gui/` ni `main`, `src/database.py` no importa Qt, y `src/gui/` no toca `biometric_sdk` (solo `BiometricService`). El test de imports relativos está en `skip` como deuda conocida.
+- `tests/test_smoke_imports.py` importa dinámicamente los módulos: si mueves/renombras archivos, actualízalo.
+
+## Hardware actual: Zelio Logic 2 SR3 + SR3NET01BD
+
+- El hardware vigente es **Zelio** con `MODBUS_CMD_MODE=registro` (FC06). El modo `coil` (Advantech WISE-4060LAN) queda solo como compatibilidad; no lo tomes como el mapa actual.
+- El NET01BD **no expone coils**. Los comandos son bits dentro de palabras J: J1 (dir 16), bits 0=marcha, 1=paro, 2=verde, 3=ámbar, 4=roja, 5=alarma. J2–J4 no controlan nada en el programa actual.
+- El contador de cortes vive en el **PLC**, en O1 (dir 20), 16 bits, **1 palabra**. O2 es la palabra de pulsos, **no** la palabra alta: leer 2 palabras corrompe el valor y pierde cortes. El wrap a 65535 lo resuelve el HAL.
+- El PC **nunca** cuenta flancos localmente (Windows no es RTOS); solo hace polling.
+- La decisión del color de la torre es de la GUI (`InicioView._estado_torre`); el HAL solo escribe bits. El parpadeo de alarma lo hace el hilo de polling (`pulso_alarma` solo abre la ventana).
+- `PRIMERA_PIEZA_TIMEOUT_S` es la tolerancia ámbar→rojo+alarma y aplica a todo paro real. **No** confundir con `PARO_IDLE_TIMEOUT_S` (auto-paro por inactividad, 1 min).
+- Mapa y notas de campo: `MAPA_MODBUS_ZELIO.md`. Simulador del mapa Zelio: `test/simulador_plc.py`.
+
+## Datos y trabajos
+
+- SQLite `planta_corte.db`; `init_db()` aplica migraciones aditivas al arrancar. Timestamps en `America/Monterrey`.
+- Soft-delete con `activo=0`; no borres filas de operadores/huellas.
+- Un operador puede tener varias huellas. La autenticación y el alta viven en `src/gui/huella_modal.py`.
+- Trabajos por QR: formato **estricto** `folio|num_part|cantidad_total`; el único separador válido es `|`. La validación está duplicada en `parsear_qr()` (`src/gui/huella_modal.py`, función pura) y `abrir_trabajo()` (`src/database.py`): si cambias una, cambia la otra y su test (`tests/test_qr_parser.py`).
+- Estados de trabajo `Abierto`/`Cerrado`, reanudación y cierre. El tiempo efectivo se arma con segmentos en `trabajos_sesiones`, no con un solo timestamp.
+- Permisos: `rol_tiene_permiso_operador()`; el rol `mantenimiento` trae `autorizar_paro` por defecto.
+
+## Reportes y export automático
+
+- `src/reportes/export_auto.py`: snapshot **parcial** cada hora (`Sesiones_<fecha>_parcial.xlsx`, se sobrescribe) y cierre **final** del día (`Sesiones_<fecha>.xlsx`), cada uno en `<dir>/<fecha>/`. El dir por defecto es `<carpeta de datos>/exportaciones`.
+- Un día se cierra cuando ya no tiene sesiones `Activa`, no a una hora fija. Se dispara al cerrar la última sesión (`sesion_cambiada`) y, como respaldo, en `closeEvent`. Al arrancar hay catch-up de días pendientes (tope `DIAS_CATCHUP_MAX`).
+- Las decisiones (`decidir`, `decidir_hoy`) son puras; el hilo, la `queue.Queue` y el `QTimer` viven en `main.py`. Mantén esa separación para poder testear sin Qt/hora real.
+
+## Empaquetado y actualizaciones
+
+- PyInstaller `onedir`. Los `*.spec` son código versionado (no están en `.gitignore`): no los regeneres a ciegas.
+- Las DLLs del SDK de DigitalPersona (`dpfpdd.dll`, `dpfj.dll`) se toman de `sdk/vendor/dpf/`; el `.spec` las bundlea.
+- Datos persistentes fuera de `dist/` para sobrevivir actualizaciones; `DB_PATH`/`LOG_DIR` se resuelven solos en la carpeta de datos.
+- El updater (`WTSControlUpdater.exe`) se lanza como subproceso con `cwd=config.DIR_DATOS` para evitar bloqueos de archivo. La app lo lleva embebido en `_internal/updater/`, por eso se compila antes.
+- `version.txt` es la fuente de la versión. `tools/hacer_version.py` hace bump, builds, verifica el exe/DLLs/updater y deja `manifest.json` + zip en `release/`.
+
+## Biometría (DigitalPersona)
+
+- Tolerar ausencia de DLLs y lector desconectado: la app debe arrancar y funcionar en modo simulación/`MODO_DEV`.
+- Carga de DLLs distinta en desarrollo vs. empaquetado (`_MEIPASS`, `os.add_dll_directory`).
+- Filtra lectores por **producto/fabricante**, no por VID ni `info.name`.
+- La GUI no importa `biometric_sdk` directamente: pasa por `BiometricService` (`src/hardware/biometric_service.py`).
+
+## Integración Easy
+
+- `src/gui/modulos/corte/easy_agente.py` envía la petición JSON por TCP al cargar un trabajo. `EASY_HOST` vacío desactiva la integración.
+- `enviar_numero_parte()` corre en un hilo daemon y el callback se ejecuta **en ese hilo**. La UI debe publicarse con `QTimer.singleShot(0, ...)`; nunca tocar widgets desde el callback.
+- `Easy/` es un proyecto aparte (cliente/servidor de prueba, venv y `AGENTS.md` propios). No lo mezcles con la app ni esperes que pytest/ruff limpios lo cubran.
+
+## Convenciones
+
+- Código, mensajes, comentarios y docs en español; conserva el estilo y los nombres existentes.
+- No edites `.env`, `planta_corte.db`, `logs/`, `dist/`, `build/`, `release/` ni `test_pc/`.
+- Antes de dar por terminado: `venv\Scripts\python -m pytest -q` y `venv\Scripts\ruff check tests\`.

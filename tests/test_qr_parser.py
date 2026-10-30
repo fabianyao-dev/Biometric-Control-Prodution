@@ -20,7 +20,7 @@ rechazo.
 
 import pytest
 
-from src.gui.huella_modal import parsear_qr
+from src.gui.componentes.huella_modal import parsear_qr
 
 
 class TestQrsValidos:

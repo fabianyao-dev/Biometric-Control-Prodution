@@ -10,7 +10,7 @@ cantidad que baja de cero (el trabajo se guardaria con piezas negativas) o
 que se pasa del tope del QIntValidator.
 """
 
-from src.gui.modalidades_cierre import MAX_CANTIDAD, ajustar_cantidad
+from src.gui.modulos.corte.componentes.modalidades_cierre import MAX_CANTIDAD, ajustar_cantidad
 
 
 def test_ajustar_cantidad_suma_y_resta_de_uno():

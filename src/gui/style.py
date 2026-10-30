@@ -528,6 +528,39 @@ QCheckBox {
     color: @texto@;
 }
 
+/* ---- Contenedores con titulo (formularios agrupados) ---- */
+QGroupBox {
+    background: @superficie@;
+    border: 1px solid @borde@;
+    border-radius: 10px;
+    margin-top: 12px;
+    padding: 8px;
+    font-weight: 600;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 12px;
+    padding: 0 6px;
+    color: @texto_sec@;
+    font-weight: 700;
+}
+
+/* ---- Separadores arrastrables ---- */
+QSplitter::handle {
+    background: transparent;
+}
+QSplitter::handle:horizontal {
+    width: 8px;
+}
+QSplitter::handle:vertical {
+    height: 8px;
+}
+QSplitter::handle:hover {
+    background: @borde@;
+    border-radius: 4px;
+}
+
 /* ---- Pestanas ---- */
 QTabWidget::pane {
     border: 1px solid @borde@;

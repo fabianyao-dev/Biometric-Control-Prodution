@@ -312,7 +312,83 @@ def init_db():
             fin_paro TIMESTAMP,
             autorizado_por_operador_id INTEGER REFERENCES operadores(id)
         );
+
+        -- Rutinas Easy: la app envia pasos ordenados, la estacion los ejecuta.
+        -- La BD es la fuente de verdad; la estacion no conoce la BD.
+        CREATE TABLE IF NOT EXISTS rutinas_easy (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL UNIQUE,
+            descripcion TEXT NOT NULL DEFAULT '',
+            activo INTEGER NOT NULL DEFAULT 0,
+            orden INTEGER NOT NULL DEFAULT 0,
+            timeout_s INTEGER NOT NULL DEFAULT 30,
+            creado TEXT NOT NULL DEFAULT (ahora_monterrey()),
+            actualizado TEXT NOT NULL DEFAULT (ahora_monterrey())
+        );
+
+        CREATE TABLE IF NOT EXISTS rutinas_easy_pasos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rutina_id INTEGER NOT NULL REFERENCES rutinas_easy(id),
+            orden INTEGER NOT NULL DEFAULT 0,
+            accion TEXT NOT NULL,
+            parametros TEXT NOT NULL DEFAULT '{}',
+            activo INTEGER NOT NULL DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS easy_ejecuciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rutina_id INTEGER REFERENCES rutinas_easy(id),
+            rutina_nombre TEXT NOT NULL,
+            num_part TEXT,
+            folio INTEGER REFERENCES trabajos(folio),
+            sesion_id INTEGER REFERENCES sesiones_produccion(id),
+            inicio TEXT NOT NULL DEFAULT (ahora_monterrey()),
+            fin TEXT,
+            ok INTEGER NOT NULL DEFAULT 0,
+            pasos INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            origen TEXT NOT NULL DEFAULT 'app'
+        );
+
+        -- Modulos disponibles en la app (metadatos; las vistas son codigo).
+        CREATE TABLE IF NOT EXISTS modulos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            clave TEXT NOT NULL UNIQUE,
+            nombre TEXT NOT NULL,
+            icono TEXT,
+            orden INTEGER NOT NULL DEFAULT 0,
+            activo INTEGER NOT NULL DEFAULT 1,
+            permiso TEXT,
+            rutina_easy_id INTEGER REFERENCES rutinas_easy(id),
+            predeterminado INTEGER NOT NULL DEFAULT 0
+        );
+
     """)
+
+    # Semilla Easy (idempotente).
+    cur.execute(
+        "INSERT OR IGNORE INTO rutinas_easy (nombre, descripcion, "
+        "activo, orden, timeout_s) VALUES (?,?,?,?,?)",
+        ("buscar_easy",
+         "Rutina de busqueda en la estacion (pendiente de validar "
+         "coordenadas).",
+         0, 0, 30),
+    )
+    cur.execute(
+        "INSERT OR IGNORE INTO modulos (clave, nombre, icono, orden, activo, "
+        "predeterminado) VALUES (?,?,?,?,?,?)",
+        ("corte", "Corte", "mdi6.scissors", 0, 1, 1),
+    )
+    cur.execute(
+        "UPDATE modulos SET rutina_easy_id=(SELECT id FROM rutinas_easy "
+        "WHERE nombre='buscar_easy') WHERE clave='corte' "
+        "AND rutina_easy_id IS NULL"
+    )
+
+    # Migracion: las rutinas dejaron de pertenecer a un modulo.
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(rutinas_easy)").fetchall()]
+    if "modulo_clave" in cols:
+        cur.execute("ALTER TABLE rutinas_easy DROP COLUMN modulo_clave")
 
     # Migracion: agregar la columna de rol a operadores existentes.
     cols = [r[1] for r in cur.execute("PRAGMA table_info(operadores)").fetchall()]

@@ -14,10 +14,11 @@ import sqlite3
 
 import pytest
 
-# Las 11 tablas distintas que declara el DDL. Se cuentan sobre
-# `sqlite_master`, no sobre el texto del CREATE TABLE: el esquema tiene una
-# declaracion DUPLICADA de `trabajos_sesiones` (ver PLAN_MODULARIZACION.md
-# §1.5), asi que contar sentencias daria 12 y no el numero real.
+# Tablas distintas que declara el DDL. Se cuentan sobre `sqlite_master`, no
+# sobre el texto del CREATE TABLE: el esquema tiene una declaracion DUPLICADA
+# de `trabajos_sesiones` (ver PLAN_MODULARIZACION.md §1.5), asi que contar
+# sentencias daria 12 y no el numero real. Incluye las tablas Easy/modulos
+# agregadas para el protocolo v2.
 TABLAS_ESPERADAS = {
     "roles",
     "permisos",
@@ -30,6 +31,10 @@ TABLAS_ESPERADAS = {
     "trabajos_sesiones",
     "zonas_maquina",
     "paros_produccion",
+    "rutinas_easy",
+    "rutinas_easy_pasos",
+    "easy_ejecuciones",
+    "modulos",
 }
 
 # Ignora las tablas internas de SQLite.

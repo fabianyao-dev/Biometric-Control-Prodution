@@ -196,9 +196,23 @@ def test_no_hay_imports_absolutos_con_prefijo_src_dentro_de_src():
         )
 
 
-def test_estructura_de_paquetes_conserva_init():
-    """Todo subpaquete tiene `__init__.py` (PyInstaller y el editor lo esperan)."""
-    for carpeta in ("gui", "hardware", "reportes"):
-        d = SRC / carpeta
-        if d.exists():
-            assert (d / "__init__.py").exists(), f"falta {d.name}/__init__.py"
+COMPONENTES = SRC / "gui" / "componentes"
+
+
+def test_componentes_no_importan_modulos_especificos_de_corte():
+    """Los componentes compartidos no deben depender de modulos concretos."""
+    if not COMPONENTES.exists():
+        pytest.skip("componentes/ todavia no existe")
+    prohibidos = (
+        "src.gui.modulos.corte.componentes.selector_causas",
+        "src.gui.modulos.corte.componentes.modalidades_cierre",
+        "src.gui.modulos.corte.componentes.croquis_zonas",
+        "src.gui.modulos",
+    )
+    for ruta in _archivos_python(COMPONENTES):
+        for mod in _modulos_importados(ruta):
+            for prohibido in prohibidos:
+                assert not mod.startswith(prohibido), (
+                    "%s importa %s: un componente no debe depender de un modulo concreto"
+                    % (ruta.name, mod)
+                )

@@ -26,6 +26,7 @@ from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -49,12 +50,15 @@ from src.database import (
     rol_tiene_permiso_operador,
 )
 from src.gui.admin_view import AdminView
-from src.gui.huella_modal import HuellaModal
-from src.gui.inicio_view import InicioView
-from src.gui.notificaciones import IndicadorAdvertencias
+from src.gui.componentes.huella_modal import HuellaModal
+from src.gui.inicio_shell import InicioShell
+from src.gui.modulos.corte.inicio_view import InicioView
+from src.gui.modulos import registro
+from src.gui.modulos.base import ContextoApp
+from src.gui.componentes.notificaciones import IndicadorAdvertencias
+from src.gui.componentes.util import desplazamiento_tactil
 from src.gui.sessions_view import SessionsView
 from src.gui import style
-from src.gui.util import desplazamiento_tactil
 from src.hardware.biometric_service import BiometricService
 from src.hardware.modbus_controller import ModbusController
 from src.hardware.simulacion_controller import SimulacionController
@@ -113,7 +117,7 @@ class App(QMainWindow):
             self.setWindowIcon(QIcon(ruta_ico))
             # Tambien establecerlo en la QApplication para el icono de la barra de tareas
             # y otros contextos del sistema.
-            app.setWindowIcon(QIcon(ruta_ico))
+            QApplication.instance().setWindowIcon(QIcon(ruta_ico))
         except Exception as e:
             log.warning("No se pudo cargar el ícono %s: %s", ruta_ico, e)
         self.resize(1152, 648)
@@ -135,8 +139,14 @@ class App(QMainWindow):
         self.vistas = {}
         self.vista_actual = None
         self.btn_sidebar = {}
+        self._modulo_actual = None
 
         self._crear_contenido()
+        self.contexto = ContextoApp(
+            app=QApplication.instance(), content=self.content,
+            biometrico=self.biometrico, controlador=self.controlador,
+            config=config,
+        )
         self._crear_header()
         self._crear_sidebar(opciones=[
             ("inicio", "Inicio"),
@@ -205,6 +215,22 @@ class App(QMainWindow):
         titulo = QLabel("Control de Corte", self.header)
         titulo.setObjectName("HeaderLabel")
         lay.addWidget(titulo)
+
+        # Selector de modulos disponibles (Fase 4).
+        self.combo_modulos = QComboBox(self.header)
+        self.combo_modulos.setObjectName("HeaderLabel")
+        self.combo_modulos.setMinimumWidth(140)
+        for m in registro.modulos_activos():
+            self.combo_modulos.addItem(m.nombre, m.clave)
+        pred = registro.modulo_predeterminado()
+        if pred is not None:
+            idx = self.combo_modulos.findData(pred.clave)
+            if idx >= 0:
+                self.combo_modulos.setCurrentIndex(idx)
+        self.combo_modulos.currentIndexChanged.connect(
+            lambda i: self._cambiar_modulo(self.combo_modulos.itemData(i))
+        )
+        lay.addWidget(self.combo_modulos)
         lay.addStretch(1)
 
         # Sesion (esquina superior derecha): UN solo boton con icono +
@@ -281,7 +307,11 @@ class App(QMainWindow):
         vista = self.vistas.get("inicio")
         if vista is None:
             return
-        vista.toggle_sesion()
+        activa = getattr(vista, "vista_actual", None)
+        if callable(activa):
+            activa = activa()
+        if activa is not None and hasattr(activa, "toggle_sesion"):
+            activa.toggle_sesion()
 
     def _sesion_cambiada(self, nombre, rol):
         """Slot de InicioView.sesion_cambiada(nombre, rol).
@@ -507,6 +537,35 @@ class App(QMainWindow):
     def _actualizar_sidebar(self):
         self.sidebar.setVisible(self._sidebar_visible)
 
+    def _cambiar_modulo(self, clave):
+        if clave is None:
+            return
+        vista = self.vistas.get("inicio")
+        if not isinstance(vista, InicioShell):
+            return
+        if clave == vista.clave_actual():
+            return
+        if not vista.cambiar_modulo(clave):
+            # revertir combo
+            idx = self.combo_modulos.findData(vista.clave_actual())
+            if idx >= 0:
+                self.combo_modulos.blockSignals(True)
+                self.combo_modulos.setCurrentIndex(idx)
+                self.combo_modulos.blockSignals(False)
+            ok, motivo = vista.puede_cambiar()
+            if not ok and motivo:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "Cambio de modulo", motivo)
+            return
+        self._modulo_actual = clave
+        # Administracion: ajustar tabs segun modulo.
+        admin = self.vistas.get("admin")
+        if admin is not None and hasattr(admin, "set_modulo"):
+            try:
+                admin.set_modulo(clave)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _ir_a(self, nombre):
         # Vistas protegidas por permiso de rol: se valida la huella antes de
         # entrar. Los permisos se gestionan en Administracion, no en codigo.
@@ -589,17 +648,20 @@ class App(QMainWindow):
         vista = self.vistas.get(nombre)
         if vista is None:
             if nombre == "inicio":
-                vista = InicioView(self.content, self, self.biometrico, self.controlador)
+                vista = InicioShell(self.contexto, self.content)
                 # El header refleja la identidad de la sesion (nombre +
                 # icono persona/engranaje) via esta senal. Se re-publica el
                 # estado actual porque la recuperacion de sesion interrumpida
                 # corre DENTRO del constructor (antes de esta conexion).
                 vista.sesion_cambiada.connect(self._sesion_cambiada)
-                vista._refrescar_operador()
+                if vista.vista_actual() is not None:
+                    vista.vista_actual()._refrescar_operador()
             elif nombre == "sesiones":
                 vista = SessionsView(self.content, self)
             elif nombre == "admin":
                 vista = AdminView(self.content, self, self.biometrico)
+                if hasattr(vista, "set_modulo"):
+                    vista.set_modulo(self._modulo_actual or "corte")
             else:
                 return
             self.vistas[nombre] = vista
@@ -842,6 +904,26 @@ if __name__ == "__main__":
     _splash_mensaje(splash, "Preparando...")
     _splash_mensaje(splash, "Cargando base de datos...")
     init_db()
+    # Descubrir modulos disponibles (sin __init__.py: namespace packages).
+    try:
+        from src.gui.modulos.loader import descubrir
+        descubrir()
+    except Exception as e:  # noqa: BLE001
+        log.warning("No se pudo descubrir modulos: %s", e)
+    # Sincronizar modulos registrados en la BD (metadatos).
+    try:
+        from src.gui.modulos import registro
+        from src.gui.modulos.corte.easy.repo import sincronizar_modulos
+        sincronizar_modulos([
+            {
+                "clave": m.clave, "nombre": m.nombre, "icono": m.icono,
+                "orden": m.orden, "activo": True,
+                "permiso": m.permiso, "predeterminado": m.predeterminado,
+            }
+            for m in registro.modulos_registrados()
+        ])
+    except Exception as e:  # noqa: BLE001
+        log.warning("No se pudo sincronizar modulos: %s", e)
     # La sesion 'Activa' que quede tras un apagon se cierra sola al arrancar
     # (InicioView._cerrar_sesion_interrumpida): sus datos ya estan guardados
     # por el checkpoint, no se borran.

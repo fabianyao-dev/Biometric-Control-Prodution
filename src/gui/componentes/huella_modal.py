@@ -47,10 +47,9 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QDialog, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from src import config
-from src.gui import style
-from src.gui.selector_causas import SelectorCausaZona
-from src.gui.style import aplicar_estado
-from src.gui.util import centrar_y_ajustar, desplazamiento_tactil
+from .. import style
+from ..style import aplicar_estado
+from .util import centrar_y_ajustar, desplazamiento_tactil
 
 log = logging.getLogger(__name__)
 
@@ -177,7 +176,8 @@ class HuellaModal(QDialog):
                  mostrar_cancelar=True, cerrable=True, pedir_causa=False,
                  validador=None, pedir_trabajo=False, qr_solo=False,
                  on_trabajo_escaneado=None, permitir_sin_trabajo=False,
-                 on_confirmado=None, mostrar_dev=False, on_dev=None):
+                 on_confirmado=None, mostrar_dev=False, on_dev=None,
+                 selector_causas_cls=None):
         super().__init__(parent)
         self.biometrico = biometrico
         self.titulo = titulo
@@ -190,6 +190,7 @@ class HuellaModal(QDialog):
         self.validador = validador
         self.pedir_trabajo = pedir_trabajo
         self.pedir_causa = pedir_causa
+        self.selector_causas_cls = selector_causas_cls
         # Boton "Entrar como DEV (sin lector)": visible cuando `mostrar_dev`
         # es True (modo desarrollo). Al pulsarlo se cierra el modal y se
         # invoca `on_dev` para iniciar sesion con el operador temporal.
@@ -320,7 +321,12 @@ class HuellaModal(QDialog):
         layout.addWidget(lbl_mensaje)
 
         if pedir_causa:
-            self.selector_causas = SelectorCausaZona(
+            if self.selector_causas_cls is None:
+                raise ValueError(
+                    "pedir_causa=True requiere selector_causas_cls "
+                    "(inyectar desde el modulo)"
+                )
+            self.selector_causas = self.selector_causas_cls(
                 self, on_cambio=self._actualizar_confirmar
             )
             layout.addWidget(self.selector_causas, stretch=1)

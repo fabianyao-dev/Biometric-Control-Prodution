@@ -68,9 +68,9 @@ def test_se_cubre_al_menos_la_app_completa():
     for esperado in (
         "src.config",
         "src.database",
-        "src.gui.inicio_view",
+        "src.gui.modulos.corte.inicio_view",
         "src.gui.admin_view",
-        "src.gui.huella_modal",
+        "src.gui.componentes.huella_modal",
         "src.hardware.biometric_sdk",
         "src.hardware.modbus_controller",
         "src.hardware.simulacion_controller",

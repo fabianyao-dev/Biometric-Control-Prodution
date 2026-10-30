@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.database import causas_visibles_en_selector
-from src.gui.croquis_zonas import ZonaCanvas
+from .croquis_zonas import ZonaCanvas
 
 log = logging.getLogger(__name__)
 

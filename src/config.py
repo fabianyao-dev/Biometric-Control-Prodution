@@ -257,6 +257,11 @@ CONFIG_POR_DEFECTO = {
     "EXPORT_AUTO_ACTIVO": 1,
     "EXPORT_CADA_HORA": 1,
     "EXPORT_DIR_AUTO": "",
+    # Integracion Easy (control remoto de estacion)
+    "EASY_HOST": "192.168.1.84",
+    "EASY_PUERTO": 5000,
+    "EASY_RUTINA": "buscar_easy",
+    "EASY_TIMEOUT": 30,
 }
 
 
@@ -400,6 +405,20 @@ EXPORT_AUTO_CONFIG = {
     "activo": _env_bool("EXPORT_AUTO_ACTIVO", True),
     "cada_hora": _env_bool("EXPORT_CADA_HORA", True),
     "dir": os.environ.get("EXPORT_DIR_AUTO", "").strip(),
+}
+
+
+
+# --- Integracion Easy (agente de control remoto de estacion de trabajo) ---
+# Al cargar un trabajo se envia el numero de parte al agente Easy para que
+# la estacion lo busque automaticamente. Dejar EASY_HOST vacio para
+# deshabilitar la integracion sin tocar el codigo.
+EASY_CONFIG = {
+    "host": os.environ.get("EASY_HOST", "192.168.1.84").strip(),
+    "puerto": _env_int("EASY_PUERTO", 5000),
+    "rutina": os.environ.get("EASY_RUTINA", "buscar_easy").strip(),
+    "timeout": _env_int("EASY_TIMEOUT", 30),
+    "token": os.environ.get("EASY_TOKEN", "").strip(),
 }
 
 
