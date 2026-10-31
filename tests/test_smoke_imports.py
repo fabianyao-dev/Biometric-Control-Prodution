@@ -69,7 +69,7 @@ def test_se_cubre_al_menos_la_app_completa():
         "src.config",
         "src.database",
         "src.gui.modulos.corte.inicio_view",
-        "src.gui.admin_view",
+        "src.gui.admin.view",
         "src.gui.componentes.huella_modal",
         "src.hardware.biometric_sdk",
         "src.hardware.modbus_controller",

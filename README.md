@@ -89,17 +89,21 @@ de UI como el tema.
 
 | Variable | Descripción |
 | --- | --- |
-| `MODBUS_HOST` | IP del módulo Advantech. **Vacío** o `MODBUS_SIMULACION=1` → modo simulación (sin red). |
+| `MODBUS_HOST` | IP del PLC Zelio (SR3NET01BD, p. ej. `192.158.1.80`; ver [MAPA_MODBUS_ZELIO.md](MAPA_MODBUS_ZELIO.md)). **Vacío** o `MODBUS_SIMULACION=1` → modo simulación (sin red). |
 | `MODBUS_PORT` | Puerto Modbus TCP (default `502`). |
 | `MODBUS_UNIT_ID` | Unit ID del esclavo (default `1`). |
-| `MODBUS_START_COIL` | Coil del relevador START (arranque). |
-| `MODBUS_PAUSE_COIL` | Coil del relevador PAUSE (paro). |
+| `MODBUS_CMD_MODE` | `registro` (default, **Zelio SR3NET01BD**, FC06: el comando es un *bit* dentro de una palabra J) \| `coil` (FC05, módulo Advantech WISE-4060LAN legacy). |
+| `MODBUS_START_REGISTER` / `MODBUS_START_BIT` | Palabra J y bit del comando START (marcha). En el Zelio medido: `16` / `0` (J1 bit0). |
+| `MODBUS_PAUSE_REGISTER` / `MODBUS_PAUSE_BIT` | Palabra J y bit del comando PAUSE (paro). En el Zelio medido: `16` / `1` (J1 bit1). |
+| `MODBUS_TOWER_REGISTER` + `MODBUS_TOWER_{GREEN,AMBER,RED,ALARM}_BIT` | Torre de luces: comparte la palabra J1 con marcha/paro. Zelio medido: registro `16`, bits `2/3/4/5`. |
+| `MODBUS_TOWER_HEARTBEAT_REGISTER` / `_BIT` | Heartbeat de la PC (watchdog del PLC). Zelio: `19` / `0` (J4 bit0). |
+| `MODBUS_START_COIL` / `MODBUS_PAUSE_COIL` | Coil del relevador START/PAUSE (**solo modo `coil`**, módulo Advantech legacy; inertes en el Zelio). |
 | `MODBUS_START_COIL_INVERTIDO` / `MODBUS_PAUSE_COIL_INVERTIDO` | `0` (default): pulso activo `True` (contacto cerrado, botón NA en paralelo). `1`: pulso invertido, activo `False` (contacto abierto) para cableados donde la máquina actúa al abrir el circuito (botón NA en serie / lógica NC). Ajusta solo el coil que lo requiera. |
-| `MODBUS_COUNTER_REGISTER` / `MODBUS_COUNTER_WORDS` | Registro contador interno del módulo. El conteo de cortes lo hace el **módulo por hardware**; la PC solo hace polling y suma deltas. |
-| `MODBUS_COUNTER_LITTLE_ENDIAN` | `1` (default, WISE-4060LAN) = contador de 32 bits con palabra baja primero; `0` = big-endian (alta primero). |
+| `MODBUS_COUNTER_REGISTER` / `MODBUS_COUNTER_WORDS` | Registro del contador **publicado por el PLC**. En el Zelio medido: `O1` = registro `20`, **1 palabra** (16 bits): `O2` es la palabra de pulsos, NO la palabra alta (leer 2 palabras corrompe el valor y pierde un corte por pulso). |
+| `MODBUS_COUNTER_LITTLE_ENDIAN` | `1` (default) = palabra baja primero; `0` = big-endian. Solo aplica si se leen 2 palabras. |
 | `MODBUS_POLL_MS` | Intervalo de polling (default `500`). |
-| `MODBUS_COUNTER_MAX_DELTA` | Delta máximo aceptable entre lecturas; saltos mayores se ignoran (reset del módulo). |
-| `PULSO_DURACION_MS` | Duración del pulso a los coils (tipo botón). |
+| `MODBUS_COUNTER_MAX_DELTA` | Delta máximo aceptable entre lecturas; saltos mayores se ignoran (reset del PLC). |
+| `PULSO_DURACION_MS` | Duración del pulso de MARCHA (default `300`). |
 | `SEGURO_PARO_SEGUNDOS` | Seguro anti-paro/anti-apagado: bloquea PARO y apagado mientras la máquina esté en marcha y haya recibido un **corte real** en los últimos N segundos (default `3`). |
 | `DB_PATH` | Ruta de la base SQLite. En el `.exe` empaquetado **no hace falta definirlo**: `DB_PATH` y `LOG_DIR` se generan solos en la carpeta de datos persistente (ver Empaquetado). Definir solo si se quiere otra ubicación. |
 | `LOG_DIR` | Directorio de logs diarios (rotación a 30 días). En empaquetado apunta por defecto a `%USERPROFILE%\WTSControlData\logs`. |
@@ -107,6 +111,11 @@ de UI como el tema.
 | `BIOMETRICO_KIOSKO` | `1` = kiosco pantalla completa (default); `0` = ventana normal. |
 | `UPDATE_SOURCE` | URL base del servidor de actualizaciones por red (p. ej. `http://10.0.0.2:8080`). **Vacía** = sin actualizaciones por red: el botón "Buscar actualización" no se muestra y la app se comporta igual que antes. |
 | `UPDATE_TIMEOUT_S` | Timeout (segundos) de consultas/descargas al servidor de actualizaciones (default `8`). |
+
+En el `.exe` empaquetado, un `config.json` **heredado del módulo Advantech** se
+migra solo al arrancar: se le pone el mapa del Zelio (comandos y torre en J1,
+contador en O1 con 1 palabra) y la IP del PLC. El cambio queda anotado en el
+log. Ver [MAPA_MODBUS_ZELIO.md](MAPA_MODBUS_ZELIO.md) §8.
 
 ---
 

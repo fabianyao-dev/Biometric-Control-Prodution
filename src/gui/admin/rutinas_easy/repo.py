@@ -142,39 +142,6 @@ def registrar_ejecucion(rutina_id, rutina_nombre, num_part, folio=None,
     conn.close()
 
 
-def sincronizar_modulos(modulos):
-    """Siembra/actualiza metadatos de modulos registrados. Idempotente."""
-    conn = obtener_conexion()
-    for m in modulos:
-        clave = m["clave"]
-        conn.execute(
-            "INSERT OR IGNORE INTO modulos (clave, nombre, icono, orden, activo, "
-            "permiso, predeterminado) VALUES (?,?,?,?,?,?,?)",
-            (clave, m["nombre"], m.get("icono"), m.get("orden", 0),
-             1 if m.get("activo", True) else 0, m.get("permiso"),
-             1 if m.get("predeterminado") else 0),
-        )
-        conn.execute(
-            "UPDATE modulos SET nombre=?, icono=?, orden=?, activo=?, permiso=? "
-            "WHERE clave=?",
-            (m["nombre"], m.get("icono"), m.get("orden", 0),
-             1 if m.get("activo", True) else 0, m.get("permiso"), clave),
-        )
-    conn.commit()
-    conn.close()
-
-
-def listar_modulos(activos_solo=False):
-    conn = obtener_conexion()
-    sql = "SELECT * FROM modulos WHERE 1=1"
-    if activos_solo:
-        sql += " AND activo=1"
-    sql += " ORDER BY orden, id"
-    rows = conn.execute(sql).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
 def listar_ejecuciones(limite=50):
     conn = obtener_conexion()
     rows = conn.execute(

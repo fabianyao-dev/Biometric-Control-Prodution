@@ -171,6 +171,11 @@ def _leer_json(ruta):
         return {}
 
 
+def _texto_es_verdadero(valor):
+    """True si un texto representa un booleano activo (1/true/si/yes/on)."""
+    return str(valor).strip().lower() in ("1", "true", "si", "yes", "on")
+
+
 def _escribir_json(ruta, datos):
     """Escritura atomica: temp + replace para no dejar un JSON a medias si
     se va la luz a mitad de guardado."""
@@ -246,6 +251,7 @@ CONFIG_POR_DEFECTO = {
     "MODBUS_TOWER_HEARTBEAT_REGISTER": 19,
     "MODBUS_TOWER_HEARTBEAT_BIT": 0,
     "TORRE_HEARTBEAT_MS": 2000,
+    "TORRE_HEARTBEAT_TIMEOUT_S": 10,
     "TORRE_ALARMA_DURACION_S": 3,
     "TORRE_ALARMA_PULSO_ON_MS": 500,
     "TORRE_ALARMA_PULSO_OFF_MS": 500,
@@ -265,13 +271,109 @@ CONFIG_POR_DEFECTO = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Migracion de la config heredada del modulo Advantech al PLC Zelio
+# ---------------------------------------------------------------------------
+# El hardware de la planta cambio: el modulo Advantech WISE-4060LAN (coils
+# 16/17 y contador de 32 bits en el registro 0) fue sustituido por el Zelio
+# Logic 2 SR3 + SR3NET01BD (comandos y torre como bits de J1, contador de 16
+# bits en O1). Un `config.json` de la era Advantech NO funciona con el Zelio:
+# los comandos y la torre no salen y el contador pierde un corte por pulso.
+#
+# Como la siembra de `CONFIG_POR_DEFECTO` solo AGREGA claves faltantes (para no
+# pisar lo editado a mano), los valores viejos sobreviven a una actualizacion
+# de la app. Por eso al arrancar el exe se detectan y se migran solos.
+#
+# IP del PLC Zelio con el cable DIRECTO a la PC: la misma en dev y en planta
+# (ver MAPA_MODBUS_ZELIO.md). Se aplica solo si el host guardado era el del
+# modulo viejo; si el PLC de esa maquina tiene otra IP, se edita a mano una
+# vez y la migracion no vuelve a tocarlo (ya no detecta el perfil heredado).
+IP_PLC_ZELIO = "192.158.1.80"
+
+# Claves del mapa de hardware Modbus: las que cambian al pasar del modulo
+# Advantech al Zelio. Se derivan de `CONFIG_POR_DEFECTO` (una sola fuente de
+# verdad), pero se EXCLUYEN los parametros de conexion (puerto, unit id,
+# periodo de sondeo, delta maximo): valen para cualquier hardware y podrian
+# estar ajustados a mano. `MODBUS_HOST` se migra aparte (a la IP del PLC) y
+# `MODBUS_SIMULACION` es derivada del host, asi que ninguna de las dos entra.
+CLAVES_MAPA_MODBUS = tuple(
+    clave
+    for clave in CONFIG_POR_DEFECTO
+    if (clave.startswith("MODBUS_") or clave.startswith("TORRE_")
+        or clave == "PULSO_DURACION_MS")
+    and clave not in (
+        "MODBUS_HOST",
+        "MODBUS_PORT",
+        "MODBUS_UNIT_ID",
+        "MODBUS_POLL_MS",
+        "MODBUS_COUNTER_MAX_DELTA",
+    )
+)
+
+
+def _es_config_advantech(datos):
+    """True si el config.json conserva el mapa del modulo Advantech.
+
+    Huella del modulo viejo: coils 16 (marcha) y 17 (paro), contador en el
+    registro 0 y/o de 2 palabras. Un config ya migrado al Zelio tiene
+    `MODBUS_CMD_MODE=registro`, asi que no vuelve a detectarse.
+    """
+    if not str(datos.get("MODBUS_HOST", "")).strip():
+        return False  # sin host no se sabe contra que hardware se configuro
+    if str(datos.get("MODBUS_CMD_MODE", "")).strip().lower() == "registro":
+        return False
+    if str(datos.get("MODBUS_START_COIL", "")) == "16":
+        return True
+    if str(datos.get("MODBUS_PAUSE_COIL", "")) == "17":
+        return True
+    if str(datos.get("MODBUS_COUNTER_REGISTER", "")) == "0":
+        return True
+    if str(datos.get("MODBUS_COUNTER_WORDS", "")) == "2":
+        return True
+    return False
+
+
+def _migrar_config_a_zelio(datos):
+    """Migra en memoria un config heredado del modulo Advantech al Zelio.
+
+    Solo toca el mapa de hardware Modbus y la IP del PLC: rutas (DB_PATH,
+    LOG_DIR), exportacion, updates y seguros quedan intactos. Devuelve la
+    lista de cambios aplicados para dejar rastro en el log.
+    """
+    cambios = []
+    if not _es_config_advantech(datos):
+        return cambios
+
+    for clave in CLAVES_MAPA_MODBUS:
+        nuevo = CONFIG_POR_DEFECTO[clave]
+        viejo = datos.get(clave, "<ausente>")
+        if str(viejo) != str(nuevo):
+            datos[clave] = nuevo
+            cambios.append(f"{clave}: {viejo} -> {nuevo}")
+
+    # La IP del modulo viejo ya no existe: se apunta al PLC Zelio.
+    host_viejo = str(datos.get("MODBUS_HOST", "")).strip()
+    if host_viejo != IP_PLC_ZELIO:
+        datos["MODBUS_HOST"] = IP_PLC_ZELIO
+        cambios.append(f"MODBUS_HOST: {host_viejo} -> {IP_PLC_ZELIO}")
+
+    # Con el host real del PLC, la app debe dejar de simular.
+    if _texto_es_verdadero(datos.get("MODBUS_SIMULACION", 0)):
+        datos["MODBUS_SIMULACION"] = 0
+        cambios.append("MODBUS_SIMULACION: 1 -> 0")
+
+    return cambios
+
+
 def _aplicar_config_json():
     """Produccion: carga config.json sobre el entorno del proceso.
 
     Si no existe, lo GENERA importando las claves del .env de la carpeta de
     datos (migracion de una sola vez; DB_PATH/LOG_DIR se normalizan a la
-    carpeta de datos). Las claves del archivo NO pisan variables de entorno
-    ya presentes (setdefault), salvo que vengan del propio archivo.
+    carpeta de datos). Si conserva el mapa del modulo Advantech, se MIGRA al
+    PLC Zelio (comandos/torre en J1, contador en O1, IP del PLC). Las claves
+    del archivo NO pisan variables de entorno ya presentes (setdefault),
+    salvo que vengan del propio archivo.
     """
     ruta = ruta_config_json()
     datos = _leer_json(ruta)
@@ -290,15 +392,36 @@ def _aplicar_config_json():
         datos = origen
         _escribir_json(ruta, datos)
         log.info("config.json generado desde .env en %s", ruta)
+    # Migrar una config heredada del modulo Advantech al PLC Zelio: el
+    # hardware cambio y los valores viejos (coils 16/17, contador de 2
+    # palabras en el registro 0) NO funcionan con el SR3NET01BD. Se hace
+    # antes de sembrar las claves faltantes para que el archivo quede
+    # coherente con el mapa vigente.
+    cambios_migracion = _migrar_config_a_zelio(datos)
+    if cambios_migracion:
+        log.warning(
+            "config.json: config heredada del modulo Advantech migrada al "
+            "PLC Zelio. Cambios: %s. IP del PLC: %s. Revisa MODBUS_HOST si "
+            "esa maquina usa otra IP.",
+            "; ".join(cambios_migracion), IP_PLC_ZELIO,
+        )
     # Sembrar con su default las claves operativas que falten (sin pisar las
     # que ya esten, editadas o heredadas del .env).
-    cambios = False
+    cambios_siembra = False
     for clave, por_defecto in CONFIG_POR_DEFECTO.items():
         if clave not in datos:
             datos[clave] = por_defecto
-            cambios = True
-    if cambios:
+            cambios_siembra = True
+    if cambios_siembra or cambios_migracion:
         _escribir_json(ruta, datos)
+    # Aviso de seguridad: en produccion, MODO_DEV=true deja la app SIN
+    # autenticacion biometrica. No se cambia solo (en dev es legitimo), pero
+    # en la PC de planta tiene que quedar en false.
+    if _texto_es_verdadero(datos.get("MODO_DEV", False)):
+        log.warning(
+            "config.json: MODO_DEV=true -> la app NO pedira huella para "
+            "autenticar. En la PC de planta ponlo en false.",
+        )
     for clave, valor in datos.items():
         if clave == VAR_DIR_DATOS:
             continue  # esa decide DONDE esta esta carpeta: solo entorno
@@ -379,7 +502,7 @@ def _env_bool(clave, por_defecto=False):
     valor = os.environ.get(clave)
     if valor is None:
         return por_defecto
-    return valor.strip().lower() in ("1", "true", "si", "yes", "on")
+    return _texto_es_verdadero(valor)
 
 
 # --- Actualizaciones por red (opcional) ---

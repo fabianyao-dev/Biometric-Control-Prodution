@@ -14,7 +14,7 @@ from src.domain.easy import ErrorRutinaEasy, validar_rutina
 from .agente import enviar_pasos
 
 try:
-    from . import repo as _easy_repo_mod
+    from src.gui.admin.rutinas_easy import repo as _easy_repo_mod
 except Exception:  # noqa: BLE001
     _easy_repo_mod = None
 
