@@ -1,16 +1,7 @@
-"""
-admin_view.py - Panel de administracion (CRUD).
+"""Pestana Historial Easy (HistorialMixin).
 
-Tres pestanas:
-    - Operadores: registro con rol (captura de minimo 2 huellas distintas),
-      cambio de rol, eliminacion (soft) y gestion de huellas del operador
-      seleccionado (agregar / reemplazar / eliminar).
-    - Causas de paro: agregar / eliminar motivos (soft).
-    - Roles: agregar, renombrar y desactivar roles.
-
-El trabajo de captura de huella para registrar operadores corre en un hilo
-secundario; los resultados se drenan por `queue.Queue()` (QTimer) en el hilo
-principal.
+Muestra las ultimas ejecuciones de rutinas Easy con su resultado y las
+refresca desde la propia pestana.
 """
 
 import logging

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Repositorio de rutinas Easy y su bitacora de ejecuciones."""
+"""Repositorio de rutinas Easy y su bitacora de ejecuciones.
+
+CRUD de `rutinas_easy` y `rutinas_easy_pasos` (los pasos se reemplazan en
+bloque) y registro/consulta de las ejecuciones enviadas a la estacion.
+"""
 
 import json
 

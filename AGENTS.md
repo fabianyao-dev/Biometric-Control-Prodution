@@ -6,6 +6,7 @@ App de escritorio (PySide6) para control de producción con biometría y PLC. Co
 
 - Windows + Python 3.12. Usa siempre `venv\Scripts\...`; el `python` global no tiene las dependencias.
 - `venv\Scripts\python main.py` desde la raíz. El proyecto **no se instala** como paquete: `tests/conftest.py` inyecta la raíz en `sys.path`.
+- Dependencias de desarrollo: `venv\Scripts\pip install -r requirements-dev.txt` (pytest, ruff, pyinstaller). `requirements.txt` es solo runtime.
 - Sin lector de huellas en desarrollo: `set MODO_DEV=true` antes de arrancar (omite la autenticación biométrica). Nunca en producción. En producción, un `config.json` con `MODO_DEV=true` deja la app sin huella y la app lo avisa en el log al arrancar.
 - Config de desarrollo: `.env` en la raíz (copia `.env.example`). Producción: `config.json` en la carpeta de datos.
 - Carpeta de datos persistente: `%USERPROFILE%\WTSControlData` (override con `BIOMETRICO_DIR_DATOS`). Ahí viven `config.json`, `planta_corte.db` y `logs/`; nunca commitees nada de ahí.
@@ -33,7 +34,7 @@ venv\Scripts\pyinstaller --noconfirm tools\updater.spec
 venv\Scripts\pyinstaller --noconfirm WTSControl.spec
 
 :: Release completo: bump version.txt + updater + app + verificación + manifest/zip en release/
-venv\Scripts\python tools\hacer_version.py 1.1.19
+venv\Scripts\python tools\hacer_version.py <version>
 ```
 
 - **Lint:** `ruff check .` **no está limpio** (deuda preexistente en `main.py`, `src/gui/*`, `src/database.py`, etc., y `Easy/` no está excluido). No lo uses como criterio de "todo bien" ni reformatees archivos ajenos; el gate es `ruff check tests\`. Config: 100 columnas, `py312`, reglas `F,E,W,I`.
@@ -44,25 +45,25 @@ venv\Scripts\python tools\hacer_version.py 1.1.19
 - `tests/` es la suite automática (`pyproject.toml` fija `testpaths = ["tests"]`).
 - `test/` son **scripts manuales de planta**: tocan hardware/BD real, arrancan el HAL y hacen `sys.exit(1)`. Nunca los metas en pytest ni los ejecutes sin hardware.
 - `tests/conftest.py` redirige `DB_PATH` y `LOG_DIR` a un temporal **antes** de importar `src`, y define `MODBUS_HOST=""`, `MODO_DEV=true`, `QT_QPA_PLATFORM=offscreen`. Sin ese blindaje, un test que importe `src` migraría la BD real de la planta.
-- Cualquier test nuevo debe usar los fixtures de BD (`db_temporal`, `bd_limpia`); no abras `src.database.DB_PATH` directamente.
+- Cualquier test nuevo debe usar los fixtures de BD (`db_temporal`, `bd_limpia` o el atajo `db`); no abras `src.database.DB_PATH` directamente.
 - `tests/test_arquitectura.py` vigila fronteras: `src/domain/` puro (sin Qt/SQLite/red/`os.environ`), `src/hardware/` no importa `src.gui/` ni `main`, `src/database.py` no importa Qt, y `src/gui/` no toca `biometric_sdk` (solo `BiometricService`). El test de imports relativos está en `skip` como deuda conocida.
 - `tests/test_smoke_imports.py` importa dinámicamente los módulos: si mueves/renombras archivos, actualízalo.
 
 ## Arquitectura (modular)
 
 - Capas: `src/domain/` (lógica pura, sin Qt/SQLite/red/env), `src/hardware/` (HAL, sin GUI/main), `src/database.py` (sin Qt), `src/gui/` (puede conocer database/config). `src/gui/componentes/` es UI compartida y no debe depender de un módulo concreto.
-- Módulos: cada subcarpeta de `src/gui/modulos/` (sin `_`) con `inicio_view.py` o `view.py` se auto-descubre al arrancar (`loader.descubrir()`), se registra y se sincroniza con la BD. El host es `src/gui/inicio_shell.py` (`InicioShell`); el módulo principal vive en `src/gui/modulos/corte/`. Su vista se divide en mixins en `src/gui/modulos/corte/inicio/` (sesión, máquina, paro, mantenimiento, primera pieza, trabajo, seguridad). La administración vive en `src/gui/admin/` (`view.py` + mixins por tab + `widgets.py`).
+- Módulos: cada subcarpeta de `src/gui/modulos/` (sin `_`, **sin `__init__.py`**) con `inicio_view.py` o `view.py` se auto-descubre al arrancar (`loader.descubrir()`), se registra y se sincroniza con la BD. El host es `src/gui/inicio_shell.py` (`InicioShell`); el módulo principal vive en `src/gui/modulos/corte/`. Su vista se divide en mixins en `src/gui/modulos/corte/inicio/` (sesión, máquina, paro, mantenimiento, primera pieza, trabajo, seguridad). La administración vive en `src/gui/admin/` (`view.py` + mixins por tab + `widgets.py`; el editor de rutinas Easy en `rutinas_easy/`).
 - `main.py` es el composition root: instancia `BiometricService`, HAL, `ContextoApp` y programa el export automático.
 
 ## Hardware actual: Zelio Logic 2 SR3 + SR3NET01BD
 
 - El hardware vigente es **Zelio** con `MODBUS_CMD_MODE=registro` (FC06). El modo `coil` (Advantech WISE-4060LAN) queda solo como compatibilidad; no lo tomes como el mapa actual.
-- El NET01BD **no expone coils**. Los comandos son bits dentro de palabras J: J1 (dir 16), bits 0=marcha, 1=paro, 2=verde, 3=ámbar, 4=roja, 5=alarma. J2–J4 no controlan nada en el programa actual.
+- El NET01BD **no expone coils**. Los comandos son bits dentro de palabras J: J1 (dir 16), bits 0=marcha, 1=paro, 2=verde, 3=ámbar, 4=roja, 5=alarma. J2 y J3 no controlan nada; J4 (dir 19) solo lleva el heartbeat.
 - El contador de cortes vive en el **PLC**, en O1 (dir 20), 16 bits, **1 palabra**. O2 es la palabra de pulsos, **no** la palabra alta: leer 2 palabras corrompe el valor y pierde cortes. El wrap a 65535 lo resuelve el HAL.
 - El PC **nunca** cuenta flancos localmente (Windows no es RTOS); solo hace polling.
-- La decisión del color de la torre es de la GUI (`InicioView._estado_torre`); el HAL solo escribe bits. El parpadeo de alarma lo hace el hilo de polling (`pulso_alarma` solo abre la ventana).
+- La decisión del color de la torre es de la GUI (`InicioView._estado_torre`, en `inicio/seguridad_mixin.py`); el HAL solo escribe bits. El parpadeo de alarma lo hace el hilo de polling (`pulso_alarma` solo abre la ventana).
 - `PRIMERA_PIEZA_TIMEOUT_S` es la tolerancia ámbar→rojo+alarma y aplica a todo paro real. **No** confundir con `PARO_IDLE_TIMEOUT_S` (auto-paro por inactividad, 1 min).
-- Mapa y notas de campo: `MAPA_MODBUS_ZELIO.md`. Simulador del mapa Zelio: `test/simulador_plc.py`.
+- Mapa y notas de campo: `MAPA_MODBUS_ZELIO.md`. Para Zelio usa `test/simulador_plc.py`, `test/test_modbus_zelio.py` (solo lectura por defecto) y `test/monitoreo_zelio.py`; `test/simulador_modbus.py` y `test/test_modbus.py` son del Advantech legacy.
 
 ## Datos y trabajos
 
@@ -104,5 +105,5 @@ venv\Scripts\python tools\hacer_version.py 1.1.19
 
 - Código, mensajes, comentarios y docs en español; conserva el estilo y los nombres existentes.
 - No edites `.env`, `planta_corte.db`, `logs/`, `dist/`, `build/`, `release/` ni `test_pc/`.
-- Módulos nuevos: crea una carpeta en `src/gui/modulos/` (sin `_`) con `inicio_view.py` o `view.py`; se descubren y registran solos. Expón `MODULO_INFO`, `crear_vista`/`*View` y opcionalmente `admin_tabs`.
+- Módulos nuevos: copia `src/gui/modulos/_plantilla/` a `src/gui/modulos/<clave>/` (sin `_`) con `inicio_view.py` o `view.py`; se descubren y registran solos. Expón `MODULO_INFO`, `crear_vista`/`*View` y opcionalmente `admin_tabs`. No crees `__init__.py`.
 - Antes de dar por terminado: `venv\Scripts\python -m pytest -q` y `venv\Scripts\ruff check tests\`.

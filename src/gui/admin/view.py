@@ -1,16 +1,8 @@
-"""
-admin_view.py - Panel de administracion (CRUD).
+"""Panel de administracion con pestanas (AdminView).
 
-Tres pestanas:
-    - Operadores: registro con rol (captura de minimo 2 huellas distintas),
-      cambio de rol, eliminacion (soft) y gestion de huellas del operador
-      seleccionado (agregar / reemplazar / eliminar).
-    - Causas de paro: agregar / eliminar motivos (soft).
-    - Roles: agregar, renombrar y desactivar roles.
-
-El trabajo de captura de huella para registrar operadores corre en un hilo
-secundario; los resultados se drenan por `queue.Queue()` (QTimer) en el hilo
-principal.
+Compone la UI base y mezcla un mixin por pestana: Operadores, Causas de Paro,
+Zonas, Rutinas Easy, Historial Easy, Roles y Sistema. Aqui viven el layout, los
+helpers de etiquetas, la cola de captura de huella y `set_modulo()`.
 """
 
 import logging

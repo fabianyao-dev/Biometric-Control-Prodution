@@ -1,16 +1,8 @@
-"""
-admin_view.py - Panel de administracion (CRUD).
+"""Widgets compartidos del panel de administracion.
 
-Tres pestanas:
-    - Operadores: registro con rol (captura de minimo 2 huellas distintas),
-      cambio de rol, eliminacion (soft) y gestion de huellas del operador
-      seleccionado (agregar / reemplazar / eliminar).
-    - Causas de paro: agregar / eliminar motivos (soft).
-    - Roles: agregar, renombrar y desactivar roles.
-
-El trabajo de captura de huella para registrar operadores corre en un hilo
-secundario; los resultados se drenan por `queue.Queue()` (QTimer) en el hilo
-principal.
+`CheckboxListWidget`/`CheckboxListDelegate` para listas con checkbox,
+`CroquisZonasEditor` para editar la geometria de las zonas y
+`SelectorIconoModal` para elegir iconos de qtawesome.
 """
 
 import logging

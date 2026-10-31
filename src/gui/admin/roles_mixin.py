@@ -1,16 +1,7 @@
-"""
-admin_view.py - Panel de administracion (CRUD).
+"""Pestana Roles y permisos (RolesMixin).
 
-Tres pestanas:
-    - Operadores: registro con rol (captura de minimo 2 huellas distintas),
-      cambio de rol, eliminacion (soft) y gestion de huellas del operador
-      seleccionado (agregar / reemplazar / eliminar).
-    - Causas de paro: agregar / eliminar motivos (soft).
-    - Roles: agregar, renombrar y desactivar roles.
-
-El trabajo de captura de huella para registrar operadores corre en un hilo
-secundario; los resultados se drenan por `queue.Queue()` (QTimer) en el hilo
-principal.
+Alta, renombrado y baja logica de roles, mas la edicion de la matriz de
+permisos del rol seleccionado.
 """
 
 import logging

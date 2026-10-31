@@ -1,16 +1,8 @@
-"""
-admin_view.py - Panel de administracion (CRUD).
+"""Pestana Operadores: alta, rol y huellas (OperadoresMixin).
 
-Tres pestanas:
-    - Operadores: registro con rol (captura de minimo 2 huellas distintas),
-      cambio de rol, eliminacion (soft) y gestion de huellas del operador
-      seleccionado (agregar / reemplazar / eliminar).
-    - Causas de paro: agregar / eliminar motivos (soft).
-    - Roles: agregar, renombrar y desactivar roles.
-
-El trabajo de captura de huella para registrar operadores corre en un hilo
-secundario; los resultados se drenan por `queue.Queue()` (QTimer) en el hilo
-principal.
+CRUD de operadores y gestion de sus huellas: captura encadenada en un hilo
+secundario, agregar/reemplazar/eliminar y deteccion de duplicados. Los
+resultados del lector se drenan por `queue.Queue` en el hilo de la GUI.
 """
 
 import logging

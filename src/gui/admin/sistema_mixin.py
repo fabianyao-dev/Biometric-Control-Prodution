@@ -1,16 +1,8 @@
-"""
-admin_view.py - Panel de administracion (CRUD).
+"""Pestana Sistema: actualizaciones (SistemaMixin).
 
-Tres pestanas:
-    - Operadores: registro con rol (captura de minimo 2 huellas distintas),
-      cambio de rol, eliminacion (soft) y gestion de huellas del operador
-      seleccionado (agregar / reemplazar / eliminar).
-    - Causas de paro: agregar / eliminar motivos (soft).
-    - Roles: agregar, renombrar y desactivar roles.
-
-El trabajo de captura de huella para registrar operadores corre en un hilo
-secundario; los resultados se drenan por `queue.Queue()` (QTimer) en el hilo
-principal.
+Consulta el manifest, descarga el paquete y aplica la actualizacion en hilos
+secundarios, drenando el resultado por una cola. Pide confirmacion del estado
+de la maquina antes de actualizar.
 """
 
 import logging

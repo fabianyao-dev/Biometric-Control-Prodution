@@ -1,16 +1,8 @@
-"""
-admin_view.py - Panel de administracion (CRUD).
+"""Pestana Rutinas Easy (RutinasEasyMixin).
 
-Tres pestanas:
-    - Operadores: registro con rol (captura de minimo 2 huellas distintas),
-      cambio de rol, eliminacion (soft) y gestion de huellas del operador
-      seleccionado (agregar / reemplazar / eliminar).
-    - Causas de paro: agregar / eliminar motivos (soft).
-    - Roles: agregar, renombrar y desactivar roles.
-
-El trabajo de captura de huella para registrar operadores corre en un hilo
-secundario; los resultados se drenan por `queue.Queue()` (QTimer) en el hilo
-principal.
+CRUD de rutinas y sus pasos: alta, duplicado, baja logica, edicion en
+`EditorPasosEasy`, prueba y envio a la estacion (`EASY_HOST`). La persistencia
+vive en `repo.py`.
 """
 
 import logging
