@@ -7,13 +7,13 @@ Muestra cada muestreo:
     - El contador de cortes, leido de O1 (16 bits).
     - El delta entre muestreos (lo que el HAL sumaria como cortes).
     - Con --hal, ademas, lo que ve la APP: el conteo de cortes acumulado
-      por el ModbusController real (misma regla de deltas y de descarte de
+      por el PLCController real (misma regla de deltas y de descarte de
       saltos anomalos).
 
-MEDIDO en el PLC real (ver MAPA_MODBUS_ZELIO.md): el contador esta en O1 y
+MEDIDO en el PLC real (ver MAPA_PLC_ZELIO.md): el contador esta en O1 y
 es de 16 bits. O2 NO es la palabra alta del contador: es la palabra de
 PULSOS del PLC (se enciende un instante en cada corte y se apaga solo), por
-eso el HAL lee SOLO O1 (MODBUS_COUNTER_WORDS=1): leer O1+O2 como 32 bits
+eso el HAL lee SOLO O1 (PLC_COUNTER_WORDS=1): leer O1+O2 como 32 bits
 corrompe el valor (+65536 en cada pulso) y se pierden cortes. Cuando veas el
 aviso "O2 = pulso", es eso.
 
@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pyModbusTCP.client import ModbusClient
 
 from src import config
-from src.hardware import modbus_controller as mod
+from src.hardware import plc_controller as mod
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -58,7 +58,7 @@ def _contador16(o):
 
     O2 NO es la palabra alta del contador: es la palabra de PULSOS del PLC
     (se enciende un instante en cada corte y se apaga solo), por eso el HAL
-    lee SOLO O1 (`MODBUS_COUNTER_WORDS=1`).
+    lee SOLO O1 (`PLC_COUNTER_WORDS=1`).
     """
     if not o:
         return None
@@ -72,7 +72,7 @@ def _linea_palabras(regs, prefijo):
 
 
 def main():
-    cfg = config.MODBUS_CONFIG
+    cfg = config.PLC_CONFIG
     parser = argparse.ArgumentParser(
         description="Consola en vivo del SR3NET01BD por Modbus TCP")
     parser.add_argument("--ip", default=cfg["host"],
@@ -94,7 +94,7 @@ def main():
     args = parser.parse_args()
 
     if not args.ip:
-        print("Sin IP: usa --ip o configura MODBUS_HOST en el .env")
+        print("Sin IP: usa --ip o configura PLC_HOST en el .env")
         return 1
 
     # ------------------------------------------------------------------
@@ -115,16 +115,16 @@ def main():
     # ------------------------------------------------------------------
     ctrl = None
     if args.hal or args.marcha or args.paro:
-        modbus_cfg = dict(cfg)
-        modbus_cfg.update({
+        plc_cfg = dict(cfg)
+        plc_cfg.update({
             "host": args.ip, "port": args.port, "unit_id": args.unit,
         })
-        ctrl = mod.ModbusController(modbus_cfg)
-        print(f"HAL en modo '{modbus_cfg.get('cmd_mode', 'coil')}' "
-              f"(J1={modbus_cfg.get('start_register', 16)} para START, "
-              f"J2={modbus_cfg.get('pause_register', 17)} para PARO, "
-              f"contador en O1={modbus_cfg.get('counter_register', 20)}, "
-              f"{modbus_cfg.get('counter_words', 1)} palabra(s))")
+        ctrl = mod.PLCController(plc_cfg)
+        print(f"HAL en modo '{plc_cfg.get('cmd_mode', 'coil')}' "
+              f"(J1={plc_cfg.get('start_register', 16)} para START, "
+              f"J2={plc_cfg.get('pause_register', 17)} para PARO, "
+              f"contador en O1={plc_cfg.get('counter_register', 20)}, "
+              f"{plc_cfg.get('counter_words', 1)} palabra(s))")
 
     # ------------------------------------------------------------------
     # Acciones de escritura

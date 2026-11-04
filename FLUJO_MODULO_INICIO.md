@@ -172,12 +172,12 @@ subgraph A["A · ARRANQUE"]
   A1["main.py:667 — QApplication y tema desde config.json"]
   A2["main.py:681 — init_db: crea y migra SQLite"]
   A3["main.py:115 — BiometricService: carga SDK DigitalPersona"]
-  A4{"main.py:87 — MODBUS_HOST definido?"}
-  A5["ModbusController — HAL real, PLC Zelio (SR3NET01BD) por Modbus TCP"]
+  A4{"main.py:87 — PLC_HOST definido?"}
+  A5["PLCController — HAL real, PLC Zelio (SR3NET01BD) por Modbus TCP"]
   A6["SimulacionController — HAL simulado, sin hardware"]
   A7["main.py:546 — mostrar_vista crea el InicioView (una sola vez)"]
   A8["inicio_view.py:227 — _crear_interfaz, _cerrar_sesion_interrumpida, _refrescar_contador, _checkpoint_cortes"]
-  A9["modbus_controller.py:220 — latch de PARO: la maquina arranca DETENIDA"]
+  A9["plc_controller.py:220 — latch de PARO: la maquina arranca DETENIDA"]
   A10["main.py:689 — splash finish, ventana en pantalla completa (kiosko)"]
   A1 --> A2 --> A3 --> A4
   A4 -->|"si"| A5
@@ -573,7 +573,7 @@ subgraph M["M · PROCESOS DE FONDO"]
   M2["inicio_view.py:1527 — timer de checkpoint de 30 s"]
   M3["actualizar_cortes_sesion, registrar_ultimo_corte y actualizar_detectados — respaldo ante apagones"]
   M4["main.py:142 — timer de avisos de 3 s"]
-  M5["biometria no disponible, lector desconectado del USB, HAL en simulacion, Modbus sin comunicacion, sin operadores registrados"]
+  M5["biometria no disponible, lector desconectado del USB, HAL en simulacion, PLC sin comunicacion, sin operadores registrados"]
   M6["HAL — el CONTADOR DE CORTES vive en el PLC (palabras O); Windows solo lo lee por red"]
   M7["Seguro anti-corrida — _verificar_rafaga_arranque :2192, solo con conteo suspendido"]
   M8{"Mas de 5 cortes excluidos en los ultimos 7 s?"}

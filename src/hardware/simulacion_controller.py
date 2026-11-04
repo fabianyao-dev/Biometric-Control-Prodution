@@ -1,12 +1,12 @@
 """
 simulacion_controller.py - HAL de relevadores y contador de cortes (simulacion).
 
-El hardware real (relevadores y contador de cortes) se controla via Modbus
-TCP con el PLC (ver modbus_controller.py). SimulacionController
-queda como HAL de fallback y desarrollo: cuando no hay MODBUS_HOST la GUI corre
+El hardware real (relevadores y contador de cortes) se controla via el PLC (Modbus
+TCP; ver plc_controller.py). SimulacionController
+queda como HAL de fallback y desarrollo: cuando no hay PLC_HOST la GUI corre
 en modo simulacion, los pulsos a los relevadores solo se registran en el log
 y los cortes se suman con simular_corte(). Mantiene el mismo contrato que
-ModbusController para que la GUI no cambie:
+PLCController para que la GUI no cambie:
 
     - maquina_lista()    -> simula pulso en rele START (arranca)
     - maquina_pausada()  -> simula latch en rele PAUSE (paro sostenido)
@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 class SimulacionController:
     """HAL de relevadores y contador en modo simulacion.
 
-    Sin MODBUS_HOST el sistema trabaja sin hardware: los pulsos no se envian
+    Sin PLC_HOST el sistema trabaja sin hardware: los pulsos no se envian
     a ningun pin (solo log) y el contador se alimenta con simular_corte().
     """
 
@@ -55,14 +55,14 @@ class SimulacionController:
 
         self._lock = threading.Lock()
         self._cortes = 0
-        # Exclusion de cortes (modo "Primera pieza"): ver modbus_controller.
+        # Exclusion de cortes (modo "Primera pieza"): ver plc_controller.
         # Los cortes con conteo suspendido van a `_cortes_excluidos`, solo
         # memoria, y se pierden al retomar.
         self._cortes_excluidos = 0
         self._conteo_suspendido = False
         # `_ultimo_corte` SOLO se actualiza con cortes reales (simular_corte);
         # `_ultimo_arranque` es la ultima vez que la maquina arranco/reanudo
-        # (gracia del auto-paro). Ver modbus_controller.py.
+        # (gracia del auto-paro). Ver plc_controller.py.
         self._ultimo_corte = time.time()
         self._ultimo_arranque = time.time()
         self._maquina_en_marcha = False

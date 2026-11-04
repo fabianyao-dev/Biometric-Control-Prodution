@@ -31,14 +31,14 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 def main():
     parser = argparse.ArgumentParser(description="Diagnostico Modbus TCP")
-    parser.add_argument("--ip", default=config.MODBUS_CONFIG["host"])
-    parser.add_argument("--port", type=int, default=config.MODBUS_CONFIG["port"])
-    parser.add_argument("--unit", type=int, default=config.MODBUS_CONFIG["unit_id"])
+    parser.add_argument("--ip", default=config.PLC_CONFIG["host"])
+    parser.add_argument("--port", type=int, default=config.PLC_CONFIG["port"])
+    parser.add_argument("--unit", type=int, default=config.PLC_CONFIG["unit_id"])
     parser.add_argument("--reg", type=int,
-                        default=config.MODBUS_CONFIG["counter_register"],
+                        default=config.PLC_CONFIG["counter_register"],
                         help="Registro a leer (por defecto el del contador)")
     parser.add_argument("--words", type=int,
-                        default=config.MODBUS_CONFIG["counter_words"])
+                        default=config.PLC_CONFIG["counter_words"])
     parser.add_argument("--coil", type=int, help="Coil a escribir (start/pause)")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--pulso", action="store_true",
@@ -52,7 +52,7 @@ def main():
     args = parser.parse_args()
 
     if not args.ip:
-        print("Sin MODBUS_HOST en .env. Configura el .env y reintenta.")
+        print("Sin PLC_HOST en .env. Configura el .env y reintenta.")
         return 1
 
     cliente = ModbusClient(args.ip, args.port, unit_id=args.unit,
@@ -76,7 +76,7 @@ def main():
 
     # 2) Operar un coil si se pidio.
     if args.coil is not None:
-        pulso_ms = config.MODBUS_CONFIG["pulso_duracion_ms"]
+        pulso_ms = config.PLC_CONFIG["pulso_duracion_ms"]
         if args.pulso or args.pulso_invertido:
             activo = not args.pulso_invertido  # True normal, False invertido
             reposo = args.pulso_invertido

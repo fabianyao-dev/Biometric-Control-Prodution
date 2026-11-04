@@ -4,8 +4,8 @@ notificaciones.py - Indicador de advertencias del sistema (header del kiosco).
 Boton permanente en el header que avisa del estado operativo del kiosco:
     - Biometria no disponible (driver/SDK de DigitalPersona ausente).
     - Lector biometrico no detectado (driver OK pero sin lector USB conectado).
-    - Controlador HAL en modo simulacion (Modbus sin MODBUS_HOST / simulacion).
-    - Enlace Modbus caido (configurado pero sin respuesta).
+    - Controlador HAL en modo simulacion (sin PLC_HOST / simulacion).
+    - Enlace con el PLC caido (configurado pero sin respuesta).
     - Sin operadores reales registrados (acceso automatico "Operador Temporal").
 
 Al pulsarlo despliega un panel flotante (Qt.Popup) superpuesto al contenido
@@ -80,7 +80,7 @@ class PanelAdvertencias(QFrame):
     """Panel flotante (Qt.Popup) con la lista de advertencias.
 
     Arriba de los labels lleva el boton de reboot de hardware (reintenta
-    lector biometrico + Modbus via `reboot_handler`, que devuelve
+    lector biometrico + PLC via `reboot_handler`, que devuelve
     (ok, mensaje) y se muestra aqui mismo); el timer de avisos de la app
     refresca la lista a los pocos segundos.
     """

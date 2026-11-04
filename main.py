@@ -2,7 +2,7 @@
 main.py - Punto de entrada del sistema de control biometrico.
 
 Orquesta:
-    - Instancias compartidas: BiometricService, controlador HAL (Modbus TCP
+    - Instancias compartidas: BiometricService, controlador HAL (PLC por Modbus TCP
       o SimulacionController) y la BD.
     - Header con boton hamburguesa que despliega un panel lateral (oculto
       al inicio) con la navegacion: Inicio, Sesiones y Administracion,
@@ -61,7 +61,7 @@ from src.gui.componentes.util import desplazamiento_tactil
 from src.gui.sessions_view import SessionsView
 from src.gui import style
 from src.hardware.biometric_service import BiometricService
-from src.hardware.modbus_controller import ModbusController
+from src.hardware.plc_controller import PLCController
 from src.hardware.simulacion_controller import SimulacionController
 from src.reportes.export_auto import ProgramadorExport
 
@@ -94,15 +94,15 @@ def _ruta_recurso(nombre):
 
 
 def crear_controlador():
-    """Fabrica del HAL: Modbus TCP si hay MODBUS_HOST, si no SimulacionController.
+    """Fabrica del HAL: PLC (Modbus TCP) si hay PLC_HOST, si no SimulacionController.
 
-    En la PC Fanless Windows se configura MODBUS_HOST en .env y la planta
-    maneja reles y contador via el PLC (Modbus TCP). Sin MODBUS_HOST (o en
+    En la PC Fanless Windows se configura PLC_HOST en .env y la planta
+    maneja reles y contador via el PLC (Modbus TCP). Sin PLC_HOST (o en
     simulacion) se usa SimulacionController, que corre en simulacion (sin
     hardware).
     """
-    if config.MODBUS_CONFIG["host"]:
-        return ModbusController()
+    if config.PLC_CONFIG["host"]:
+        return PLCController()
     return SimulacionController()
 
 
@@ -425,14 +425,14 @@ class App(QMainWindow):
         if en_simulacion:
             avisos.append(
                 ("Control en simulacion",
-                 "Sin modulo Modbus real (MODBUS_HOST vacio o "
-                 "MODBUS_SIMULACION=1).")
+                 "Sin PLC real (PLC_HOST vacio o "
+                 "PLC_SIMULACION=1).")
             )
         else:
             conectado = getattr(self.controlador, "conectado", None)
             if conectado is not None and not conectado():
                 avisos.append(
-                    ("Sin comunicacion con el modulo Modbus",
+                    ("Sin comunicacion con el PLC",
                      "El modulo no responde; se reintenta en segundo plano.")
                 )
 
@@ -449,15 +449,15 @@ class App(QMainWindow):
         self.btn_advertencias.set_advertencias(avisos)
 
     def _reboot_hardware(self):
-        """Reboot por software del lector biometrico y del enlace Modbus.
+        """Reboot por software del lector biometrico y del enlace con el PLC.
 
         Llamado desde el boton "Reintentar conexión" del panel de
         advertencias. Devuelve (ok, mensaje) y el timer de avisos refresca
         la lista a los pocos segundos. Nunca mata procesos ni toca
         servicios del sistema: el SDK biometrico corre in-process (se cierra
-        el handle stale y se re-enumera) y Modbus es un socket TCP que se
-        cierra y reconecta (sin latch PAUSE: no detiene una maquina en
-        marcha).
+        el handle stale y se re-enumera) y el enlace con el PLC es un socket
+        TCP que se cierra y reconecta (sin latch PAUSE: no detiene una
+        maquina en marcha).
         """
         lineas = []
         todo_ok = True
@@ -487,25 +487,25 @@ class App(QMainWindow):
             self.controlador, "en_simulacion", lambda: True
         )()
         if en_simulacion:
-            lineas.append("Modbus: en simulación (sin módulo real).")
+            lineas.append("PLC: en simulación (sin PLC real).")
         else:
             reconectar = getattr(self.controlador, "reconectar", None)
             if reconectar is None:
-                lineas.append("Modbus: sin función de reboot en este modo.")
+                lineas.append("PLC: sin función de reboot en este modo.")
                 todo_ok = False
             else:
                 try:
                     if reconectar():
-                        lineas.append("Modbus: enlace restablecido.")
+                        lineas.append("PLC: enlace restablecido.")
                     else:
                         lineas.append(
-                            "Modbus: sin respuesta (se reintenta en "
+                            "PLC: sin respuesta (se reintenta en "
                             "segundo plano)."
                         )
                         todo_ok = False
                 except Exception as e:  # noqa: BLE001 - reportar, no crashear
-                    log.error("Reboot Modbus fallo", exc_info=True)
-                    lineas.append(f"Modbus: error ({e}).")
+                    log.error("Reboot PLC fallo", exc_info=True)
+                    lineas.append(f"PLC: error ({e}).")
                     todo_ok = False
 
         mensaje = "\n".join(lineas)

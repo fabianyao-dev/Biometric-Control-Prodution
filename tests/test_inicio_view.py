@@ -377,3 +377,99 @@ def test_enviar_easy_num_part_callback_error_actualiza_estado():
         fn()
         vista._estado.assert_called_once_with("Easy: error de red", "error")
 
+
+# ----------------------------------------------------------------------
+# Modo PARO con la maquina APAGADA por la zona
+#
+# El boton central sale del paro (huella) y deja la maquina ENCENDIDA. Antes
+# se deshabilitaba (`btn_on=en_marcha`) justo cuando la zona la dejaba
+# apagada, asi que el operador no podia volver a marcha desde ahi.
+# ----------------------------------------------------------------------
+
+class _ControladorParo:
+    """HAL minimo para `_modo_paro_finalizado` (sin hardware)."""
+
+    def __init__(self, en_marcha=False):
+        self.en_marcha = en_marcha
+        self.llamadas = []
+
+    def maquina_detenida(self):
+        return not self.en_marcha
+
+    def reprisar_maquina(self):
+        self.llamadas.append("reprisar")
+        self.en_marcha = True
+
+    def retomar_conteo(self):
+        self.llamadas.append("retomar")
+
+    def suspender_conteo(self):
+        self.llamadas.append("suspender")
+
+    def reiniciar_gracia_inactividad(self):
+        self.llamadas.append("gracia")
+
+    def establecer_torre(self, verde=False, ambar=False, roja=False):
+        self.llamadas.append("torre")
+
+
+def _vista_modo_paro(en_marcha):
+    """InicioView sin Qt: solo los atributos que leen los metodos probados."""
+    from src.gui.modulos.corte.inicio_view import InicioView
+
+    vista = InicioView.__new__(InicioView)
+    vista.controlador = _ControladorParo(en_marcha=en_marcha)
+    vista.sesion_id = 7
+    vista.paro_id = 99
+    vista.operador_id = 1
+    vista._en_paro = True
+    vista._modo_paro = True
+    vista._modo_paro_causa_id = 3
+    vista._modo_paro_causa_desc = "Cambio de turno"
+    vista._modo_paro_zona_id = None
+    vista._modo_paro_maquina_encendida = en_marcha
+    vista._primera_pieza = False
+    vista._paro_idle_triggado = True
+    vista._paro_inicio_momento = 123.0
+    vista._ultimo_color_rojo = "rojo"
+    return vista
+
+
+def test_estado_modo_paro_con_la_maquina_apagada_habilita_el_boton_central():
+    """El central sale del paro (con huella) y enciende: no se deshabilita."""
+    estado = _vista_modo_paro(en_marcha=False)._estado_actual()
+
+    assert estado["clave"] == "modo_paro_detenida"
+    assert estado["btn_on"] is True
+    assert "encender" in estado["tooltip"].lower()
+
+
+def test_estado_modo_paro_con_la_maquina_en_marcha_habilita_el_boton_central():
+    estado = _vista_modo_paro(en_marcha=True)._estado_actual()
+
+    assert estado["clave"] == "modo_paro"
+    assert estado["btn_on"] is True
+
+
+@pytest.mark.parametrize("en_marcha", [False, True])
+def test_salir_de_paro_enciende_la_maquina_si_la_zona_la_dejo_apagada(
+    monkeypatch, en_marcha
+):
+    """SALIR DE PARO reanuda el conteo y enciende solo si estaba detenida."""
+    from src.gui.modulos.corte.inicio import paro_mixin
+
+    monkeypatch.setattr(paro_mixin, "finalizar_paro", lambda *a, **k: None)
+    vista = _vista_modo_paro(en_marcha=en_marcha)
+    mensajes = []
+    vista._refrescar_estado_maquina = lambda: None
+    vista._estado = lambda texto, tipo: mensajes.append((texto, tipo))
+
+    vista._modo_paro_finalizado(1, "Operador")
+
+    assert vista.controlador.en_marcha is True
+    assert ("reprisar" in vista.controlador.llamadas) == (not en_marcha)
+    assert vista._modo_paro is False
+    assert vista._en_paro is False
+    assert vista.paro_id is None
+    assert "fin de paro" in mensajes[-1][0].lower()
+

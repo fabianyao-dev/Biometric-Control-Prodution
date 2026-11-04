@@ -87,8 +87,8 @@ def _asegurar_env(dir_datos, dir_exe=None):
         lineas = [
             "# .env generado automaticamente en la carpeta de datos.\n",
             "# Edita solo lo que necesites; se conserva entre actualizaciones.\n",
-            "MODBUS_HOST=\n",
-            "MODBUS_SIMULACION=1\n",
+            "PLC_HOST=\n",
+            "PLC_SIMULACION=1\n",
             "BIOMETRICO_KIOSKO=1\n",
         ]
 
@@ -143,7 +143,7 @@ def _asegurar_datos(dir_datos):
 # ---------------------------------------------------------------------------
 # config.json (archivo de configuracion de la aplicacion)
 # ---------------------------------------------------------------------------
-# En PRODUCCION (exe) reemplaza al .env: mismas claves (MODBUS_HOST,
+# En PRODUCCION (exe) reemplaza al .env: mismas claves (PLC_HOST,
 # UPDATE_SOURCE, SEGURO_*, DB_PATH, LOG_DIR, ...) en JSON, y es el archivo
 # que la app SI puede escribir en caliente (p. ej. el tema claro/oscuro),
 # con escritura atomica. En la primera ejecucion se genera automaticamente
@@ -211,45 +211,45 @@ def leer_config(clave, por_defecto=None):
 # Claves operativas que en PRODUCCION se leen del config.json (no del .env)
 # y que, si faltan, se siembran con su default para que queden visibles y
 # editables. En desarrollo la configuracion operativa sigue siendo el `.env`
-# de la raiz. `MODBUS_SIMULACION` se omite: es derivado de `MODBUS_HOST`.
+# de la raiz. `PLC_SIMULACION` se omite: es derivado de `PLC_HOST`.
 CONFIG_POR_DEFECTO = {
     "UPDATE_SOURCE": "",
     "UPDATE_TIMEOUT_S": 8,
-    # Modbus: valores MEDIDOS en el PLC real (Zelio SR3 + SR3NET01BD,
+    # PLC: valores MEDIDOS en el PLC real (Zelio SR3 + SR3NET01BD,
     # 24/10/2026). Una config heredada del modulo Advantech (modo "coil",
     # contador en la palabra 0, 2 palabras) NO funciona con el Zelio: los
     # comandos y la torre no salen y el contador pierde un corte por pulso.
-    "MODBUS_HOST": "",
-    "MODBUS_PORT": 502,
-    "MODBUS_UNIT_ID": 1,
+    "PLC_HOST": "",
+    "PLC_PORT": 502,
+    "PLC_UNIT_ID": 1,
     # "registro" = FC06 sobre las palabras J (el NET01BD no expone coils).
-    "MODBUS_CMD_MODE": "registro",
-    "MODBUS_START_COIL": 0,
-    "MODBUS_PAUSE_COIL": 1,
-    "MODBUS_START_REGISTER": 16,
-    "MODBUS_START_BIT": 0,
-    "MODBUS_PAUSE_REGISTER": 16,
-    "MODBUS_PAUSE_BIT": 1,
+    "PLC_CMD_MODE": "registro",
+    "PLC_START_COIL": 0,
+    "PLC_PAUSE_COIL": 1,
+    "PLC_START_REGISTER": 16,
+    "PLC_START_BIT": 0,
+    "PLC_PAUSE_REGISTER": 16,
+    "PLC_PAUSE_BIT": 1,
     # El contador vive en O1 (dir 20) y es de 16 bits: O2 es la palabra de
     # PULSOS, no la palabra alta. Leer 2 palabras pierde cortes.
-    "MODBUS_COUNTER_REGISTER": 20,
-    "MODBUS_COUNTER_WORDS": 1,
-    "MODBUS_COUNTER_LITTLE_ENDIAN": 1,
-    "MODBUS_POLL_MS": 500,
+    "PLC_COUNTER_REGISTER": 20,
+    "PLC_COUNTER_WORDS": 1,
+    "PLC_COUNTER_LITTLE_ENDIAN": 1,
+    "PLC_POLL_MS": 500,
     "PULSO_DURACION_MS": 300,
-    "MODBUS_COUNTER_MAX_DELTA": 10000,
-    "MODBUS_START_COIL_INVERTIDO": 0,
-    "MODBUS_PAUSE_COIL_INVERTIDO": 0,
+    "PLC_COUNTER_MAX_DELTA": 10000,
+    "PLC_START_COIL_INVERTIDO": 0,
+    "PLC_PAUSE_COIL_INVERTIDO": 0,
     # Torre de luces: comparte la palabra de comando J1 (dir 16) con marcha
     # (bit0) y paro (bit1); bit2=verde (Q3), bit3=ambar (Q4), bit4=roja (Q5),
     # bit5=alarma/buzzer (Q6).
-    "MODBUS_TOWER_REGISTER": 16,
-    "MODBUS_TOWER_GREEN_BIT": 2,
-    "MODBUS_TOWER_AMBER_BIT": 3,
-    "MODBUS_TOWER_RED_BIT": 4,
-    "MODBUS_TOWER_ALARM_BIT": 5,
-    "MODBUS_TOWER_HEARTBEAT_REGISTER": 19,
-    "MODBUS_TOWER_HEARTBEAT_BIT": 0,
+    "PLC_TOWER_REGISTER": 16,
+    "PLC_TOWER_GREEN_BIT": 2,
+    "PLC_TOWER_AMBER_BIT": 3,
+    "PLC_TOWER_RED_BIT": 4,
+    "PLC_TOWER_ALARM_BIT": 5,
+    "PLC_TOWER_HEARTBEAT_REGISTER": 19,
+    "PLC_TOWER_HEARTBEAT_BIT": 0,
     "TORRE_HEARTBEAT_MS": 2000,
     "TORRE_HEARTBEAT_TIMEOUT_S": 10,
     "TORRE_ALARMA_DURACION_S": 3,
@@ -272,6 +272,59 @@ CONFIG_POR_DEFECTO = {
 
 
 # ---------------------------------------------------------------------------
+# Renombrado de claves MODBUS_* -> PLC_*
+# ---------------------------------------------------------------------------
+# La configuracion de la planta se nombra por el dispositivo (PLC) y no por el
+# protocolo (Modbus TCP). Las claves viejas MODBUS_* se siguen leyendo al
+# arrancar y se migran solas, tanto en el `.env` de desarrollo como en el
+# `config.json` de produccion, para que una instalacion existente no deje de
+# comunicarse al actualizar.
+CLAVES_RENOMBRADAS_PLC = {
+    clave: "MODBUS_" + clave[len("PLC_"):]
+    for clave in CONFIG_POR_DEFECTO
+    if clave.startswith("PLC_")
+}
+# `PLC_SIMULACION` es derivada y no esta en CONFIG_POR_DEFECTO.
+CLAVES_RENOMBRADAS_PLC["PLC_SIMULACION"] = "MODBUS_SIMULACION"
+
+
+def _renombrar_claves_heredadas(datos):
+    """Renombra en memoria las claves MODBUS_* a PLC_*.
+
+    Devuelve la lista de cambios para dejar rastro en el log. Si ya existe la
+    clave nueva, la vieja se descarta (manda la nueva).
+    """
+    cambios = []
+    for nueva, vieja in CLAVES_RENOMBRADAS_PLC.items():
+        if vieja not in datos:
+            continue
+        if nueva in datos:
+            datos.pop(vieja)
+            cambios.append(f"{vieja} descartada ({nueva} ya existe)")
+        else:
+            datos[nueva] = datos.pop(vieja)
+            cambios.append(f"{vieja} -> {nueva}")
+    return cambios
+
+
+def _renombrar_entorno_heredado():
+    """Copia al entorno las claves PLC_* que solo existan como MODBUS_*.
+
+    Cubre las variables definidas fuera de la app (el `.env` de desarrollo o
+    variables de sistema en la PC de planta) cuando vienen de una version
+    anterior.
+    """
+    cambios = []
+    for nueva, vieja in CLAVES_RENOMBRADAS_PLC.items():
+        if vieja not in os.environ:
+            continue
+        if nueva not in os.environ:
+            os.environ[nueva] = os.environ[vieja]
+            cambios.append(f"{vieja} -> {nueva}")
+    return cambios
+
+
+# ---------------------------------------------------------------------------
 # Migracion de la config heredada del modulo Advantech al PLC Zelio
 # ---------------------------------------------------------------------------
 # El hardware de la planta cambio: el modulo Advantech WISE-4060LAN (coils
@@ -285,28 +338,28 @@ CONFIG_POR_DEFECTO = {
 # de la app. Por eso al arrancar el exe se detectan y se migran solos.
 #
 # IP del PLC Zelio con el cable DIRECTO a la PC: la misma en dev y en planta
-# (ver MAPA_MODBUS_ZELIO.md). Se aplica solo si el host guardado era el del
+# (ver MAPA_PLC_ZELIO.md). Se aplica solo si el host guardado era el del
 # modulo viejo; si el PLC de esa maquina tiene otra IP, se edita a mano una
 # vez y la migracion no vuelve a tocarlo (ya no detecta el perfil heredado).
 IP_PLC_ZELIO = "192.158.1.80"
 
-# Claves del mapa de hardware Modbus: las que cambian al pasar del modulo
+# Claves del mapa de hardware del PLC: las que cambian al pasar del modulo
 # Advantech al Zelio. Se derivan de `CONFIG_POR_DEFECTO` (una sola fuente de
 # verdad), pero se EXCLUYEN los parametros de conexion (puerto, unit id,
 # periodo de sondeo, delta maximo): valen para cualquier hardware y podrian
-# estar ajustados a mano. `MODBUS_HOST` se migra aparte (a la IP del PLC) y
-# `MODBUS_SIMULACION` es derivada del host, asi que ninguna de las dos entra.
-CLAVES_MAPA_MODBUS = tuple(
+# estar ajustados a mano. `PLC_HOST` se migra aparte (a la IP del PLC) y
+# `PLC_SIMULACION` es derivada del host, asi que ninguna de las dos entra.
+CLAVES_MAPA_PLC = tuple(
     clave
     for clave in CONFIG_POR_DEFECTO
-    if (clave.startswith("MODBUS_") or clave.startswith("TORRE_")
+    if (clave.startswith("PLC_") or clave.startswith("TORRE_")
         or clave == "PULSO_DURACION_MS")
     and clave not in (
-        "MODBUS_HOST",
-        "MODBUS_PORT",
-        "MODBUS_UNIT_ID",
-        "MODBUS_POLL_MS",
-        "MODBUS_COUNTER_MAX_DELTA",
+        "PLC_HOST",
+        "PLC_PORT",
+        "PLC_UNIT_ID",
+        "PLC_POLL_MS",
+        "PLC_COUNTER_MAX_DELTA",
     )
 )
 
@@ -316,19 +369,19 @@ def _es_config_advantech(datos):
 
     Huella del modulo viejo: coils 16 (marcha) y 17 (paro), contador en el
     registro 0 y/o de 2 palabras. Un config ya migrado al Zelio tiene
-    `MODBUS_CMD_MODE=registro`, asi que no vuelve a detectarse.
+    `PLC_CMD_MODE=registro`, asi que no vuelve a detectarse.
     """
-    if not str(datos.get("MODBUS_HOST", "")).strip():
+    if not str(datos.get("PLC_HOST", "")).strip():
         return False  # sin host no se sabe contra que hardware se configuro
-    if str(datos.get("MODBUS_CMD_MODE", "")).strip().lower() == "registro":
+    if str(datos.get("PLC_CMD_MODE", "")).strip().lower() == "registro":
         return False
-    if str(datos.get("MODBUS_START_COIL", "")) == "16":
+    if str(datos.get("PLC_START_COIL", "")) == "16":
         return True
-    if str(datos.get("MODBUS_PAUSE_COIL", "")) == "17":
+    if str(datos.get("PLC_PAUSE_COIL", "")) == "17":
         return True
-    if str(datos.get("MODBUS_COUNTER_REGISTER", "")) == "0":
+    if str(datos.get("PLC_COUNTER_REGISTER", "")) == "0":
         return True
-    if str(datos.get("MODBUS_COUNTER_WORDS", "")) == "2":
+    if str(datos.get("PLC_COUNTER_WORDS", "")) == "2":
         return True
     return False
 
@@ -336,7 +389,7 @@ def _es_config_advantech(datos):
 def _migrar_config_a_zelio(datos):
     """Migra en memoria un config heredado del modulo Advantech al Zelio.
 
-    Solo toca el mapa de hardware Modbus y la IP del PLC: rutas (DB_PATH,
+    Solo toca el mapa de hardware del PLC y su IP: rutas (DB_PATH,
     LOG_DIR), exportacion, updates y seguros quedan intactos. Devuelve la
     lista de cambios aplicados para dejar rastro en el log.
     """
@@ -344,7 +397,7 @@ def _migrar_config_a_zelio(datos):
     if not _es_config_advantech(datos):
         return cambios
 
-    for clave in CLAVES_MAPA_MODBUS:
+    for clave in CLAVES_MAPA_PLC:
         nuevo = CONFIG_POR_DEFECTO[clave]
         viejo = datos.get(clave, "<ausente>")
         if str(viejo) != str(nuevo):
@@ -352,15 +405,15 @@ def _migrar_config_a_zelio(datos):
             cambios.append(f"{clave}: {viejo} -> {nuevo}")
 
     # La IP del modulo viejo ya no existe: se apunta al PLC Zelio.
-    host_viejo = str(datos.get("MODBUS_HOST", "")).strip()
+    host_viejo = str(datos.get("PLC_HOST", "")).strip()
     if host_viejo != IP_PLC_ZELIO:
-        datos["MODBUS_HOST"] = IP_PLC_ZELIO
-        cambios.append(f"MODBUS_HOST: {host_viejo} -> {IP_PLC_ZELIO}")
+        datos["PLC_HOST"] = IP_PLC_ZELIO
+        cambios.append(f"PLC_HOST: {host_viejo} -> {IP_PLC_ZELIO}")
 
     # Con el host real del PLC, la app debe dejar de simular.
-    if _texto_es_verdadero(datos.get("MODBUS_SIMULACION", 0)):
-        datos["MODBUS_SIMULACION"] = 0
-        cambios.append("MODBUS_SIMULACION: 1 -> 0")
+    if _texto_es_verdadero(datos.get("PLC_SIMULACION", 0)):
+        datos["PLC_SIMULACION"] = 0
+        cambios.append("PLC_SIMULACION: 1 -> 0")
 
     return cambios
 
@@ -375,6 +428,14 @@ def _aplicar_config_json():
     del archivo NO pisan variables de entorno ya presentes (setdefault),
     salvo que vengan del propio archivo.
     """
+    # Variables de entorno heredadas (p. ej. definidas a nivel de sistema en
+    # la PC de planta): se copian a PLC_* antes de aplicar el archivo.
+    cambios_entorno = _renombrar_entorno_heredado()
+    if cambios_entorno:
+        log.warning(
+            "Entorno: claves heredadas renombradas MODBUS_* -> PLC_*: %s.",
+            "; ".join(cambios_entorno),
+        )
     ruta = ruta_config_json()
     datos = _leer_json(ruta)
     if not datos:
@@ -390,8 +451,18 @@ def _aplicar_config_json():
         origen["DB_PATH"] = os.path.join(DIR_DATOS, NOMBRE_DB)
         origen["LOG_DIR"] = os.path.join(DIR_DATOS, "logs")
         datos = origen
+        _renombrar_claves_heredadas(datos)
         _escribir_json(ruta, datos)
         log.info("config.json generado desde .env en %s", ruta)
+    # Aceptar un config.json heredado con claves MODBUS_*: se renombran a
+    # PLC_* antes de migrar el mapa de hardware, para que la config quede
+    # coherente y el archivo no conserve nombres del protocolo.
+    cambios_renombrado = _renombrar_claves_heredadas(datos)
+    if cambios_renombrado:
+        log.warning(
+            "config.json: claves heredadas renombradas MODBUS_* -> PLC_*: %s.",
+            "; ".join(cambios_renombrado),
+        )
     # Migrar una config heredada del modulo Advantech al PLC Zelio: el
     # hardware cambio y los valores viejos (coils 16/17, contador de 2
     # palabras en el registro 0) NO funcionan con el SR3NET01BD. Se hace
@@ -401,7 +472,7 @@ def _aplicar_config_json():
     if cambios_migracion:
         log.warning(
             "config.json: config heredada del modulo Advantech migrada al "
-            "PLC Zelio. Cambios: %s. IP del PLC: %s. Revisa MODBUS_HOST si "
+            "PLC Zelio. Cambios: %s. IP del PLC: %s. Revisa PLC_HOST si "
             "esa maquina usa otra IP.",
             "; ".join(cambios_migracion), IP_PLC_ZELIO,
         )
@@ -412,7 +483,7 @@ def _aplicar_config_json():
         if clave not in datos:
             datos[clave] = por_defecto
             cambios_siembra = True
-    if cambios_siembra or cambios_migracion:
+    if cambios_siembra or cambios_migracion or cambios_renombrado:
         _escribir_json(ruta, datos)
     # Aviso de seguridad: en produccion, MODO_DEV=true deja la app SIN
     # autenticacion biometrica. No se cambia solo (en dev es legitimo), pero
@@ -444,7 +515,11 @@ if getattr(sys, "frozen", False):
 else:
     ruta_env = os.path.join(RUTA_BASE, ".env")
     load_dotenv(ruta_env)
-    for clave, valor in _leer_json(ruta_config_json()).items():
+    # Aceptar un .env heredado con claves MODBUS_* (se migran en memoria).
+    _renombrar_entorno_heredado()
+    datos_json = _leer_json(ruta_config_json())
+    _renombrar_claves_heredadas(datos_json)
+    for clave, valor in datos_json.items():
         if clave != VAR_DIR_DATOS:
             os.environ.setdefault(str(clave), str(valor))
 
@@ -477,7 +552,7 @@ FINGER_POSITION = 0
 
 UMBRAL_DISIMILARIDAD = 0x04000000
 
-# --- Simulacion (fallback cuando no hay Modbus) ---
+# --- Simulacion (fallback cuando no hay PLC) ---
 # SimulacionController usa estos valores de referencia solo en modo
 # simulacion (sin hardware real).
 SIMULACION_CONFIG = {
@@ -545,28 +620,28 @@ EASY_CONFIG = {
 }
 
 
-# --- Modbus TCP (PC Fanless Windows) ---
+# --- PLC (Modbus TCP, PC Fanless Windows) ---
 # El CONTADOR de cortes vive en el modulo/PLC: el PC solo hace polling por
 # red; NUNCA cuenta flancos localmente (Windows no es RTOS y un
-# micro-congelamiento perderia cortes). Sin `MODBUS_HOST` o con
-# `MODBUS_SIMULACION=1` se cae a modo simulacion.
+# micro-congelamiento perderia cortes). Sin `PLC_HOST` o con
+# `PLC_SIMULACION=1` se cae a modo simulacion.
 #
-# Hay DOS modos de comando (`MODBUS_CMD_MODE`), porque el hardware cambio:
+# Hay DOS modos de comando (`PLC_CMD_MODE`), porque el hardware cambio:
 #   - "coil"     : modulo Advantech WISE-4060LAN (FC05, coils 16-19).
 #   - "registro" : Zelio Logic 2 SR3 + modulo Ethernet SR3NET01BD. Este
 #                  NO expone coils: solo 4 palabras de ENTRADA (J1..J4, dirs
 #                  16-19, escritura del master) y 4 de SALIDA (O1..O4, dirs
 #                  20-23, solo lectura). Los comandos van como un BIT dentro
 #                  de una palabra J.
-MODBUS_CONFIG = {
-    "host": os.environ.get("MODBUS_HOST", "").strip(),
-    "port": _env_int("MODBUS_PORT", 502),
-    "unit_id": _env_int("MODBUS_UNIT_ID", 1),
+PLC_CONFIG = {
+    "host": os.environ.get("PLC_HOST", "").strip(),
+    "port": _env_int("PLC_PORT", 502),
+    "unit_id": _env_int("PLC_UNIT_ID", 1),
     "timeout": 2.0,
     # Modo de escritura de los comandos: "coil" (FC05) o "registro" (FC06).
-    "cmd_mode": os.environ.get("MODBUS_CMD_MODE", "coil").strip().lower(),
-    "start_coil": _env_int("MODBUS_START_COIL", 0),
-    "pause_coil": _env_int("MODBUS_PAUSE_COIL", 1),
+    "cmd_mode": os.environ.get("PLC_CMD_MODE", "coil").strip().lower(),
+    "start_coil": _env_int("PLC_START_COIL", 0),
+    "pause_coil": _env_int("PLC_PAUSE_COIL", 1),
     # Modo "registro": palabra J y bit de cada comando (0 = bit0).
     # MEDIDO en el PLC real (24/10/2026): el FBD del Zelio traduce UNA SOLA
     # palabra de comando, J1 (dir 16), con los bits 0-5:
@@ -575,11 +650,11 @@ MODBUS_CONFIG = {
     # J2/J3/J4 (dirs 17/18/19) NO controlan nada en el programa actual.
     # Por eso START, PAUSE y TORRE comparten la palabra 16 y el HAL mantiene
     # el valor vigente en `_reg_j` para no pisar los bits de los demas.
-    "start_register": _env_int("MODBUS_START_REGISTER", 16),
-    "start_bit": _env_int("MODBUS_START_BIT", 0),
-    "pause_register": _env_int("MODBUS_PAUSE_REGISTER", 16),
-    "pause_bit": _env_int("MODBUS_PAUSE_BIT", 1),
-    "counter_register": _env_int("MODBUS_COUNTER_REGISTER", 0),
+    "start_register": _env_int("PLC_START_REGISTER", 16),
+    "start_bit": _env_int("PLC_START_BIT", 0),
+    "pause_register": _env_int("PLC_PAUSE_REGISTER", 16),
+    "pause_bit": _env_int("PLC_PAUSE_BIT", 1),
+    "counter_register": _env_int("PLC_COUNTER_REGISTER", 0),
     # MEDIDO en el PLC real (SR3NET01BD): el contador de cortes esta en O1
     # y es de 16 bits. O2 NO es la palabra alta del contador: es la palabra
     # de PULSOS del PLC (se enciende un instante en cada corte y se apaga
@@ -587,14 +662,14 @@ MODBUS_CONFIG = {
     # valor corrupto (+65536 en el instante del pulso), el HAL descartaria
     # el salto y se PIERDEN cortes. El HAL solo necesita deltas y el
     # wraparound a 65535 lo resuelve (`_max_valor`).
-    "counter_words": _env_int("MODBUS_COUNTER_WORDS", 1),
-    "counter_little_endian": _env_bool("MODBUS_COUNTER_LITTLE_ENDIAN", True),
-    "poll_ms": _env_int("MODBUS_POLL_MS", 500),
+    "counter_words": _env_int("PLC_COUNTER_WORDS", 1),
+    "counter_little_endian": _env_bool("PLC_COUNTER_LITTLE_ENDIAN", True),
+    "poll_ms": _env_int("PLC_POLL_MS", 500),
     "pulso_duracion_ms": _env_int("PULSO_DURACION_MS", 300),
-    "max_delta": _env_int("MODBUS_COUNTER_MAX_DELTA", 10000),
+    "max_delta": _env_int("PLC_COUNTER_MAX_DELTA", 10000),
     "modo_simulacion": _env_bool(
-        "MODBUS_SIMULACION",
-        not bool(os.environ.get("MODBUS_HOST", "").strip()),
+        "PLC_SIMULACION",
+        not bool(os.environ.get("PLC_HOST", "").strip()),
     ),
     # Polaridad del nivel activo por senal (START pulso / PAUSE latch), igual
     # en los dos modos. Por defecto el nivel activo es True (rele energizado /
@@ -602,21 +677,21 @@ MODBUS_CONFIG = {
     # actua cuando el circuito se ABRE), poner 1 invierte: activo = False,
     # reposo = True. En modo "registro" la inversion equivale a invertir el
     # bit (activo = bit a 0).
-    "start_coil_invertido": _env_bool("MODBUS_START_COIL_INVERTIDO", False),
-    "pause_coil_invertido": _env_bool("MODBUS_PAUSE_COIL_INVERTIDO", False),
+    "start_coil_invertido": _env_bool("PLC_START_COIL_INVERTIDO", False),
+    "pause_coil_invertido": _env_bool("PLC_PAUSE_COIL_INVERTIDO", False),
     # Torre de luces (señalizacion) - comparte la palabra de comando J1 (dir 16)
     # con marcha (bit0) y paro (bit1):
     #   bit2=verde, bit3=ambar, bit4=roja, bit5=alarma
     # J4 (dir 19): heartbeat bit0 (conmutado por la PC cada TORRE_HEARTBEAT_MS).
     # El programa del PLC NO usa J4 (no hay watchdog); se mantiene por si se
     # agrega despues.
-    "tower_register": _env_int("MODBUS_TOWER_REGISTER", 16),
-    "tower_heartbeat_register": _env_int("MODBUS_TOWER_HEARTBEAT_REGISTER", 19),
-    "tower_green_bit": _env_int("MODBUS_TOWER_GREEN_BIT", 2),
-    "tower_amber_bit": _env_int("MODBUS_TOWER_AMBER_BIT", 3),
-    "tower_red_bit": _env_int("MODBUS_TOWER_RED_BIT", 4),
-    "tower_alarm_bit": _env_int("MODBUS_TOWER_ALARM_BIT", 5),
-    "tower_heartbeat_bit": _env_int("MODBUS_TOWER_HEARTBEAT_BIT", 0),
+    "tower_register": _env_int("PLC_TOWER_REGISTER", 16),
+    "tower_heartbeat_register": _env_int("PLC_TOWER_HEARTBEAT_REGISTER", 19),
+    "tower_green_bit": _env_int("PLC_TOWER_GREEN_BIT", 2),
+    "tower_amber_bit": _env_int("PLC_TOWER_AMBER_BIT", 3),
+    "tower_red_bit": _env_int("PLC_TOWER_RED_BIT", 4),
+    "tower_alarm_bit": _env_int("PLC_TOWER_ALARM_BIT", 5),
+    "tower_heartbeat_bit": _env_int("PLC_TOWER_HEARTBEAT_BIT", 0),
     "tower_alarm_pulso_on_ms": _env_int("TORRE_ALARMA_PULSO_ON_MS", 500),
     "tower_alarm_pulso_off_ms": _env_int("TORRE_ALARMA_PULSO_OFF_MS", 500),
     "tower_alarm_duracion_s": _env_int("TORRE_ALARMA_DURACION_S", 3),
@@ -625,8 +700,8 @@ MODBUS_CONFIG = {
 }
 
 
-def _avisar_config_modbus_heredada(cfg):
-    """Avisa si la config de Modbus sigue siendo la del modulo viejo.
+def _avisar_config_plc_heredada(cfg):
+    """Avisa si la config del PLC sigue siendo la del modulo viejo.
 
     El `.env` de desarrollo se actualiza a mano, pero en PRODUCCION la fuente
     es `config.json`: si viene de una version anterior (Advantech) conserva
@@ -639,23 +714,23 @@ def _avisar_config_modbus_heredada(cfg):
         return
     if cfg.get("cmd_mode") != "registro":
         log.warning(
-            "Modbus: MODBUS_CMD_MODE=%r con el PLC Zelio (host %s). El "
+            "PLC: PLC_CMD_MODE=%r con el PLC Zelio (host %s). El "
             "NET01BD no expone coils: MARCHA/PARO y la torre no saldrian. "
-            "Pon MODBUS_CMD_MODE=registro (ver MAPA_MODBUS_ZELIO.md).",
+            "Pon PLC_CMD_MODE=registro (ver MAPA_PLC_ZELIO.md).",
             cfg.get("cmd_mode"), cfg.get("host"),
         )
         return
     if cfg.get("counter_words") != 1 or cfg.get("counter_register") < 16:
         log.warning(
-            "Modbus: contador en registro %s con %s palabra(s). MEDIDO en el "
+            "PLC: contador en registro %s con %s palabra(s). MEDIDO en el "
             "PLC: el contador esta en O1 (dir 20) y es de 16 bits (O2 es la "
-            "palabra de PULSOS). Usa MODBUS_COUNTER_REGISTER=20 y "
-            "MODBUS_COUNTER_WORDS=1 o se pierde un corte por pulso.",
+            "palabra de PULSOS). Usa PLC_COUNTER_REGISTER=20 y "
+            "PLC_COUNTER_WORDS=1 o se pierde un corte por pulso.",
             cfg.get("counter_register"), cfg.get("counter_words"),
         )
 
 
-_avisar_config_modbus_heredada(MODBUS_CONFIG)
+_avisar_config_plc_heredada(PLC_CONFIG)
 
 
 # Cada cuanto se guarda en la BD el total de cortes de la sesion activa, como

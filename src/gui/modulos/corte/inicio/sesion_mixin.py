@@ -170,7 +170,7 @@ class SesionMixin:
         La vista queda deliberadamente SIN sesion (`sesion_id=None`): el
         header pide huella de inicio y el operador abre un folio desde cero,
         con su conteo arrancando en 0. El latch PAUSE inicial del HAL
-        (`ModbusController._aplicar_paro_inicial`) ya deja la maquina
+        (`PLCController._aplicar_paro_inicial`) ya deja la maquina
         fisicamente detenida.
         """
         sesion = obtener_sesion_interrumpida()

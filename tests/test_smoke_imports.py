@@ -72,7 +72,7 @@ def test_se_cubre_al_menos_la_app_completa():
         "src.gui.admin.view",
         "src.gui.componentes.huella_modal",
         "src.hardware.biometric_sdk",
-        "src.hardware.modbus_controller",
+        "src.hardware.plc_controller",
         "src.hardware.simulacion_controller",
         "src.reportes.export_dia",
         "src.reportes.export_auto",
@@ -90,8 +90,8 @@ def test_main_importa():
     importlib.import_module("main")
 
 
-def test_el_hal_selecciona_simulacion_sin_modbus_host():
-    """Sin MODBUS_HOST, `crear_controlador()` debe caer a SimulacionController.
+def test_el_hal_selecciona_simulacion_sin_plc_host():
+    """Sin PLC_HOST, `crear_controlador()` debe caer a SimulacionController.
 
     Verifica la fabrica del composition root (`main.py:79`) sin arrancar
     hardware: es el mecanismo que permite trabajar en dev sin el modulo
@@ -100,7 +100,7 @@ def test_el_hal_selecciona_simulacion_sin_modbus_host():
     from src import config
     from src.hardware.simulacion_controller import SimulacionController
 
-    assert not config.MODBUS_CONFIG["host"], "conftest.py deberia dejar MODBUS_HOST vacio"
+    assert not config.PLC_CONFIG["host"], "conftest.py deberia dejar PLC_HOST vacio"
 
     import main
 

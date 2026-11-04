@@ -1,5 +1,5 @@
 """
-test_modbus_hal.py - Pruebas del HAL de Modbus (ModbusController).
+test_plc_hal.py - Pruebas del HAL del PLC (PLCController).
 
 Cubren los DOS modos de comando del controlador:
 
@@ -13,11 +13,12 @@ No tocan hardware: se inyecta un cliente Modbus falso que registra las
 escrituras.
 """
 
+import threading
 import time
 
 import pytest
 
-from src.hardware import modbus_controller as mod
+from src.hardware import plc_controller as mod
 
 
 class ClienteFalso:
@@ -46,7 +47,7 @@ class ClienteFalso:
 
 
 def _controlador(monkeypatch, **extra):
-    """Crea un ModbusController con cliente falso y sin hilo de polling."""
+    """Crea un PLCController con cliente falso y sin hilo de polling."""
     cliente = ClienteFalso()
     monkeypatch.setattr(mod, "ModbusClient", lambda *a, **k: cliente)
     cfg = {
@@ -80,7 +81,7 @@ def _controlador(monkeypatch, **extra):
         "pause_coil_invertido": False,
     }
     cfg.update(extra)
-    return mod.ModbusController(cfg, iniciar_polling=False), cliente
+    return mod.PLCController(cfg, iniciar_polling=False), cliente
 
 
 def _esperar(condicion, timeout=2.0):
@@ -91,6 +92,23 @@ def _esperar(condicion, timeout=2.0):
             return True
         time.sleep(0.01)
     return False
+
+
+class CacheDemorado(dict):
+    """Cache de J1 que avisa cuando alguien lo lee.
+
+    Sirve para forzar de forma determinista la carrera entre la torre y la
+    secuencia de MARCHA: marca el evento al consultar el valor, antes de que
+    el llamador escriba.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.leido = threading.Event()
+
+    def get(self, clave, defecto=None):
+        self.leido.set()
+        return super().get(clave, defecto)
 
 
 # ----------------------------------------------------------------------
@@ -217,7 +235,7 @@ def test_contador_se_lee_de_las_palabras_O(monkeypatch):
 
 def test_contador_de_32_bits_usa_palabra_baja_primero(monkeypatch):
     """Con 2 palabras (O1/O2), el valor se arma con la palabra baja primero
-    (MODBUS_COUNTER_LITTLE_ENDIAN=1)."""
+    (PLC_COUNTER_LITTLE_ENDIAN=1)."""
     ctrl, cliente = _controlador(monkeypatch)
     cliente.registros[20] = 5      # palabra baja
     cliente.registros[21] = 2      # palabra alta
@@ -239,7 +257,7 @@ def test_contador_de_16_bits_ignora_la_palabra_alta_inestable(monkeypatch):
     bits. O2 NO es la palabra alta del contador: es la palabra de PULSOS
     del PLC (se enciende un instante en cada corte y se apaga solo).
 
-    Con MODBUS_COUNTER_WORDS=1 el HAL lee SOLO O1, de modo que el pulso de
+    Con PLC_COUNTER_WORDS=1 el HAL lee SOLO O1, de modo que el pulso de
     O2 no corrompe el valor: no se pierde el corte ni se cuela un salto de
     +65536 (que el modulo descartaria por anomalo).
     """
@@ -344,7 +362,7 @@ def test_modo_simulacion_no_toca_la_red(monkeypatch):
     """Sin host, el controlador queda en simulacion y no escribe nada."""
     cliente = ClienteFalso()
     monkeypatch.setattr(mod, "ModbusClient", lambda *a, **k: cliente)
-    ctrl = mod.ModbusController(
+    ctrl = mod.PLCController(
         {"host": "", "modo_simulacion": True, "cmd_mode": "registro"},
         iniciar_polling=False,
     )
@@ -421,6 +439,42 @@ def test_torre_conserva_los_bits_de_comando_en_la_palabra(monkeypatch):
     assert palabra & 0b100, "el verde debe encenderse"
 
 
+def test_torre_no_relatchea_el_paro_con_la_palabra_vieja(monkeypatch):
+    """Carrera real (vista en planta): al salir del paro, la torre calculaba
+    la palabra con el cache VIEJO de J1 antes de tomar el lock y volvia a
+    poner el bit de PARO (reg 16 = 6). Resultado: la maquina se quedaba
+    apagada aunque la GUI ya la habia reanudado.
+
+    Se fuerza el solape: otro hilo retiene el lock y suelta el latch de PARO
+    (como `_secuencia_marcha`) justo antes de que la torre escriba. La torre
+    debe leer el cache DESPUES de conseguir el lock.
+    """
+    ctrl, cliente = _controlador(monkeypatch)
+    ctrl._conectar()           # J1 = 0b10: PARO latcheado
+    cliente.escrituras.clear()
+
+    cache = CacheDemorado(ctrl._reg_j)
+    ctrl._reg_j = cache
+    hilo = threading.Thread(target=ctrl.establecer_torre,
+                            args=(True, False, False), daemon=True)
+    with ctrl._lock_plc:
+        hilo.start()
+        # Con el codigo correcto la torre espera el lock sin leer el cache;
+        # el timeout solo evita bloquear el test en el caso bueno.
+        assert not cache.leido.wait(0.2), (
+            "la torre leyo el cache antes de tomar el lock"
+        )
+        # La secuencia de MARCHA suelta el latch de PARO mientras espera.
+        cache[ctrl._tower_register] = 0
+    hilo.join(2.0)
+
+    assert not hilo.is_alive()
+    assert cliente.escrituras[-1] == ("registro", 16, 0b100), (
+        "la torre no debe re-latchear el PARO con el valor viejo del cache"
+    )
+    assert ctrl._reg_j[ctrl._tower_register] & 0b10 == 0
+
+
 def test_alarma_parpadea_y_termina(monkeypatch):
     """Al entrar en rojo la alarma se enciende y se apaga (discontinua) y
     deja de sonar al cumplirse la duracion."""
@@ -494,7 +548,7 @@ def test_cierre_apaga_la_torre_y_el_heartbeat(monkeypatch):
 def test_torre_en_simulacion_no_toca_la_red(monkeypatch):
     cliente = ClienteFalso()
     monkeypatch.setattr(mod, "ModbusClient", lambda *a, **k: cliente)
-    ctrl = mod.ModbusController(
+    ctrl = mod.PLCController(
         {"host": "", "modo_simulacion": True, "cmd_mode": "registro"},
         iniciar_polling=False,
     )

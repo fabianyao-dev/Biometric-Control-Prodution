@@ -9,7 +9,7 @@ autorización.
 - GUI en **PySide6 (Qt)** con tema propio (QSS + Fusion) en **oscuro y claro**,
   intercambiables en caliente desde el botón ☀/🌙 del header.
 - Autenticación por huella (SDK **DigitalPersona**, Windows-only).
-- Control de relés y contador de cortes vía **Modbus TCP** (módulo Advantech),
+- Control de relés y contador de cortes vía **PLC** (Modbus TCP),
   con **modo simulación** cuando no hay hardware.
 - Todo el código, la UI y los logs están en **español**.
 
@@ -89,20 +89,20 @@ de UI como el tema.
 
 | Variable | Descripción |
 | --- | --- |
-| `MODBUS_HOST` | IP del PLC Zelio (SR3NET01BD, p. ej. `192.158.1.80`; ver [MAPA_MODBUS_ZELIO.md](MAPA_MODBUS_ZELIO.md)). **Vacío** o `MODBUS_SIMULACION=1` → modo simulación (sin red). |
-| `MODBUS_PORT` | Puerto Modbus TCP (default `502`). |
-| `MODBUS_UNIT_ID` | Unit ID del esclavo (default `1`). |
-| `MODBUS_CMD_MODE` | `registro` (default, **Zelio SR3NET01BD**, FC06: el comando es un *bit* dentro de una palabra J) \| `coil` (FC05, módulo Advantech WISE-4060LAN legacy). |
-| `MODBUS_START_REGISTER` / `MODBUS_START_BIT` | Palabra J y bit del comando START (marcha). En el Zelio medido: `16` / `0` (J1 bit0). |
-| `MODBUS_PAUSE_REGISTER` / `MODBUS_PAUSE_BIT` | Palabra J y bit del comando PAUSE (paro). En el Zelio medido: `16` / `1` (J1 bit1). |
-| `MODBUS_TOWER_REGISTER` + `MODBUS_TOWER_{GREEN,AMBER,RED,ALARM}_BIT` | Torre de luces: comparte la palabra J1 con marcha/paro. Zelio medido: registro `16`, bits `2/3/4/5`. |
-| `MODBUS_TOWER_HEARTBEAT_REGISTER` / `_BIT` | Heartbeat de la PC (watchdog del PLC). Zelio: `19` / `0` (J4 bit0). |
-| `MODBUS_START_COIL` / `MODBUS_PAUSE_COIL` | Coil del relevador START/PAUSE (**solo modo `coil`**, módulo Advantech legacy; inertes en el Zelio). |
-| `MODBUS_START_COIL_INVERTIDO` / `MODBUS_PAUSE_COIL_INVERTIDO` | `0` (default): pulso activo `True` (contacto cerrado, botón NA en paralelo). `1`: pulso invertido, activo `False` (contacto abierto) para cableados donde la máquina actúa al abrir el circuito (botón NA en serie / lógica NC). Ajusta solo el coil que lo requiera. |
-| `MODBUS_COUNTER_REGISTER` / `MODBUS_COUNTER_WORDS` | Registro del contador **publicado por el PLC**. En el Zelio medido: `O1` = registro `20`, **1 palabra** (16 bits): `O2` es la palabra de pulsos, NO la palabra alta (leer 2 palabras corrompe el valor y pierde un corte por pulso). |
-| `MODBUS_COUNTER_LITTLE_ENDIAN` | `1` (default) = palabra baja primero; `0` = big-endian. Solo aplica si se leen 2 palabras. |
-| `MODBUS_POLL_MS` | Intervalo de polling (default `500`). |
-| `MODBUS_COUNTER_MAX_DELTA` | Delta máximo aceptable entre lecturas; saltos mayores se ignoran (reset del PLC). |
+| `PLC_HOST` | IP del PLC Zelio (SR3NET01BD, p. ej. `192.158.1.80`; ver [MAPA_PLC_ZELIO.md](MAPA_PLC_ZELIO.md)). **Vacío** o `PLC_SIMULACION=1` → modo simulación (sin red). |
+| `PLC_PORT` | Puerto Modbus TCP (default `502`). |
+| `PLC_UNIT_ID` | Unit ID del esclavo (default `1`). |
+| `PLC_CMD_MODE` | `registro` (default, **Zelio SR3NET01BD**, FC06: el comando es un *bit* dentro de una palabra J) \| `coil` (FC05, módulo Advantech WISE-4060LAN legacy). |
+| `PLC_START_REGISTER` / `PLC_START_BIT` | Palabra J y bit del comando START (marcha). En el Zelio medido: `16` / `0` (J1 bit0). |
+| `PLC_PAUSE_REGISTER` / `PLC_PAUSE_BIT` | Palabra J y bit del comando PAUSE (paro). En el Zelio medido: `16` / `1` (J1 bit1). |
+| `PLC_TOWER_REGISTER` + `PLC_TOWER_{GREEN,AMBER,RED,ALARM}_BIT` | Torre de luces: comparte la palabra J1 con marcha/paro. Zelio medido: registro `16`, bits `2/3/4/5`. |
+| `PLC_TOWER_HEARTBEAT_REGISTER` / `_BIT` | Heartbeat de la PC (watchdog del PLC). Zelio: `19` / `0` (J4 bit0). |
+| `PLC_START_COIL` / `PLC_PAUSE_COIL` | Coil del relevador START/PAUSE (**solo modo `coil`**, módulo Advantech legacy; inertes en el Zelio). |
+| `PLC_START_COIL_INVERTIDO` / `PLC_PAUSE_COIL_INVERTIDO` | `0` (default): pulso activo `True` (contacto cerrado, botón NA en paralelo). `1`: pulso invertido, activo `False` (contacto abierto) para cableados donde la máquina actúa al abrir el circuito (botón NA en serie / lógica NC). Ajusta solo el coil que lo requiera. |
+| `PLC_COUNTER_REGISTER` / `PLC_COUNTER_WORDS` | Registro del contador **publicado por el PLC**. En el Zelio medido: `O1` = registro `20`, **1 palabra** (16 bits): `O2` es la palabra de pulsos, NO la palabra alta (leer 2 palabras corrompe el valor y pierde un corte por pulso). |
+| `PLC_COUNTER_LITTLE_ENDIAN` | `1` (default) = palabra baja primero; `0` = big-endian. Solo aplica si se leen 2 palabras. |
+| `PLC_POLL_MS` | Intervalo de polling (default `500`). |
+| `PLC_COUNTER_MAX_DELTA` | Delta máximo aceptable entre lecturas; saltos mayores se ignoran (reset del PLC). |
 | `PULSO_DURACION_MS` | Duración del pulso de MARCHA (default `300`). |
 | `SEGURO_PARO_SEGUNDOS` | Seguro anti-paro/anti-apagado: bloquea PARO y apagado mientras la máquina esté en marcha y haya recibido un **corte real** en los últimos N segundos (default `3`). |
 | `DB_PATH` | Ruta de la base SQLite. En el `.exe` empaquetado **no hace falta definirlo**: `DB_PATH` y `LOG_DIR` se generan solos en la carpeta de datos persistente (ver Empaquetado). Definir solo si se quiere otra ubicación. |
@@ -115,7 +115,7 @@ de UI como el tema.
 En el `.exe` empaquetado, un `config.json` **heredado del módulo Advantech** se
 migra solo al arrancar: se le pone el mapa del Zelio (comandos y torre en J1,
 contador en O1 con 1 palabra) y la IP del PLC. El cambio queda anotado en el
-log. Ver [MAPA_MODBUS_ZELIO.md](MAPA_MODBUS_ZELIO.md) §8.
+log. Ver [MAPA_PLC_ZELIO.md](MAPA_PLC_ZELIO.md) §8.
 
 ---
 
@@ -128,7 +128,7 @@ python main.py
 ```
 
 El punto de entrada es `main.py` desde la raíz (usa el paquete `src`). En
-desarrollo, sin `MODBUS_HOST`, el sistema corre completo en **modo simulación**
+desarrollo, sin `PLC_HOST`, el sistema corre completo en **modo simulación**
 (la GUI no cambia: mismo flujo, sin hardware).
 
 ---
@@ -202,7 +202,7 @@ Convenciones:
 
 ## Scripts de prueba (`test/`, manuales)
 
-Muchos requieren hardware (lector / módulo Modbus). Se ejecutan con `venv`
+Muchos requieren hardware (lector / PLC). Se ejecutan con `venv`
 desde la raíz del proyecto:
 
 | Script | Uso |
@@ -211,7 +211,7 @@ desde la raíz del proyecto:
 | `test\test_captura.py [salida.fmd]` | Captura huella a archivo (Windows + lector). |
 | `test\test_fmd.py` | Dos capturas y compara 1:1 y 1:N. |
 | `test\test_flujo.py registrar <fmd> <nombre> \| identificar <fmd>` | Flujo contra la BD. |
-| `test\test_modbus.py` | Diagnóstico del módulo Advantech (coils + registro contador). Usa el `.env`; sin `MODBUS_HOST` sale limpio. |
+| `test\test_modbus.py` | Diagnóstico del módulo Advantech (coils + registro contador). Usa el `.env`; sin `PLC_HOST` sale limpio. |
 | `test\simulador_modbus.py` | Emulador Modbus TCP del módulo (contador auto-incremental + coils) para probar todo lo anterior SIN hardware. |
 
 `test\test_modbus.py` admite flags: `--ip`, `--port`, `--reg`, `--words`,
@@ -235,8 +235,8 @@ v N         velocidad a N cortes/seg (v 0 = pausar)         h/? = ayuda
 q/salir     detener el simulador
 ```
 
-Y para probar la GUI / `ModbusController` contra el simulador, apunta el `.env`
-a `MODBUS_HOST=127.0.0.1` (y `MODBUS_PORT` si usas otro puerto).
+Y para probar la GUI / `PLCController` contra el simulador, apunta el `.env`
+a `PLC_HOST=127.0.0.1` (y `PLC_PORT` si usas otro puerto).
 
 ---
 
@@ -428,7 +428,7 @@ src/
 └── hardware/
     ├── biometric_sdk.py      ctypes sobre dpfpdd.dll/dpfj.dll (tolerante a faltantes)
     ├── biometric_service.py  Alto nivel: capturar, comparar, autenticar
-    ├── modbus_controller.py  HAL Modbus TCP (módulo Advantech)
+    ├── plc_controller.py  HAL del PLC (Modbus TCP)
     └── simulacion_controller.py  HAL simulación (fallback / dev)
 ```
 
@@ -439,11 +439,11 @@ src/
   RTOS; un micro-congelamiento perdería conteos).
 - **Relevadores ACTIVOS-BAJO, tipo botón**: enviar pulso = pin/coil en
   OUTPUT/LOW (`True`) durante `PULSO_DURACION_MS` y volver a `False`. NUNCA
-  dejar un relevador energizado (ver docstring de `modbus_controller.py`). La
+  dejar un relevador energizado (ver docstring de `plc_controller.py`). La
   **polaridad del pulso es configurable por coil** (`.env`), para cableados
   donde la máquina actúa al abrir el circuito.
-- **HAL intercambiable**: `crear_controlador()` en `main.py` elige Modbus o
-  simulación según `MODBUS_HOST`. Respeta la interfaz común
+- **HAL intercambiable**: `crear_controlador()` en `main.py` elige PLC o
+  simulación según `PLC_HOST`. Respeta la interfaz común
   (`maquina_lista`, `maquina_pausada`, `reprisar_maquina`, `cortes_totales`,
   `reset_conteo`, `establecer_conteo`, `segundos_sin_corte`,
   `segundos_desde_arranque`, `simular_corte`, `maquina_detenida`, `conectado`,
@@ -462,7 +462,7 @@ src/
 | "database is locked" en logs | Varias conexiones escribiendo sin `busy_timeout`/WAL | Ver `Diagnostico.md` §2.1. |
 | La máquina no responde a START/PARO | Coils mal configurados en `.env` o cableado | `python test\test_modbus.py --ip <IP> --coil 0 --pulso`. |
 | No cuenta cortes en simulación | La GUI no llama a `simular_corte()` | El contador simulado solo sube con la acción del botón de prueba. |
-| El contador salta / cuenta basura | Delta mayor a `MODBUS_COUNTER_MAX_DELTA` (reset del módulo) | Ajusta `MODBUS_COUNTER_MAX_DELTA` y revisa el cable del sensor. |
+| El contador salta / cuenta basura | Delta mayor a `PLC_COUNTER_MAX_DELTA` (reset del módulo) | Ajusta `PLC_COUNTER_MAX_DELTA` y revisa el cable del sensor. |
 | Sesión "Activa" al arrancar | Apagón o cierre abrupto anterior | Es el mecanismo de recuperación: autorizar o cerrar formalmente. |
 
 ---

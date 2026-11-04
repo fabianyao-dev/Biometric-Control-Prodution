@@ -367,11 +367,16 @@ class MaquinaMixin:
                 clave="modo_paro" if en_marcha else "modo_paro_detenida",
                 texto=f"Maquina: PARO ({causa_txt})",
                 badge="procesando", icono=sp.SP_MediaStop,
-                btn_icono=sp.SP_MediaStop, btn_estilo="Power",
-                btn_on=en_marcha,
+                # El boton central SIEMPRE sale del paro (con huella) y deja
+                # la maquina ENCENDIDA (`_toggle_maquina` -> `_salir_modo_paro`).
+                # Por eso nunca se deshabilita: con la zona 'maquina apagada'
+                # es tambien la forma de volver a marcha desde el paro.
+                btn_icono=sp.SP_MediaStop if en_marcha else sp.SP_MediaPlay,
+                btn_estilo="Power" if en_marcha else "PowerOn",
+                btn_on=True,
                 tooltip=("Salir del paro (la maquina sigue en marcha)"
                          if en_marcha
-                         else "Salir del paro (la maquina sigue detenida)"),
+                         else "Salir del paro y encender la maquina"),
             )
         if self._en_paro:
             return dict(

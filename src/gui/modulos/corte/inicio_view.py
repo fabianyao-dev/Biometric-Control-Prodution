@@ -443,7 +443,7 @@ class InicioView(
         Diferente del cierre de SESION (`_apagar_maquina`): si la maquina
         esta EN MARCHA no se permite cerrar el programa, porque quedaria
         cortando sin conteo ni supervision (el cleanup() solo puede
-        latchear PAUSE si el enlace Modbus vive; ante apagon no hay nada).
+        latchear PAUSE si el enlace con el PLC vive; ante apagon no hay nada).
         Se exige detenerla antes con el boton PARO (o salir del modo
         Primera pieza y parar). Con la maquina detenida SI se permite salir
         aunque quede sesion 'Activa': se recupera al arrancar, mismo camino

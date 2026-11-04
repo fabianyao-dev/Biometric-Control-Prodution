@@ -321,7 +321,7 @@ def _bucle_interactivo(banco):
 
 
 def main():
-    cfg = config.MODBUS_CONFIG
+    cfg = config.PLC_CONFIG
     parser = argparse.ArgumentParser(
         description="Emulador Modbus TCP para PLC Zelio Logic 2 (SR3 + SR3NET01BD)"
     )

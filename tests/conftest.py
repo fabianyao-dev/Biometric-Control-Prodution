@@ -33,8 +33,8 @@ _DIR_SESION = tempfile.mkdtemp(prefix="wts_control_tests_")
 os.environ["DB_PATH"] = os.path.join(_DIR_SESION, "planta_corte.db")
 os.environ["LOG_DIR"] = os.path.join(_DIR_SESION, "logs")
 
-# Sin hardware en los tests: sin host Modbus, el HAL cae a SimulacionController.
-os.environ["MODBUS_HOST"] = ""
+# Sin hardware en los tests: sin host PLC, el HAL cae a SimulacionController.
+os.environ["PLC_HOST"] = ""
 
 # MODO_DEV habilita el acceso sin huella del modal, necesario para los tests
 # que simulan la autenticacion sin el lector de DigitalPersona.

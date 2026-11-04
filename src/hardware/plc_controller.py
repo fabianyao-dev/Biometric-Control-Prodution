@@ -1,5 +1,5 @@
 """
-modbus_controller.py - HAL Modbus TCP para la PC Fanless (Windows).
+plc_controller.py - HAL del PLC por Modbus TCP (PC Fanless Windows).
 
 Sustituye a SimulacionController manteniendo EXACTAMENTE la misma interfaz
 publica (ver docstring de simulacion_controller.py), para que la GUI jamas se
@@ -21,7 +21,7 @@ Diseno (decisiones de planta):
       pulsos del sensor en un contador interno de alta velocidad (por
       hardware); la PC NUNCA detecta flancos localmente, porque Windows no es
       un SO en tiempo real y un micro-congelamiento del proceso perderia
-      conteos. La PC solo hace polling por red (MODBUS_POLL_MS) y suma la
+      conteos. La PC solo hace polling por red (PLC_POLL_MS) y suma la
       diferencia del registro contador.
     - El rele START es PULSO MOMENTANEO (arranque tipo boton): escribir el
       coil en True durante PULSO_DURACION_MS y volver a False. Nunca dejar
@@ -34,11 +34,11 @@ Diseno (decisiones de planta):
       energizado y la maquina sigue detenida (estado seguro).
     - Al INICIAR el programa, el controlador deja PAUSE en su nivel activo
       (maquina detenida, "como si estuviera en paro") la primera vez que se
-      establece el enlace Modbus; la maquina no arranca hasta que el operador
+      establece el enlace con el PLC; la maquina no arranca hasta que el operador
       la inicia. No se repite en reconexiones posteriores para no parar una
       maquina que ya este en marcha.
     - La polaridad de cada coil es configurable desde .env
-      (MODBUS_START_COIL_INVERTIDO / MODBUS_PAUSE_COIL_INVERTIDO): por
+      (PLC_START_COIL_INVERTIDO / PLC_PAUSE_COIL_INVERTIDO): por
       defecto el nivel activo es True (contacto cerrado = boton presionado,
       para botones NA en paralelo); con invertido=1 el nivel activo es False
       (contacto abierto) para cableados donde la maquina actua al abrir
@@ -48,7 +48,7 @@ Diseno (decisiones de planta):
       plano y expone `conectado()` para que la GUI muestre una alerta.
 
 El mapa de registros (coils y registro contador) es CONFIGURABLE desde .env
-(MODBUS_START_COIL, MODBUS_PAUSE_COIL, MODBUS_COUNTER_REGISTER) para que un
+(PLC_START_COIL, PLC_PAUSE_COIL, PLC_COUNTER_REGISTER) para que un
 cambio de modelo/marca del modulo no toque el codigo fuente.
 
 Contrato (identico a SimulacionController):
@@ -68,7 +68,7 @@ Contrato (identico a SimulacionController):
     - reiniciar_gracia_inactividad() -> reinicia la gracia del auto-paro
     - simular_corte()     -> suma un corte (modo simulacion / pruebas)
     - maquina_detenida()  -> bool
-    - conectado()         -> bool (estado del enlace Modbus, para la UI)
+    - conectado()         -> bool (estado del enlace con el PLC, para la UI)
     - cleanup()           -> detiene hilos y cierra el socket (siempre!)
 """
 
@@ -86,17 +86,17 @@ except ImportError:  # pragma: no cover - pyModbusTCP en requirements.txt
     ModbusClient = None
 
 
-class ModbusController:
-    """Controlador de reles y contador de cortes via Modbus TCP."""
+class PLCController:
+    """Controlador de reles y contador de cortes del PLC por Modbus TCP."""
 
-    def __init__(self, modbus_config=None, iniciar_polling=True):
+    def __init__(self, plc_config=None, iniciar_polling=True):
         """Controlador del HAL.
 
         `iniciar_polling=False` deja el controlador sin el hilo de fondo del
         polling (lo usan las pruebas automatizadas, que inyectan un cliente
         falso y comprueban las escrituras a mano).
         """
-        cfg = dict(modbus_config or config.MODBUS_CONFIG)
+        cfg = dict(plc_config or config.PLC_CONFIG)
 
         self._host = cfg.get("host", "").strip()
         self._port = int(cfg.get("port", 502))
@@ -128,10 +128,10 @@ class ModbusController:
         self._lock = threading.Lock()          # estado compartido con la UI
         # RLock (reentrante): `_conectar()` se puede llamar desde dentro de
         # `_secuencia_marcha`, que ya tiene el lock (MARCHA sin enlace).
-        self._lock_modbus = threading.RLock()  # socket: un request a la vez
+        self._lock_plc = threading.RLock()  # socket: un request a la vez
         self._stop = threading.Event()
 
-        self._modbus = None
+        self._cliente_plc = None
         self._conectado = False
         self._cortes = 0
         self._ultimo_contador = 0
@@ -183,11 +183,11 @@ class ModbusController:
 
         if self._simulacion or not self._host:
             self._simulacion = True
-            log.info("Modbus en SIMULACION (sin MODBUS_HOST o "
-                     "MODBUS_SIMULACION=1).")
+            log.info("PLC en SIMULACION (sin PLC_HOST o "
+                     "PLC_SIMULACION=1).")
         else:
             if ModbusClient is None:
-                log.error("pyModbusTCP no instalado; Modbus en simulacion.")
+                log.error("pyModbusTCP no instalado; PLC en simulacion.")
                 self._simulacion = True
             else:
                 if iniciar_polling:
@@ -202,7 +202,7 @@ class ModbusController:
 
     def _conectar(self) -> bool:
         """Abre el socket y lee el contador una vez para validar el enlace."""
-        with self._lock_modbus:
+        with self._lock_plc:
             try:
                 cliente = ModbusClient(
                     self._host, self._port, unit_id=self._unit_id,
@@ -215,7 +215,7 @@ class ModbusController:
                     cliente.close()
                     return False
                 lectura = self._combinar_regs(regs)
-                self._modbus = cliente
+                self._cliente_plc = cliente
                 self._conectado = True
                 self._ultimo_contador = lectura
                 # Fuerza a reescribir J3 aunque el color deseado sea el
@@ -225,12 +225,12 @@ class ModbusController:
                 self._torre_ambar = None
                 self._torre_roja = None
                 self._aplicar_paro_inicial(cliente)
-                log.info("Modbus conectado a %s:%s (contador=%s).",
+                log.info("PLC conectado a %s:%s (contador=%s).",
                          self._host, self._port, lectura)
                 return True
             except Exception as e:  # noqa: BLE001
-                log.warning("Modbus sin conexion (%s).", e)
-                self._modbus = None
+                log.warning("PLC sin conexion (%s).", e)
+                self._cliente_plc = None
                 self._conectado = False
                 return False
 
@@ -239,7 +239,7 @@ class ModbusController:
 
         El hardware publica el valor de 32 bits con la palabra MENOS
         significativa en el primer registro (little-endian: 40001=low,
-        40002=high). Configurable con MODBUS_COUNTER_LITTLE_ENDIAN por si el
+        40002=high). Configurable con PLC_COUNTER_LITTLE_ENDIAN por si el
         PLC lo publica al reves (big-endian: alta primero).
         """
         registros = regs[: self._counter_words]
@@ -298,8 +298,8 @@ class ModbusController:
             self._stop.wait(self._poll_ms / 1000.0)
 
     def _poll_contador(self):
-        with self._lock_modbus:
-            cliente = self._modbus
+        with self._lock_plc:
+            cliente = self._cliente_plc
             if cliente is None:
                 self._conectado = False
                 return
@@ -308,16 +308,16 @@ class ModbusController:
                     self._counter_register, self._counter_words
                 )
             except Exception as e:  # noqa: BLE001
-                log.warning("Modbus: fallo lectura (%s); marcando "
+                log.warning("PLC: fallo lectura (%s); marcando "
                             "desconectado.", e)
                 self._desconectar()
                 return
         if regs is None:
-            log.warning("Modbus: fallo de lectura (None); desconectando.")
+            log.warning("PLC: fallo de lectura (None); desconectando.")
             self._desconectar()
             return
         if len(regs) < self._counter_words:
-            log.warning("Modbus: lectura corta (%s); desconectando.", regs)
+            log.warning("PLC: lectura corta (%s); desconectando.", regs)
             self._desconectar()
             return
         valor = self._combinar_regs(regs)
@@ -334,8 +334,8 @@ class ModbusController:
             self._sumar_corte(delta)
 
     def _desconectar(self):
-        cliente = self._modbus
-        self._modbus = None
+        cliente = self._cliente_plc
+        self._cliente_plc = None
         self._conectado = False
         if cliente is not None:
             try:
@@ -367,7 +367,7 @@ class ModbusController:
         self._reg_j.pop(self._tower_hb_register, None)
 
     def conectado(self) -> bool:
-        """True si hay enlace Modbus activo (para alerta en la UI)."""
+        """True si hay enlace con el PLC activo (para alerta en la UI)."""
         return self._conectado
 
     def reconectar(self) -> bool:
@@ -382,7 +382,7 @@ class ModbusController:
             return True
         self._desconectar()
         ok = self._conectar()
-        log.info("reconectar Modbus -> %s", "OK" if ok else "sin respuesta")
+        log.info("reconectar PLC -> %s", "OK" if ok else "sin respuesta")
         return ok
 
     def en_simulacion(self) -> bool:
@@ -561,16 +561,16 @@ class ModbusController:
         El orden importa: si el PARO se soltara DESPUES del pulso, la maquina
         podria no arrancar (el boton de marcha quedaria anterior al de paro).
         """
-        with self._lock_modbus:
-            cliente = self._modbus
+        with self._lock_plc:
+            cliente = self._cliente_plc
             if cliente is None or not self._conectado:
                 # Todavia no hay enlace (el operador pulsa MARCHA nada mas
                 # abrir la app): se conecta aqui o la orden se perderia.
                 log.info("MARCHA sin enlace: se intenta conectar.")
                 if not self._conectar():
-                    log.warning("Modbus sin conexion: no se pudo arrancar.")
+                    log.warning("PLC sin conexion: no se pudo arrancar.")
                     return
-                cliente = self._modbus
+                cliente = self._cliente_plc
             # 1) PARO a reposo (idempotente; tambien cubre la recuperacion
             #    tras cerrar la app con la maquina en paro).
             self._escribir_bajo(cliente, self._destino_pause(), False,
@@ -590,10 +590,10 @@ class ModbusController:
         invertido = self._pause_invertido
 
         def _escribir():
-            with self._lock_modbus:
-                cliente = self._modbus
+            with self._lock_plc:
+                cliente = self._cliente_plc
                 if cliente is None or not self._conectado:
-                    log.warning("Modbus sin conexion: no se pudo escribir "
+                    log.warning("PLC sin conexion: no se pudo escribir "
                                 "la salida de PARO.")
                     return
                 self._escribir_bajo(cliente, destino, True, invertido)
@@ -702,7 +702,7 @@ class ModbusController:
 
     def establecer_torre(self, verde=False, ambar=False, roja=False):
         """Fija el estado de la torre. Idempotente: repetir el mismo estado
-        no genera trafico Modbus.
+        no genera trafico al PLC.
 
         La vista Inicio decide el color; aqui solo se ejecuta. Una sola
         escritura por cambio (los tres bits van en la MISMA palabra J).
@@ -714,18 +714,26 @@ class ModbusController:
         self._torre_verde = verde
         self._torre_ambar = ambar
         self._torre_roja = roja
-        if self._simulacion or not self._conectado or self._modbus is None:
+        if self._simulacion or not self._conectado:
             return
-        palabra = self._reg_j.get(self._tower_register, 0)
-        palabra = self._con_bit(palabra, self._tower_green_bit, verde)
-        palabra = self._con_bit(palabra, self._tower_amber_bit, ambar)
-        palabra = self._con_bit(palabra, self._tower_red_bit, roja)
-        cliente = self._modbus
-        with self._lock_modbus:
+        with self._lock_plc:
+            # La palabra se calcula DENTRO del lock: el cache `_reg_j` lo
+            # comparten esta escritura y las secuencias de MARCHA/PARO. Si se
+            # calculaba antes, una secuencia de MARCHA podia soltar el latch
+            # de PARO mientras tanto y esta escritura lo volvia a latchear
+            # con el valor viejo: la maquina se quedaba apagada al salir del
+            # paro (reg 16 = 6 en vez de 4).
+            cliente = self._cliente_plc
+            if cliente is None:
+                return
+            palabra = self._reg_j.get(self._tower_register, 0)
+            palabra = self._con_bit(palabra, self._tower_green_bit, verde)
+            palabra = self._con_bit(palabra, self._tower_amber_bit, ambar)
+            palabra = self._con_bit(palabra, self._tower_red_bit, roja)
             self._escribir_registro_torre(cliente, self._tower_register,
                                           palabra)
-        log.info("Torre: verde=%s ambar=%s roja=%s (reg %s = %s).",
-                 verde, ambar, roja, self._tower_register, palabra)
+            log.info("Torre: verde=%s ambar=%s roja=%s (reg %s = %s).",
+                     verde, ambar, roja, self._tower_register, palabra)
 
     def _escribir_registro_torre(self, cliente, registro, palabra):
         """Escribe una palabra J de la torre.
@@ -771,10 +779,12 @@ class ModbusController:
     def _escribir_alarma(self, encendida):
         """Enciende o apaga el bit de alarma de la torre."""
         self._alarma_encendida = bool(encendida)
-        if self._simulacion or not self._conectado or self._modbus is None:
+        if self._simulacion or not self._conectado:
             return
-        cliente = self._modbus
-        with self._lock_modbus:
+        with self._lock_plc:
+            cliente = self._cliente_plc
+            if cliente is None:
+                return
             self._escribir_bit_torre(cliente, self._tower_alarm_bit,
                                      self._alarma_encendida)
 
@@ -813,19 +823,24 @@ class ModbusController:
 
     def _conmutar_heartbeat(self):
         """Conmuta el heartbeat de J4 para el watchdog del PLC."""
-        if self._simulacion or not self._conectado or self._modbus is None:
+        if self._simulacion or not self._conectado:
             return
-        palabra = self._palabra_con_bit(self._tower_hb_register,
-                                       self._tower_hb_bit,
-                                       not self._heartbeat_estado)
-        cliente = self._modbus
-        with self._lock_modbus:
+        with self._lock_plc:
+            # Igual que en la torre: el cache se lee dentro del lock para no
+            # reescribir un valor viejo si otra escritura acaba de cambiarlo
+            # (p. ej. el heartbeat a 0 del cierre).
+            cliente = self._cliente_plc
+            if cliente is None:
+                return
+            palabra = self._palabra_con_bit(self._tower_hb_register,
+                                            self._tower_hb_bit,
+                                            not self._heartbeat_estado)
             ok = self._escribir_registro_torre(cliente,
                                                self._tower_hb_register,
                                                palabra)
-        if ok:
-            self._heartbeat_estado = not self._heartbeat_estado
-            self._ultimo_hb = time.time()
+            if ok:
+                self._heartbeat_estado = not self._heartbeat_estado
+                self._ultimo_hb = time.time()
 
     # ------------------------------------------------------------------
     # Cierre
@@ -838,7 +853,7 @@ class ModbusController:
         app: si hay enlace vivo se escribe el latch de PARO (paro sostenido)
         ANTES de desconectar. Con la maquina ya detenida re-latchear es
         inocuo (la salida queda energizada, su estado seguro desde el
-        arranque). La escritura es SINCRONA bajo `_lock_modbus`, asi que
+        arranque). La escritura es SINCRONA bajo `_lock_plc`, asi que
         espera a que un pulso START en vuelo termine antes de tocar el PARO;
         se verifica el retorno porque pyModbusTCP devuelve False ante
         cualquier error sin lanzar (ver Diagnostico 7.2.1).
@@ -847,8 +862,8 @@ class ModbusController:
             return
         self._cleaned = True
         self._stop.set()
-        with self._lock_modbus:
-            cliente = self._modbus
+        with self._lock_plc:
+            cliente = self._cliente_plc
             if (not self._simulacion and self._conectado
                     and cliente is not None):
                 ok = self._escribir_bajo(cliente, self._destino_pause(),
@@ -870,4 +885,4 @@ class ModbusController:
                                               0)
             self._maquina_en_marcha = False
             self._desconectar()
-        log.info("ModbusController detenido (hilo de polling finalizado).")
+        log.info("PLCController detenido (hilo de polling finalizado).")

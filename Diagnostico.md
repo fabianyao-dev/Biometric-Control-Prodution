@@ -44,13 +44,13 @@
 
 ### 1.3 Modbus TCP sin autenticacion ni cifrado — MEDIA
 
-- **Donde:** `src/hardware/modbus_controller.py`.
+- **Donde:** `src/hardware/plc_controller.py`.
 - **Problema:** el protocolo Modbus TCP es plano (sin cifrado ni autenticacion). Cualquier
   equipo en la misma LAN que alcance la IP del modulo puede leer el contador y **escribir
   coils** (arrancar/pausar la maquina).
 - **Impacto:** interrupcion o manipulacion de la produccion desde la red.
 - **Mitigacion sugerida:** aislar la red industrial (VLAN dedicada) y restringir el acceso
-  por firewall al puerto 502; nunca exponer `MODBUS_HOST` a redes no confiables.
+  por firewall al puerto 502; nunca exponer `PLC_HOST` a redes no confiables.
 
 - [ ] Resuelto (fecha: ______)
 
@@ -136,9 +136,9 @@
 
 - [ ] Resuelto (fecha: ______)
 
-### 2.2 Hilo de polling Modbus sin proteccion global
+### 2.2 Hilo de polling del PLC sin proteccion global
 
-- **Donde:** `src/hardware/modbus_controller.py` (`_bucle_polling`).
+- **Donde:** `src/hardware/plc_controller.py` (`_bucle_polling`).
 - **Problema:** el try/except cubre la lectura del registro, pero una excepcion inesperada
   fuera de ese bloque (p. ej. en `_combinar_regs` o al obtener la conexion) mataria el hilo
   y el conteo se congelaria silenciosamente sin alerta.
@@ -254,7 +254,7 @@
 
 #### 6.1.3 [ALTA] Modbus TCP sin autenticacion ni cifrado (persiste de 1.3)
 
-- **Confirmado:** `src/hardware/modbus_controller.py` habla Modbus TCP plano.
+- **Confirmado:** `src/hardware/plc_controller.py` habla Modbus TCP plano.
   Cualquier equipo en la LAN puede leer el contador y escribir coils
   (arrancar/parar la maquina). Seguir: VLAN industrial dedicada + firewall al
   puerto 502.
@@ -371,9 +371,9 @@
 
 - [ ] Resuelto (fecha: ______)
 
-#### 6.2.2 [MEDIA] Hilo de polling Modbus sin try/except global (persiste de 2.2)
+#### 6.2.2 [MEDIA] Hilo de polling del PLC sin try/except global (persiste de 2.2)
 
-- **Confirmado:** en `src/hardware/modbus_controller.py` el try/except de
+- **Confirmado:** en `src/hardware/plc_controller.py` el try/except de
   `_poll_contador` cubre la lectura, pero `_combinar_regs` (linea 208) esta
   fuera del bloque. Una excepcion ahi (o en `_stop.wait`) mataria el hilo y el
   conteo se congelaria sin alerta. Envolver todo el cuerpo del bucle.
@@ -470,7 +470,7 @@
 ### 6.5 Comandos de verificacion tras cambios
 
 - `python main.py` (con `BIOMETRICO_KIOSKO=0` para ventana).
-- `python test\test_modbus.py` (diagnostico del modulo, si hay `MODBUS_HOST`).
+- `python test\test_modbus.py` (diagnostico del modulo, si hay `PLC_HOST`).
 - `python test\test_flujo.py registrar <fmd> <nombre>` y `identificar <fmd>`
   (requiere lector).
 - Revisar `LOG_DIR\produccion.log` por "database is locked" o hilos muertos.
@@ -505,7 +505,7 @@
 
 #### 7.2.1 [ALTA] Escrituras de coils sin verificar el retorno: fallos de START/PAUSE silenciosos
 
-- **Donde:** `src/hardware/modbus_controller.py:201,438,472`
+- **Donde:** `src/hardware/plc_controller.py:201,438,472`
   (`_aplicar_paro_inicial`, `_escribir_coil`, `_pulso_coil`).
 - **Problema:** en pyModbusTCP 0.3.x, `write_single_coil` devuelve `False`
   ante CUALQUIER error (de red y respuestas de excepcion Modbus) SIN lanzar
@@ -523,7 +523,7 @@
 
 #### 7.2.2 [ALTA] Boton "Salir" cierra la app con maquina en marcha y sesion activa (amplia 6.1.10)
 
-- **Donde:** `main.py:185,422-431`; `modbus_controller.py:492-501`.
+- **Donde:** `main.py:185,422-431`; `plc_controller.py:492-501`.
 - **Problema:** el seguro anti-apagado protege solo al boton PARO/apagado de
   InicioView; `_salir` del header no verifica sesion ni `segundos_sin_corte`.
   Peor: `cleanup()` detiene el polling SIN escribir el coil PAUSE, asi que la
@@ -541,8 +541,8 @@
   - `main.py`: el guard vive en `closeEvent` (choke point unico: cubre el
     boton Salir, Alt+F4 y el cierre del sistema); `_salir` solo hace
     `close()`. El doble `cleanup()` previo desaparece.
-  - `ModbusController.cleanup()`: escribe el latch PAUSE SINCRONAMENTE
-    bajo `_lock_modbus` antes de desconectar (espera pulsos en vuelo),
+  - `PLCController.cleanup()`: escribe el latch PAUSE SINCRONAMENTE
+    bajo `_lock_plc` antes de desconectar (espera pulsos en vuelo),
     verifica el retorno (pyModbusTCP devuelve False sin lanzar) y loguea
     ERROR pidiendo verificacion manual si no pudo. Re-latchear con la
     maquina ya detenida es inocuo.
@@ -697,9 +697,9 @@
 
 - [ ] Resuelto (fecha: ______)
 
-#### 7.3.7 Cortes durante caida Modbus se descartan al reconectar (sin documentar)
+#### 7.3.7 Cortes durante caida del PLC se descartan al reconectar (sin documentar)
 
-- **Donde:** `modbus_controller.py:163` (`_conectar`: re-baseline).
+- **Donde:** `plc_controller.py:163` (`_conectar`: re-baseline).
 - **Problema:** todo lo cortado con `conectado=False` se pierde (tradeoff
   defendible vs reset del modulo, mitigado por checkpoint de 30 s), pero NO
   consta en el contrato/docstring; el operador puede ver piezas no contadas.
@@ -709,7 +709,7 @@
 
 #### 7.3.8 Flag de marcha/paro se fija ANTES de la escritura real (refuerza 7.2.1)
 
-- **Donde:** `modbus_controller.py:401-412`.
+- **Donde:** `plc_controller.py:401-412`.
 - **Problema:** sin read-back ni reintento, el estado de la GUI y el fisico
   pueden quedar opuestos indefinidamente si la escritura fallo.
 - **Mitigacion:** verificar retorno (7.2.1) y solo entonces fijar el flag.
@@ -742,7 +742,7 @@
 
 - **Donde:** `config.py:162-171,214-230,334`.
 - **Problema:** JSON ilegible -> `{}` con warning; si ademas falta el `.env`
-  heredado, `MODBUS_HOST` vacio -> modo simulacion. La app deja de controlar
+  heredado, `PLC_HOST` vacio -> modo simulacion. La app deja de controlar
   la maquina real (solo el banner de simulacion como aviso).
 - **Mitigacion:** ante JSON corrupto en produccion, avisar fuerte / bloquear
   arranque hasta intervencion; respaldar el ultimo config valido.
@@ -791,8 +791,8 @@
 - [ ] **Clave `'quality'` devuelve `bpp`** — `biometric_sdk.py:698`.
 - [ ] **`SimulacionController` sin `conectado()`** (los consumidores compensan
   con getattr; contradice el contrato HAL) — `simulacion_controller.py`.
-- [ ] **Hilos efimeros por pulso Modbus sin tope** y `_desconectar()` fuera
-  de lock en una rama — `modbus_controller.py:239-241,444,486`.
+- [ ] **Hilos efimeros por pulso al PLC sin tope** y `_desconectar()` fuera
+  de lock en una rama — `plc_controller.py:239-241,444,486`.
 - [ ] **Migracion legacy `DROP TABLE operadores`** puede morir con FK ON o
   borrar operadores en silencio — `database.py:90-92`.
 - [ ] **Conexiones sin try/finally** en rutas de error (mitigado por refcount

@@ -1,5 +1,5 @@
 """
-test_modbus_integracion.py - Prueba de extremo a extremo del HAL de Modbus
+test_plc_integracion.py - Prueba de extremo a extremo del HAL del PLC
 contra un servidor Modbus TCP real (emulado dentro del test).
 
 Comprueba que el modo "registro" (Zelio SR3NET01BD) habla el protocolo de
@@ -8,7 +8,7 @@ verdad por el socket:
     - FC06 (write_single_register) hacia las palabras J (16-19).
     - FC03 (read_holding_registers) hacia las palabras O (20-23).
 
-A diferencia de `test_modbus_hal.py` (que inyecta un cliente falso), aqui
+A diferencia de `test_plc_hal.py` (que inyecta un cliente falso), aqui
 las escrituras viajan por la red y las registra el servidor.
 """
 
@@ -18,7 +18,7 @@ import time
 import pytest
 from pyModbusTCP.server import DataBank, ModbusServer
 
-from src.hardware import modbus_controller as mod
+from src.hardware import plc_controller as mod
 
 J_START = 16   # J1XT1
 J_PAUSE = 17   # J2XT1
@@ -83,7 +83,7 @@ def _controlador(puerto, **extra):
         "pause_coil_invertido": False,
     }
     cfg.update(extra)
-    return mod.ModbusController(cfg, iniciar_polling=False)
+    return mod.PLCController(cfg, iniciar_polling=False)
 
 
 def _esperar(condicion, timeout=3.0):

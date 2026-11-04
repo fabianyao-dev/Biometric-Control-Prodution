@@ -1,8 +1,8 @@
-# Mapa Modbus del PLC Zelio (SR3 + SR3NET01BD)
+# Mapa del PLC Zelio (SR3 + SR3NET01BD)
 
 Contrato entre el programa del PLC y la app de la PC. Lo que dice este
-documento es lo que el codigo espera (`src/hardware/modbus_controller.py` y
-el bloque Modbus de `.env`), contrastado con **mediciones reales** contra el
+documento es lo que el codigo espera (`src/hardware/plc_controller.py` y
+el bloque PLC de `.env`), contrastado con **mediciones reales** contra el
 PLC en `192.158.1.80`.
 
 ## 1. Red: cable directo en dev y en planta
@@ -77,8 +77,8 @@ El NET01BD **no expone coils**. Medido con un sondeo palabra a palabra:
 > de J1 para no pisar los bits de los demas.
 
 START, PARO y la TORRE comparten la palabra J1 con bits distintos
-(`MODBUS_START_REGISTER` / `MODBUS_START_BIT` / `MODBUS_PAUSE_REGISTER` /
-`MODBUS_PAUSE_BIT` / `MODBUS_TOWER_REGISTER` + `MODBUS_TOWER_*_BIT`).
+(`PLC_START_REGISTER` / `PLC_START_BIT` / `PLC_PAUSE_REGISTER` /
+`PLC_PAUSE_BIT` / `PLC_TOWER_REGISTER` + `PLC_TOWER_*_BIT`).
 
 ### Nota: O2 es la palabra de PULSOS, NO la palabra alta del contador
 
@@ -98,7 +98,7 @@ O1=13 O2=0 -> 13
 El HAL descartaba ese salto por anomalo y **se perdia 1 corte por cada
 pulso** (medido: 15 cortes reales -> 11 contados).
 
-**Por eso `MODBUS_COUNTER_WORDS=1`**: la app lee SOLO O1, que si es
+**Por eso `PLC_COUNTER_WORDS=1`**: la app lee SOLO O1, que si es
 fiable (siempre avanza de 1 en 1). El HAL solo necesita *deltas*, y el
 wraparound a 65535 ya lo resuelve (`_max_valor`). Con 1 palabra el conteo
 medido fue **15 reales = 15 contados**.
@@ -119,7 +119,7 @@ PLC pulsado 17 veces:
 | Destellos de O2 | 17 (uno por cada incremento) |
 | Conteo de la app | **17** |
 | Duracion del pulso en O2 | ~150-200 ms |
-| Periodo de sondeo de la app | 500 ms (`MODBUS_POLL_MS`) |
+| Periodo de sondeo de la app | 500 ms (`PLC_POLL_MS`) |
 
 El pulso en O2 dura ~200 ms y el sondeo de la app es de 500 ms: **contar por
 pulsos perderia aproximadamente el 60% de los cortes**. Por eso la app
@@ -167,7 +167,7 @@ Requisitos del programa (FBD):
    `J1.4 -> Q5`, `J1.5 -> Q6`). No hace falta logica: la decision del color es
    de la app.
 2. Copiar **J1.1 a Q2** (paro), en el mismo nivel activo que usa la app
-   (`MODBUS_PAUSE_COIL_INVERTIDO=0`: `J1.1 = 1` = PARO). Si el cableado del
+   (`PLC_PAUSE_COIL_INVERTIDO=0`: `J1.1 = 1` = PARO). Si el cableado del
    tablero es al reves, invertir la bobina y avisar para cambiar el valor.
 3. **Watchdog del heartbeat**: si `J4.0` (dir 19) no cambia durante ~10 s,
    apagar Q2..Q6. Asi la maquina no queda habilitada (ni la torre encendida)
@@ -228,20 +228,20 @@ La alarma (`J1` bit5 -> Q6) solo se dispara en la **transicion a rojo** y
 parpadea 500 ms encendida / 500 ms apagada durante 3 s (`TORRE_ALARMA_*`). La
 roja (`J1` bit4 -> Q5) **permanece** hasta que se sale del paro.
 
-Claves de configuracion (`MODBUS_CONFIG`, con sus variables de entorno):
+Claves de configuracion (`PLC_CONFIG`, con sus variables de entorno):
 
 | Clave | Env | Por defecto |
 |---|---|---|
-| `tower_register` | `MODBUS_TOWER_REGISTER` | 16 (J1) |
-| `tower_heartbeat_register` | `MODBUS_TOWER_HEARTBEAT_REGISTER` | 19 (J4) |
-| `tower_green_bit` / `amber` / `red` / `alarm` | `MODBUS_TOWER_*_BIT` | 2 / 3 / 4 / 5 |
-| `tower_heartbeat_bit` | `MODBUS_TOWER_HEARTBEAT_BIT` | 0 |
+| `tower_register` | `PLC_TOWER_REGISTER` | 16 (J1) |
+| `tower_heartbeat_register` | `PLC_TOWER_HEARTBEAT_REGISTER` | 19 (J4) |
+| `tower_green_bit` / `amber` / `red` / `alarm` | `PLC_TOWER_*_BIT` | 2 / 3 / 4 / 5 |
+| `tower_heartbeat_bit` | `PLC_TOWER_HEARTBEAT_BIT` | 0 |
 | `tower_alarm_pulso_on_ms` / `off_ms` | `TORRE_ALARMA_PULSO_*_MS` | 500 / 500 |
 | `tower_alarm_duracion_s` | `TORRE_ALARMA_DURACION_S` | 3 |
 | `tower_heartbeat_ms` | `TORRE_HEARTBEAT_MS` | 2000 |
-| `start_register` / `start_bit` | `MODBUS_START_REGISTER` / `_BIT` | 16 / 0 (J1 bit0) |
-| `pause_register` / `pause_bit` | `MODBUS_PAUSE_REGISTER` / `_BIT` | 16 / 1 (J1 bit1) |
-| `counter_register` / `counter_words` | `MODBUS_COUNTER_REGISTER` / `_WORDS` | 20 (O1) / 1 |
+| `start_register` / `start_bit` | `PLC_START_REGISTER` / `_BIT` | 16 / 0 (J1 bit0) |
+| `pause_register` / `pause_bit` | `PLC_PAUSE_REGISTER` / `_BIT` | 16 / 1 (J1 bit1) |
+| `counter_register` / `counter_words` | `PLC_COUNTER_REGISTER` / `_WORDS` | 20 (O1) / 1 |
 | Tolerancia ambar -> rojo de la torre | `PRIMERA_PIEZA_TIMEOUT_S` | 900 |
 | Auto-paro por inactividad (NO es la tolerancia de la torre) | `PARO_IDLE_TIMEOUT_S` | 60 (fijo en codigo) |
 
@@ -256,7 +256,7 @@ registro` imprime cada escritura de J1 con los nombres (`VERDE`, `AMBAR`,
 test\\red_plc_directo.ps1 -Accion Test
 
 # 2) Diagnostico del NET01BD (solo lectura por defecto)
-venv\\Scripts\\python test\\test_modbus_zelio.py --ip 192.158.1.80 --seguir 20
+venv\\Scripts\\python test\\test_plc_zelio.py --ip 192.158.1.80 --seguir 20
 
 # 3) Consola EN VIVO (lo que ve la app, en tiempo real)
 venv\\Scripts\\python test\\monitoreo_zelio.py --hal
@@ -264,7 +264,7 @@ venv\\Scripts\\python test\\monitoreo_zelio.py --hal --marcha
 venv\\Scripts\\python test\\monitoreo_zelio.py --hal --paro
 
 # 4) La app contra el PLC
-#    (el .env ya apunta a MODBUS_HOST=192.158.1.80 y MODBUS_CMD_MODE=registro)
+#    (el .env ya apunta a PLC_HOST=192.158.1.80 y PLC_CMD_MODE=registro)
 venv\\Scripts\\python main.py
 ```
 
@@ -294,7 +294,7 @@ defecto); con varias candidatas hay que indicar `-Adaptador "Ethernet 2"`.
 | MARCHA: suelta PARO (J1 bit1 = 0) + pulso START (J1 bit0 = 1 -> 0) | OK, la maquina arranca |
 | Contador O1 avanzando con la maquina cortando | OK, +1 por corte |
 | O2 = palabra de PULSOS (destella en cada corte) | CONFIRMADO (no es la palabra alta) |
-| Conteo del HAL con `MODBUS_COUNTER_WORDS=1` | **15 reales = 15 contados** |
+| Conteo del HAL con `PLC_COUNTER_WORDS=1` | **15 reales = 15 contados** |
 | Captura con el boton de prueba (17 pulsaciones) | **17 incrementos = 17 pulsos = 17 contados** |
 
 ## 8. Migracion automatica de un `config.json` heredado (Advantech -> Zelio)
@@ -312,25 +312,25 @@ viejo, **se migra solo** (`src/config.py`, `_migrar_config_a_zelio`):
 
 | Se detecta (huella del Advantech) | Se deja |
 |---|---|
-| `MODBUS_START_COIL=16` / `MODBUS_PAUSE_COIL=17` | `MODBUS_CMD_MODE=registro` |
-| `MODBUS_COUNTER_REGISTER=0` / `MODBUS_COUNTER_WORDS=2` | comandos y torre en J1 (dir 16), bits 0-5 |
-| `MODBUS_CMD_MODE` ausente o `coil` (con host configurado) | contador en O1 (dir 20), **1 palabra** |
-| | `MODBUS_HOST` = `192.158.1.80` (IP del PLC; la misma en dev y en planta) |
+| `PLC_START_COIL=16` / `PLC_PAUSE_COIL=17` | `PLC_CMD_MODE=registro` |
+| `PLC_COUNTER_REGISTER=0` / `PLC_COUNTER_WORDS=2` | comandos y torre en J1 (dir 16), bits 0-5 |
+| `PLC_CMD_MODE` ausente o `coil` (con host configurado) | contador en O1 (dir 20), **1 palabra** |
+| | `PLC_HOST` = `192.158.1.80` (IP del PLC; la misma en dev y en planta) |
 | | `PULSO_DURACION_MS=300` |
 
 No se tocan las rutas (`DB_PATH`, `LOG_DIR`), la exportacion, los updates ni los
 seguros: la migracion es solo del mapa de hardware. Es **de una vez**: al
-terminar el archivo ya tiene `MODBUS_CMD_MODE=registro`, asi que no vuelve a
+terminar el archivo ya tiene `PLC_CMD_MODE=registro`, asi que no vuelve a
 detectarse y una IP editada a mano despues no se pisa. Todo el cambio queda
 anotado en el log:
 
 ```
 config.json: config heredada del modulo Advantech migrada al PLC Zelio.
-Cambios: MODBUS_CMD_MODE: <ausente> -> registro; ... MODBUS_HOST: 127.0.0.1 -> 192.158.1.80.
-IP del PLC: 192.158.1.80. Revisa MODBUS_HOST si esa maquina usa otra IP.
+Cambios: PLC_CMD_MODE: <ausente> -> registro; ... PLC_HOST: 127.0.0.1 -> 192.158.1.80.
+IP del PLC: 192.158.1.80. Revisa PLC_HOST si esa maquina usa otra IP.
 ```
 
-Si el PLC de esa maquina tiene otra IP, se edita `MODBUS_HOST` a mano una vez
+Si el PLC de esa maquina tiene otra IP, se edita `PLC_HOST` a mano una vez
 (el aviso del log lo recuerda). Ademas, si el `config.json` deja
 `MODO_DEV=true`, la app avisa al arrancar: en la PC de planta tiene que estar
 en `false` (si no, no pide huella).

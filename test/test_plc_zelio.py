@@ -1,5 +1,5 @@
 """
-test_modbus_zelio.py - Diagnostico del SR3NET01BD (Zelio Logic 2 + modulo
+test_plc_zelio.py - Diagnostico del SR3NET01BD (Zelio Logic 2 + modulo
 Ethernet SR3NET01BD) via Modbus TCP.
 
 El NET01BD NO expone coils individuales: expone 4 palabras de ENTRADA
@@ -13,10 +13,10 @@ Solo lectura por defecto: el script NO escribe nada salvo que se pida
 explicitamente con --escribir o --pulso (OJO: eso puede arrancar la maquina).
 
 Uso:
-    python test\\test_modbus_zelio.py --ip 192.158.1.80
-    python test\\test_modbus_zelio.py --ip 192.158.1.80 --seguir 20
-    python test\\test_modbus_zelio.py --ip 192.158.1.80 --escribir J1 1
-    python test\\test_modbus_zelio.py --ip 192.158.1.80 --pulso J1 --ms 300
+    python test\\test_plc_zelio.py --ip 192.158.1.80
+    python test\\test_plc_zelio.py --ip 192.158.1.80 --seguir 20
+    python test\\test_plc_zelio.py --ip 192.158.1.80 --escribir J1 1
+    python test\\test_plc_zelio.py --ip 192.158.1.80 --pulso J1 --ms 300
 """
 
 import argparse
@@ -78,12 +78,12 @@ def interpretar_contador(o):
 
 def main():
     parser = argparse.ArgumentParser(description="Diagnostico Modbus TCP Zelio")
-    parser.add_argument("--ip", default=config.MODBUS_CONFIG["host"],
+    parser.add_argument("--ip", default=config.PLC_CONFIG["host"],
                         help="IP del SR3NET01BD")
     parser.add_argument("--port", type=int,
-                        default=config.MODBUS_CONFIG["port"])
+                        default=config.PLC_CONFIG["port"])
     parser.add_argument("--unit", type=int,
-                        default=config.MODBUS_CONFIG["unit_id"])
+                        default=config.PLC_CONFIG["unit_id"])
     parser.add_argument("--seguir", type=int, default=0,
                         help="Vigila el contador N segundos (solo lectura)")
     parser.add_argument("--escribir", nargs=2, metavar=("J", "VALOR"),
@@ -96,7 +96,7 @@ def main():
     args = parser.parse_args()
 
     if not args.ip:
-        print("Sin IP: usa --ip o configura MODBUS_HOST en el .env")
+        print("Sin IP: usa --ip o configura PLC_HOST en el .env")
         return 1
 
     cliente = ModbusClient(args.ip, args.port, unit_id=args.unit,

@@ -2,9 +2,9 @@
 simulador_modbus.py - Emulador Modbus TCP (pruebas sin hardware).
 
 Servidor Modbus TCP que imita el hardware de planta para probar
-ModbusController, test_modbus.py y la GUI SIN PLC. Corre en un proceso
+PLCController, test_modbus.py y la GUI SIN PLC. Corre en un proceso
 aparte ("en paralelo") mientras la app se conecta por red
-(MODBUS_HOST=127.0.0.1).
+(PLC_HOST=127.0.0.1).
 
 Emula los DOS modos de comando del HAL:
 
@@ -16,7 +16,7 @@ Emula los DOS modos de comando del HAL:
                    en el PLC real.
 
 Comportamiento emulado:
-    - Registro contador (MODBUS_COUNTER_REGISTER, little-endian como el
+    - Registro contador (PLC_COUNTER_REGISTER, little-endian como el
       hardware real: palabra baja primero) que sube solo a `--velocidad`
       cortes/segundo y/o +1 por Enter. El wraparound del contador se replica
       como en el modulo real.
@@ -38,7 +38,7 @@ En la terminal del simulador (ademas del log de relevadores/contador):
 
 Despues, en OTRA terminal (apuntar la app al simulador):
     venv\\Scripts\\python test\\test_modbus.py --ip 127.0.0.1
-    o bien con MODBUS_HOST=127.0.0.1 en el .env para la GUI / ModbusController.
+    o bien con PLC_HOST=127.0.0.1 en el .env para la GUI / PLCController.
 """
 
 import argparse
@@ -255,7 +255,7 @@ def _bucle_comandos(banco):
 
 
 def main():
-    cfg = config.MODBUS_CONFIG
+    cfg = config.PLC_CONFIG
     parser = argparse.ArgumentParser(
         description="Emulador Modbus TCP (Advantech o Zelio SR3NET01BD)"
     )
@@ -270,7 +270,7 @@ def main():
                         help="Valor inicial del contador")
     parser.add_argument("--contador", type=int, default=None,
                         help="Direccion del registro contador "
-                             "(por defecto, MODBUS_COUNTER_REGISTER)")
+                             "(por defecto, PLC_COUNTER_REGISTER)")
     args = parser.parse_args()
 
     contador = (args.contador if args.contador is not None
