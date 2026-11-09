@@ -190,6 +190,12 @@ class PLCController:
                 log.error("pyModbusTCP no instalado; PLC en simulacion.")
                 self._simulacion = True
             else:
+                # Se deja rastro del destino: si la app no ve el PLC, el
+                # log dice a que host/puerto se esta intentando conectar.
+                log.info("PLC: conectando a %s:%s (modo %s, contador reg %s "
+                         "x%s palabras).", self._host, self._port,
+                         self._cmd_mode, self._counter_register,
+                         self._counter_words)
                 if iniciar_polling:
                     self._arrancar_polling()
 
@@ -213,6 +219,13 @@ class PLCController:
                 )
                 if not regs or len(regs) < self._counter_words:
                     cliente.close()
+                    # Lectura vacia: el PLC/emulador no respondio (timeout o
+                    # el puerto no es Modbus). Antes esto fallaba en SILENCIO
+                    # y no habia forma de saber por que la app no detectaba
+                    # el PLC, asi que se avisa en el log.
+                    log.warning("PLC sin conexion: lectura vacia del contador "
+                                "en %s:%s (reg %s).", self._host, self._port,
+                                self._counter_register)
                     return False
                 lectura = self._combinar_regs(regs)
                 self._cliente_plc = cliente

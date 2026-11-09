@@ -12,6 +12,7 @@ respaldos ante apagones dejaban de guardarse hasta reiniciar la app.
 """
 
 import time
+from collections import deque
 from datetime import datetime, timedelta
 
 import pytest
@@ -98,20 +99,51 @@ def test_checkpoint_se_reprograma_aunque_el_cuerpo_reviente(monkeypatch):
 # ----------------------------------------------------------------------
 
 class _ControladorTorre:
-    """Controlador minimo: solo responde si la maquina esta detenida."""
+    """Controlador minimo para la torre y el seguro anti-corrida."""
 
     def __init__(self, detenida):
         self.detenida = detenida
         self.torre = []
+        self.cortes = 0
+        self.excluidos = 0
 
     def maquina_detenida(self):
         return self.detenida
+
+    def maquina_pausada(self):
+        self.detenida = True
+
+    def reprisar_maquina(self):
+        self.detenida = False
 
     def establecer_torre(self, verde=False, ambar=False, roja=False):
         self.torre.append((verde, ambar, roja))
 
     def pulso_alarma(self):
         self.torre.append("ALARMA")
+
+    def cortes_totales(self):
+        return self.cortes
+
+    def cortes_excluidos(self):
+        return self.excluidos
+
+    def incorporar_excluidos(self, cantidad=None):
+        if cantidad is None:
+            n = self.excluidos
+        else:
+            n = min(max(int(cantidad), 0), self.excluidos)
+        self.cortes += n
+        self.excluidos = 0
+
+    def suspender_conteo(self):
+        self.excluidos = 0
+
+    def retomar_conteo(self):
+        self.excluidos = 0
+
+    def reiniciar_gracia_inactividad(self):
+        pass
 
 
 def _vista_torre(detenida=False, **attrs):
@@ -123,10 +155,19 @@ def _vista_torre(detenida=False, **attrs):
     vista.sesion_id = 7
     vista._modo_mantenimiento = False
     vista._modo_paro = False
+    vista._modo_paro_maquina_encendida = False
     vista._primera_pieza = False
     vista._en_paro = False
     vista._paro_inicio_momento = None
     vista._ultimo_color_rojo = None
+    vista._paro_autorizacion_pendiente = False
+    vista._modal_abierto = False
+    vista._trabajo = None
+    vista._muestras_rafaga = deque()
+    vista._ultimo_total_fisico = None
+    vista._rafaga_en_curso = False
+    vista._excluidos_previos_rafaga = 0
+    vista._tiene_permiso_iniciar_primera_pieza = lambda: False
     for clave, valor in attrs.items():
         setattr(vista, clave, valor)
     return vista
@@ -220,13 +261,37 @@ def test_torre_roja_en_mantenimiento_con_la_maquina_detenida(tol_60):
     assert vista._estado_torre() == (False, False, True)
 
 
-def test_torre_ambar_en_paro_de_zona_con_la_maquina_en_marcha():
-    """Zona 'maquina encendida': sigue cortando, asi que no hay roja."""
+def test_torre_roja_en_paro_de_zona_con_la_maquina_en_marcha(tol_60):
+    """Zona 'maquina encendida': la maquina sigue cortando, pero el paro sigue
+    abierto, asi que al vencer la tolerancia la torre va a ROJA + alarma.
+
+    La roja no significa 'maquina parada': significa 'paro pendiente por mas
+    del tiempo permitido'.
+    """
     vista = _vista_torre(
         detenida=False, _en_paro=True, _modo_paro=True,
         _paro_inicio_momento=time.time() - 120,
     )
-    assert vista._estado_torre() == (False, True, False)
+    assert vista._estado_torre() == (False, False, True)
+
+
+def test_torre_roja_en_primera_pieza_con_la_maquina_encendida(tol_60):
+    """Primera pieza con la maquina encendida: al vencer la tolerancia la
+    torre va a ROJA + alarma (salir del modo ya exige autorizacion)."""
+    vista = _vista_torre(
+        detenida=False, _primera_pieza=True,
+        _paro_inicio_momento=time.time() - 120,
+    )
+    assert vista._estado_torre() == (False, False, True)
+
+
+def test_torre_roja_en_mantenimiento_con_la_maquina_encendida(tol_60):
+    """Mantenimiento con la maquina encendida: tambien escala a ROJA."""
+    vista = _vista_torre(
+        detenida=False, _modo_mantenimiento=True,
+        _paro_inicio_momento=time.time() - 120,
+    )
+    assert vista._estado_torre() == (False, False, True)
 
 
 def test_torre_no_se_pone_roja_en_espera_de_trabajo():
@@ -284,10 +349,27 @@ def test_tolerancia_no_ancla_sin_paro_real():
     assert vista._paro_inicio_momento is None
 
 
-def test_tolerancia_se_rearma_al_volver_a_la_marcha():
+def test_tolerancia_no_se_borra_si_la_maquina_sigue_en_marcha():
+    """El ancla sobrevive a la maquina encendida durante el paro.
+
+    Hay paros en los que la maquina DEBE seguir en marcha (zona con
+    'maquina encendida', Mantenimiento, Primera pieza). Si el ancla se
+    borrara al volver a la marcha, la tolerancia no venceria nunca y la
+    roja + buzzer no se activarian.
+    """
     vista = _vista_torre(detenida=True, _en_paro=True,
                          _paro_inicio_momento=time.time() - 120)
     vista.controlador.detenida = False
+    vista._actualizar_tolerancia_paro()
+    assert vista._paro_inicio_momento is not None
+
+
+def test_tolerancia_se_rearma_al_resolver_el_paro():
+    """Resuelto el paro (ya no hay paro real), el ancla se borra: la alarma
+    del siguiente paro vuelve a contar desde cero."""
+    vista = _vista_torre(detenida=False, _en_paro=True,
+                         _paro_inicio_momento=time.time() - 120)
+    vista._en_paro = False
     vista._actualizar_tolerancia_paro()
     assert vista._paro_inicio_momento is None
 
@@ -338,6 +420,296 @@ def test_actualizar_torre_aplica_el_color_decidido():
 
     assert vista.controlador.torre == [(True, False, False)]
     assert vista._ultimo_color_rojo is None
+
+
+# ----------------------------------------------------------------------
+# Modal de autorizacion del paro: rojo + buzzer, ambar al autorizar
+# ----------------------------------------------------------------------
+
+
+def test_torre_roja_con_autorizacion_de_paro_pendiente():
+    vista = _vista_torre(
+        detenida=True, _en_paro=True,
+        _paro_autorizacion_pendiente=True,
+    )
+    assert vista._estado_torre() == (False, False, True)
+
+
+def test_actualizar_torre_dispara_alarma_al_abrir_modal_de_paro():
+    vista = _vista_torre(
+        detenida=True, _en_paro=True,
+        _paro_autorizacion_pendiente=True,
+    )
+    vista._actualizar_torre()
+    vista._actualizar_torre()
+    assert vista.controlador.torre.count("ALARMA") == 1
+
+
+def test_torre_ambar_al_autorizar_el_paro():
+    vista = _vista_torre(
+        detenida=True, _en_paro=True, _modo_paro=True,
+        _paro_autorizacion_pendiente=False,
+    )
+    assert vista._estado_torre() == (False, True, False)
+
+
+def test_torre_roja_al_autorizar_si_ya_vencio_la_tolerancia(tol_60):
+    vista = _vista_torre(
+        detenida=True, _en_paro=True, _modo_paro=True,
+        _paro_autorizacion_pendiente=False,
+        _paro_inicio_momento=time.time() - 120,
+    )
+    assert vista._estado_torre() == (False, False, True)
+
+
+def test_autorizar_no_reinicia_el_ancla_de_la_tolerancia():
+    vista = _vista_torre(
+        detenida=True, _en_paro=True, _modo_paro=True,
+        _paro_inicio_momento=time.time() - 30,
+    )
+    ancla = vista._paro_inicio_momento
+    vista._actualizar_tolerancia_paro()
+    assert vista._paro_inicio_momento == ancla
+
+
+def test_torre_roja_directa_al_abrir_el_modal_de_paro(tol_60):
+    """Con el modal abierto no pasa por ambar: verde -> rojo directo."""
+    vista = _vista_torre(
+        detenida=True, _en_paro=True,
+        _paro_autorizacion_pendiente=True,
+        _paro_inicio_momento=time.time(),
+    )
+    assert vista._estado_torre() == (False, False, True)
+
+
+def test_autorizar_tarde_rearma_el_buzzer(tol_60):
+    """Si la tolerancia vencio con el modal abierto, autorizar vuelve a sonar."""
+    vista = _vista_torre(
+        detenida=True, _en_paro=True, _modo_paro=True,
+        _paro_autorizacion_pendiente=True,
+        _paro_inicio_momento=time.time() - 120,
+        _ultimo_color_rojo="rojo",
+    )
+    vista.paro_id = 5
+    pulsos = []
+    vista._pulso_buzzer_plc = lambda: pulsos.append(1)
+    vista._refrescar_estado_maquina = lambda: None
+    vista._estado = lambda *args, **kwargs: None
+    vista._causa_descripcion = lambda causa_id: None
+
+    vista._autorizado_autenticado(7, "Ana", causa_id=1)
+
+    assert pulsos == [1]
+    assert vista._estado_torre() == (False, False, True)
+
+
+def test_autorizar_a_tiempo_no_rearma_el_buzzer(tol_60):
+    vista = _vista_torre(
+        detenida=True, _en_paro=True, _modo_paro=True,
+        _paro_autorizacion_pendiente=True,
+        _paro_inicio_momento=time.time(),
+        _ultimo_color_rojo="rojo",
+    )
+    vista.paro_id = 5
+    pulsos = []
+    vista._pulso_buzzer_plc = lambda: pulsos.append(1)
+    vista._refrescar_estado_maquina = lambda: None
+    vista._estado = lambda *args, **kwargs: None
+    vista._causa_descripcion = lambda causa_id: None
+
+    vista._autorizado_autenticado(7, "Ana", causa_id=1)
+
+    assert pulsos == []
+
+
+def test_mantenimiento_iniciado_rearma_el_buzzer_si_vencio(tol_60):
+    vista = _vista_torre(detenida=False)
+    vista.paro_id = 5
+    vista._modo_paro = True
+    vista._paro_inicio_momento = time.time() - 120
+    vista._ultimo_color_rojo = "rojo"
+    pulsos = []
+    vista._pulso_buzzer_plc = lambda: pulsos.append(1)
+    vista._fijar_switch = lambda *args, **kwargs: None
+    vista._refrescar_estado_maquina = lambda: None
+    vista._estado = lambda *args, **kwargs: None
+
+    vista._modo_mantenimiento_iniciado(7, "Ana", 8, "Mant", 1, None)
+
+    assert vista._modo_mantenimiento is True
+    assert pulsos == [1]
+
+
+# ----------------------------------------------------------------------
+# Ancla de la tolerancia: paro manual vs auto-paro por inactividad
+# ----------------------------------------------------------------------
+
+
+def _vista_pausable():
+    """Vista falsa para `_pausar_maquina` sin abrir modales ni widgets."""
+    vista = _vista_torre(detenida=False)
+    vista.paro_id = None
+    vista._folio_activo = lambda: None
+    vista._refrescar_estado_maquina = lambda: None
+    vista._abrir_paro_autorizacion = lambda: None
+    vista._estado = lambda *args, **kwargs: None
+    return vista
+
+
+def test_auto_paro_ancla_la_tolerancia_en_el_ultimo_corte(
+        monkeypatch, tol_60):
+    monkeypatch.setattr(
+        "src.gui.modulos.corte.inicio.paro_mixin.iniciar_paro",
+        lambda *args, **kwargs: 99,
+    )
+    vista = _vista_pausable()
+    vista._pausar_maquina(motivo="automatico", inicio_hace_s=120)
+    assert vista._paro_inicio_momento <= time.time() - 120
+    assert vista._estado_torre() == (False, False, True)
+
+
+def test_paro_manual_ancla_la_tolerancia_al_pulsar_paro(monkeypatch):
+    monkeypatch.setattr(
+        "src.gui.modulos.corte.inicio.paro_mixin.iniciar_paro",
+        lambda *args, **kwargs: 99,
+    )
+    vista = _vista_pausable()
+    antes = time.time()
+    vista._pausar_maquina()
+    assert antes <= vista._paro_inicio_momento <= time.time()
+    assert vista._en_paro is True
+
+
+def test_paro_pasa_de_verde_a_rojo_sin_ambar_antes_del_modal(monkeypatch):
+    """El primer refresco del paro ya es rojo: el modal se marca antes."""
+    monkeypatch.setattr(
+        "src.gui.modulos.corte.inicio.paro_mixin.iniciar_paro",
+        lambda *args, **kwargs: 99,
+    )
+    vista = _vista_pausable()
+    colores = []
+    vista._refrescar_estado_maquina = (
+        lambda: colores.append(vista._estado_torre())
+    )
+
+    vista._pausar_maquina()
+
+    assert colores == [(False, False, True)]
+
+
+# ----------------------------------------------------------------------
+# Seguro anti-corrida en TODOS los paros reales (buzzer Q6)
+# ----------------------------------------------------------------------
+
+
+def _vista_rafaga(**attrs):
+    vista = _vista_torre(detenida=True, **attrs)
+    vista._sonar_alarma = lambda: None
+    preguntas = []
+    vista._preguntar_corrida = lambda n, v: preguntas.append((n, v))
+    vista._preguntas = preguntas
+    return vista
+
+
+@pytest.mark.parametrize("attrs", [
+    {"_en_paro": True},
+    {"_en_paro": True, "_modo_paro": True},
+    {"_en_paro": False, "_modo_mantenimiento": True},
+    {"_en_paro": False, "_primera_pieza": True},
+])
+def test_rafaga_dispara_buzzer_y_pregunta_en_cualquier_paro(
+        monkeypatch, attrs):
+    from src import config
+
+    monkeypatch.setattr(config, "SEGURO_RAFAGA_SEGUNDOS", 7, raising=False)
+    monkeypatch.setattr(config, "SEGURO_RAFAGA_CORTES", 5, raising=False)
+    vista = _vista_rafaga(**attrs)
+
+    vista._verificar_rafaga_arranque()  # baseline en el contador actual
+    vista.controlador.cortes = 6
+    vista._verificar_rafaga_arranque()
+
+    assert vista._rafaga_en_curso is True
+    assert "ALARMA" in vista.controlador.torre
+    assert vista._preguntas == [(6, 7)]
+
+
+def test_rafaga_no_dispara_sin_paro_real(monkeypatch):
+    from src import config
+
+    monkeypatch.setattr(config, "SEGURO_RAFAGA_SEGUNDOS", 7, raising=False)
+    monkeypatch.setattr(config, "SEGURO_RAFAGA_CORTES", 5, raising=False)
+    vista = _vista_rafaga()  # sesion abierta pero sin paro (espera trabajo)
+
+    vista._verificar_rafaga_arranque()
+    vista.controlador.cortes = 10
+    vista._verificar_rafaga_arranque()
+
+    assert vista._rafaga_en_curso is False
+    assert vista._preguntas == []
+
+
+def test_total_fisico_suma_totales_y_excluidos():
+    vista = _vista_torre(detenida=True, _en_paro=True, _primera_pieza=True)
+    vista.controlador.cortes = 10
+    vista.controlador.excluidos = 3
+    assert vista._total_fisico() == 13
+
+
+def test_corrida_confirmada_en_modo_paro_incorpora_y_cierra():
+    vista = _vista_rafaga(
+        _en_paro=True, _modo_paro=True,
+        _modo_paro_maquina_encendida=True,
+    )
+    vista.controlador.cortes = 5
+    vista.controlador.excluidos = 6
+    vista._excluidos_previos_rafaga = 2
+    cerrado = []
+    vista._modo_paro_finalizado = lambda id_op, nombre: cerrado.append(
+        (id_op, nombre)
+    )
+    vista._refrescar_labels_cortes = lambda: None
+    vista._estado = lambda *args, **kwargs: None
+
+    vista._corrida_confirmada_paro(7, "Ana")
+
+    assert vista.controlador.cortes == 9   # 5 + (6 - 2)
+    assert vista.controlador.excluidos == 0
+    assert cerrado == [(7, "Ana")]
+
+
+def test_corrida_confirmada_en_paro_normal_no_incorpora():
+    vista = _vista_rafaga(_en_paro=True, _modo_paro=True)
+    vista.controlador.cortes = 6
+    vista._excluidos_previos_rafaga = 0
+    vista._modo_paro_finalizado = lambda id_op, nombre: None
+    vista._refrescar_labels_cortes = lambda: None
+    vista._estado = lambda *args, **kwargs: None
+
+    vista._corrida_confirmada_paro(7, "Ana")
+
+    assert vista.controlador.cortes == 6
+
+
+def test_corrida_confirmada_en_paro_no_autorizado_cierra_y_enciende(
+        monkeypatch):
+    vista = _vista_rafaga(_en_paro=True)
+    vista.paro_id = 42
+    finalizados = []
+    monkeypatch.setattr(
+        "src.gui.modulos.corte.inicio.seguridad_mixin.finalizar_paro",
+        lambda *args: finalizados.append(args),
+    )
+    vista._refrescar_estado_maquina = lambda: None
+    vista._refrescar_labels_cortes = lambda: None
+    vista._estado = lambda *args, **kwargs: None
+
+    vista._corrida_confirmada_paro(7, "Ana")
+
+    assert vista.paro_id is None
+    assert vista._en_paro is False
+    assert vista.controlador.detenida is False  # reprisar_maquina
+    assert finalizados == [(42, None, 7)]
 
 
 def test_enviar_easy_num_part_llama_al_servicio():

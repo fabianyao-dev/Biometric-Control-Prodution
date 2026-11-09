@@ -3,6 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src import config
 from src.hardware.biometric_service import BiometricService
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -13,13 +14,16 @@ def main():
         print("No se pudo abrir el lector. Conéctalo y reintenta.")
         return
 
+    print(f"Umbral configurado: {config.UMBRAL_DISIMILARIDAD} "
+          f"(FAR aprox. {config.UMBRAL_DISIMILARIDAD / 0x7FFFFFFF:.1e})")
     print("Captura #1: coloca la MISMA huella sobre el sensor...")
     cap1 = servicio.capturar_huella()
     if not cap1:
         print("Falló la captura #1.")
         servicio.cerrar()
         return
-    print(f"FMD #1 extraído ({len(cap1['fmd'])} bytes, {cap1['width']}x{cap1['height']} @ {cap1['dpi']}dpi)")
+    print(f"FMD #1 extraído ({len(cap1['fmd'])} bytes, "
+          f"{cap1['width']}x{cap1['height']} @ {cap1['dpi']}dpi)")
 
     print("Captura #2: coloca la MISMA huella otra vez...")
     cap2 = servicio.capturar_huella()
@@ -35,10 +39,11 @@ def main():
     resultado = servicio.identificar(cap1["fmd"], [cap2["fmd"]])
     if resultado:
         idx, s = resultado
-        print(f"Identificación 1:N -> candidato #{idx} con score {s} -> COINCIDE" if s <= 0x04000000
-              else f"Identificación 1:N -> candidato #{idx} con score {s} -> NO coincide (umbral)")
+        print(f"Identificación 1:N -> candidato #{idx} con score {s} -> "
+              f"COINCIDE (umbral {config.UMBRAL_DISIMILARIDAD})")
     else:
-        print("Identificación 1:N -> sin candidatos")
+        print(f"Identificación 1:N -> sin coincidencia "
+              f"(umbral {config.UMBRAL_DISIMILARIDAD})")
 
     servicio.cerrar()
 

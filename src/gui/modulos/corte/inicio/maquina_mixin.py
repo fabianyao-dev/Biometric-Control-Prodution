@@ -125,6 +125,7 @@ class MaquinaMixin:
         self.paro_id = None
         self._en_paro = False
         self._paro_idle_triggado = False
+        self._paro_autorizacion_pendiente = False
         self._primera_pieza = False
         self._primera_pieza_paro_id = None
         self._primera_pieza_inicio = None

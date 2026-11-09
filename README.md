@@ -133,6 +133,51 @@ desarrollo, sin `PLC_HOST`, el sistema corre completo en **modo simulación**
 
 ---
 
+## Probar el PLC sin hardware (emulador Modbus TCP)
+
+`test\simulador_plc.py` emula el PLC Zelio (palabras J1..J4 y O1..O4) por
+Modbus TCP en `127.0.0.1`: el contador de O1 sube solo, la app ve los
+comandos (MARCHA/PARO/torre) y el heartbeat, tal como con el PLC real.
+
+**Terminal 1 — emulador**
+
+```powershell
+venv\Scripts\python test\simulador_plc.py --port 5020 --velocidad 2
+```
+
+**Terminal 2 — la app apuntando al emulador** (en PowerShell; en `cmd` es
+`set PLC_HOST=127.0.0.1`)
+
+```powershell
+$env:PLC_HOST="127.0.0.1"
+$env:PLC_PORT="5020"
+$env:PLC_CMD_MODE="registro"
+$env:PLC_SIMULACION="0"
+$env:PLC_COUNTER_REGISTER="20"
+$env:PLC_COUNTER_WORDS="1"
+$env:MODO_DEV="true"
+venv\Scripts\python main.py
+```
+
+En la terminal del emulador: `Enter`/`+` = un corte manual, `c` = correr el
+contador, `p` = pausar, `v 5` = velocidad, `s` = ver el estado de J/O,
+`q` = salir.
+
+Si la app **no detecta** el emulador, casi siempre es una de estas dos:
+
+- el puerto no coincide: el emulador (`--port 5020`) y la app (`PLC_PORT`)
+  tienen que ser el mismo;
+- `PLC_HOST` sigue apuntando a la IP del PLC real del `.env`
+  (`192.158.1.80`): con esa IP la app se va al PLC de planta, no al emulador.
+
+Para ver lo que ve la app, en una tercera terminal:
+
+```powershell
+venv\Scripts\python test\monitoreo_zelio.py --ip 127.0.0.1 --port 5020 --hal
+```
+
+---
+
 ## Flujo de operación
 
 Estados de la máquina en la vista **Inicio**:
@@ -144,11 +189,21 @@ Estados de la máquina en la vista **Inicio**:
    `inicio_paro` se retrotrae al último corte o a la salida del último
    evento (el minuto muerto cuenta como paro). Aparte, la **tolerancia de la
    torre de luces** es `PRIMERA_PIEZA_TIMEOUT_S`: cualquier paro real
-   (manual, automático, modo PARO o Mantenimiento) se queda en ámbar ese
-   tiempo y luego pasa a **rojo con alarma/buzzer** hasta que se resuelve.
+   (manual, automático, modo PARO, Mantenimiento o Primera pieza) se queda en
+   ámbar ese tiempo y luego pasa a **rojo con alarma/buzzer** hasta que se
+   resuelve. La roja **no exige la máquina detenida**: en los paros donde la
+   máquina debe seguir en marcha (zona "máquina encendida", Mantenimiento,
+   Primera pieza) también escala a rojo + buzzer, porque avisa del paro
+   pendiente y no de la máquina parada.
 3. **PARO** → el operador (o un rol autorizado) elige la causa y coloca su
    huella; al autorizar, la máquina **reanuda**. El modal de paro **no se puede
-   cerrar** hasta autorizar.
+   cerrar** hasta autorizar y, mientras está abierto, la torre pasa de verde a
+   **roja con buzzer** directo (sin ámbar intermedio) desde el primer instante;
+   al autorizar vuelve la regla normal (**ámbar** si no venció la tolerancia,
+   **rojo** si ya venció) y, si ya venció, el buzzer **vuelve a sonar**.
+   Autorizar nunca reinicia la tolerancia. El **seguro anti-corrida** cubre
+   todos los paros reales y, si detecta cortes con el paro abierto, suena el
+   buzzer físico del PLC y pide huella para incorporarlos al conteo.
 4. **Cierre**: pulsar el botón de poder pide huella y cierra formalmente la
    sesión (se guarda el total de cortes).
 
@@ -212,7 +267,9 @@ desde la raíz del proyecto:
 | `test\test_fmd.py` | Dos capturas y compara 1:1 y 1:N. |
 | `test\test_flujo.py registrar <fmd> <nombre> \| identificar <fmd>` | Flujo contra la BD. |
 | `test\test_modbus.py` | Diagnóstico del módulo Advantech (coils + registro contador). Usa el `.env`; sin `PLC_HOST` sale limpio. |
-| `test\simulador_modbus.py` | Emulador Modbus TCP del módulo (contador auto-incremental + coils) para probar todo lo anterior SIN hardware. |
+| `test\simulador_modbus.py` | Emulador Modbus TCP del módulo Advantech (contador auto-incremental + coils) para probar todo lo anterior SIN hardware. |
+| `test\simulador_plc.py` | Emulador Modbus TCP del **PLC Zelio** (palabras J1..J4 / O1..O4). Es el que usa la app actual: ver [Probar el PLC sin hardware](#probar-el-plc-sin-hardware-emulador-modbus-tcp). |
+| `test\monitoreo_zelio.py --hal` | Consola en vivo de J/O con lo que ve la app (mismo HAL). |
 
 `test\test_modbus.py` admite flags: `--ip`, `--port`, `--reg`, `--words`,
 `--coil 0 --pulso` (pulso de 300 ms tipo botón),

@@ -375,6 +375,31 @@ def test_modo_simulacion_no_toca_la_red(monkeypatch):
     assert ctrl.en_simulacion() is True
 
 
+def test_una_lectura_vacia_avisa_en_el_log(monkeypatch, caplog):
+    """Si el PLC/emulador no responde, el fallo queda en el log.
+
+    Antes la lectura vacia (timeout) hacia fallar el enlace en SILENCIO y no
+    habia forma de saber por que la app no detectaba el PLC.
+    """
+
+    class ClienteMudo(ClienteFalso):
+        def read_holding_registers(self, reg_addr, reg_nb=1):
+            self.lecturas.append((reg_addr, reg_nb))
+            return None
+
+    ctrl, _ = _controlador(monkeypatch)
+    cliente = ClienteMudo()
+    monkeypatch.setattr(mod, "ModbusClient", lambda *a, **k: cliente)
+
+    with caplog.at_level("WARNING"):
+        ok = ctrl._conectar()
+
+    assert ok is False
+    assert ctrl.conectado() is False
+    assert "PLC sin conexion" in caplog.text
+    assert "10.0.0.1:502" in caplog.text
+
+
 @pytest.mark.parametrize("modo", ["coil", "registro"])
 def test_cleanup_es_idempotente(monkeypatch, modo):
     ctrl, cliente = _controlador(monkeypatch, cmd_mode=modo)

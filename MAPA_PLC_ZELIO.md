@@ -157,8 +157,8 @@ La PC **no puede escribir** las salidas O, asi que la torre viaja por los bits
 | Bit de J1 (dir 16) | Salida del PLC | Significado |
 |---|---|---|
 | bit2 (4) | Q3 | verde: maquina en marcha |
-| bit3 (8) | Q4 | ambar: detenida (cualquier causa) |
-| bit4 (16) | Q5 | roja: detenida mas alla del tiempo de tolerancia |
+| bit3 (8) | Q4 | ambar: detenida o paro abierto todavia dentro de la tolerancia |
+| bit4 (16) | Q5 | roja: paro abierto mas alla del tiempo de tolerancia |
 | bit5 (32) | Q6 | alarma: parpadeo de 3 s al ENTRAR en rojo |
 
 Requisitos del programa (FBD):
@@ -204,29 +204,54 @@ hacer read-modify-write), asi que en el cable se ven los valores: `1` marcha,
 verde+paro = `6`).
 
 
-Comportamiento de la app (`src/gui/inicio_view.py`, `_estado_torre`):
+Comportamiento de la app (`src/gui/modulos/corte/inicio/seguridad_mixin.py`,
+`_estado_torre`):
 
 | Situacion | Verde | Ambar | Roja |
 |---|---|---|---|
 | Sin sesion | 0 | 0 | 0 |
 | Maquina en marcha (produciendo) | 1 | 0 | 0 |
-| Primera pieza / Mantenimiento / PARO con maquina encendida por zona | 0 | 1 | 0 |
+| Primera pieza / Mantenimiento / PARO con maquina encendida por zona (dentro de la tolerancia) | 0 | 1 | 0 |
 | Esperando trabajo (maquina apagada, sin paro abierto) | 0 | 1 | 0 |
-| Paro real menos de `PRIMERA_PIEZA_TIMEOUT_S` | 0 | 1 | 0 |
+| Modal de autorizacion del paro abierto (causa/zona o huella) | 0 | 0 | 1 |
+| Paro real menos de `PRIMERA_PIEZA_TIMEOUT_S` (ya autorizado) | 0 | 1 | 0 |
 | Paro real mas de `PRIMERA_PIEZA_TIMEOUT_S` | 0 | 0 | 1 |
 
-"Paro real" = un PARO abierto (manual o automatico) o el modo PARO, mas el
-modo Mantenimiento con la maquina detenida. La tolerancia es la MISMA para
-todos (`PRIMERA_PIEZA_TIMEOUT_S`, configurable en `.env`/`config.json`), no
-solo para Primera pieza, y el ancla se toma al detenerse la maquina
-(autorizar el paro NO reinicia el conteo). La espera de trabajo no se pone
-roja: no hay paro que resolver. **No confundir** con `PARO_IDLE_TIMEOUT_S`
-(60 s, el auto-paro por inactividad con la maquina en marcha sin cortes):
-son dos tiempos distintos.
+Mientras el modal de autorizacion del paro esta abierto (selector de causa y
+zona + huella) la torre pasa de VERDE a ROJA con buzzer **directo**, sin un
+ambar intermedio, desde el primer instante: es un paro sin autorizar y no debe
+pasar desapercibido. Al autorizar con huella vuelve la regla normal: AMBAR si
+la tolerancia aun no vence, ROJO si ya vencio. Si ya vencio, el buzzer **vuelve
+a sonar** al autorizar (la roja no cambia de color y no habria transicion); en
+ningun caso autorizar reinicia el ancla de la tolerancia.
+
+"Paro real" = un PARO abierto (manual o automatico), el modo PARO, el modo
+Mantenimiento o el modo Primera pieza. La tolerancia es la MISMA para todos
+(`PRIMERA_PIEZA_TIMEOUT_S`, configurable en `.env`/`config.json`), no solo para
+Primera pieza, y el ancla se toma al detenerse la maquina (autorizar el paro NO
+reinicia el conteo).
+
+**La roja NO depende de que la maquina este detenida**: hay paros en los que
+la maquina DEBE seguir en marcha (zona con 'maquina encendida',
+Mantenimiento, Primera pieza) y la roja + alarma avisan de que el paro lleva
+demasiado tiempo abierto, no de que la maquina este parada. El ancla de la
+tolerancia se conserva mientras el paro siga abierto (se rearma al resolverlo).
+La espera de trabajo NO se pone roja: no hay paro que resolver. **No
+confundir** con `PARO_IDLE_TIMEOUT_S` (60 s, el auto-paro por inactividad con
+la maquina en marcha sin cortes): son dos tiempos distintos.
 
 La alarma (`J1` bit5 -> Q6) solo se dispara en la **transicion a rojo** y
 parpadea 500 ms encendida / 500 ms apagada durante 3 s (`TORRE_ALARMA_*`). La
 roja (`J1` bit4 -> Q5) **permanece** hasta que se sale del paro.
+
+El **seguro anti-corrida** vigila CUALQUIER paro real (PARO manual/automatico,
+MODO PARO, Mantenimiento y Primera pieza) con el contador fisico
+(`cortes_totales() + cortes_excluidos()`, monotono con el conteo normal o
+suspendido). Si detecta mas de `SEGURO_RAFAGA_CORTES` cortes en
+`SEGURO_RAFAGA_SEGUNDOS` suena el buzzer fisico (mismo pulso de Q6) mas el
+beep de la PC y pregunta "¿Ya empezo a correr?"; si el operador autoriza con
+huella, los cortes de la ventana pasan al conteo y el paro se resuelve. Un
+unico pulso de Q6 por rafaga (se rearma cuando la rafaga cede).
 
 Claves de configuracion (`PLC_CONFIG`, con sus variables de entorno):
 
@@ -245,9 +270,14 @@ Claves de configuracion (`PLC_CONFIG`, con sus variables de entorno):
 | Tolerancia ambar -> rojo de la torre | `PRIMERA_PIEZA_TIMEOUT_S` | 900 |
 | Auto-paro por inactividad (NO es la tolerancia de la torre) | `PARO_IDLE_TIMEOUT_S` | 60 (fijo en codigo) |
 
-Para probar sin PLC: `venv\Scripts\python test\simulador_modbus.py --modo
-registro` imprime cada escritura de J1 con los nombres (`VERDE`, `AMBAR`,
-`ROJA`, `ALARMA`) y cada conmutacion de J4.
+Para probar sin PLC: `venv\Scripts\python test\simulador_plc.py --port 5020`
+levanta el emulador Modbus TCP del Zelio (J1..J4 y O1..O4) e imprime cada
+escritura de J1 con los nombres (`VERDE`, `AMBAR`, `ROJA`, `ALARMA`), el
+heartbeat de J4 y el contador de O1. En otra terminal se apunta la app al
+emulador (`PLC_HOST=127.0.0.1`, `PLC_PORT=5020`, `PLC_CMD_MODE=registro`,
+`PLC_COUNTER_REGISTER=20`, `PLC_COUNTER_WORDS=1`, `PLC_SIMULACION=0`); el
+procedimiento completo esta en el README, seccion "Probar el PLC sin
+hardware".
 
 ## 5. Verificacion desde la PC
 

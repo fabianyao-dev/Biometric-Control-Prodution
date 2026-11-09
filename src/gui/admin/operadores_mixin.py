@@ -68,6 +68,7 @@ from src.database import (
     guardar_operador,
     guardar_zona,
     listar_causas_paro,
+    listar_fmds,
     listar_huellas_operador,
     listar_operadores_admin,
     listar_permisos,
@@ -448,18 +449,20 @@ class OperadoresMixin:
         self._actualizar_boton_captura()
 
     def _agregar_huella_captura(self, fmd):
-        if self._es_duplicada(fmd, self._huellas_captura):
-            self._lbl_huella(
-                "Esa huella ya se puso. Usa un dedo distinto.", "error"
-            )
+        error = self._mensaje_huella_duplicada(
+            fmd,
+            plantillas_extra=self._huellas_captura,
+        )
+        if error:
             if self._modo_cadena:
                 # En cadena no se corta: se vuelve a pedir un dedo distinto.
                 self._lbl_huella(
-                    "Esa huella ya se puso. Retira el dedo y coloca uno "
-                    "distinto...",
+                    f"{error} Retira el dedo y coloca uno distinto...",
                     "error",
                 )
                 self._encadenar_captura()
+            else:
+                self._lbl_huella(error, "error")
             return
         self._huellas_captura.append(fmd)
         n = len(self._huellas_captura)
@@ -507,14 +510,9 @@ class OperadoresMixin:
         )
 
     def _agregar_huella_operador(self, op_id, fmd):
-        existentes = [
-            f["huella_template"]
-            for f in listar_huellas_operador(op_id, con_template=True)
-        ]
-        if self._es_duplicada(fmd, existentes):
-            self._lbl_huellas(
-                "Esa huella ya está registrada para este operador.", "error"
-            )
+        error = self._mensaje_huella_duplicada(fmd, operador_id=op_id)
+        if error:
+            self._lbl_huellas(error, "error")
             return
         if agregar_huella(op_id, fmd):
             self._lbl_huellas("Huella agregada.", "exito")
@@ -523,11 +521,55 @@ class OperadoresMixin:
             self._lbl_huellas("No se pudo agregar la huella.", "error")
 
     def _reemplazar_huella(self, huella_id, fmd):
+        op_id, _ = self._operador_seleccionado()
+        error = self._mensaje_huella_duplicada(
+            fmd,
+            operador_id=op_id,
+            excluir_huella_id=huella_id,
+        )
+        if error:
+            self._lbl_huellas(error, "error")
+            return
         if reemplazar_huella(huella_id, fmd):
             self._lbl_huellas("Huella reemplazada.", "exito")
             self._recargar_huellas()
         else:
             self._lbl_huellas("No se pudo reemplazar la huella.", "error")
+
+    def _mensaje_huella_duplicada(
+        self,
+        fmd,
+        operador_id=None,
+        excluir_huella_id=None,
+        plantillas_extra=None,
+    ):
+        """Devuelve un mensaje si `fmd` ya esta registrada, o None.
+
+        Comprueba contra TODOS los operadores activos (no solo el actual):
+        una misma huella en dos operadores hace ambigua la identificacion
+        1:N y permitiria suplantar identidad. Las huellas del operador que
+        se esta editando se validan aparte para poder omitir la que se
+        reemplaza y para dar un mensaje mas preciso.
+        """
+        otras = list(plantillas_extra or [])
+        for fila in listar_fmds(activos_solo=True):
+            if operador_id is not None and fila[0] == operador_id:
+                continue
+            otras.append(fila[2])
+        if self._es_duplicada(fmd, otras):
+            return (
+                "Esa huella ya está registrada para otro operador. "
+                "Usa un dedo distinto."
+            )
+        if operador_id is not None:
+            propias = [
+                h["huella_template"]
+                for h in listar_huellas_operador(operador_id, con_template=True)
+                if excluir_huella_id is None or h["id"] != excluir_huella_id
+            ]
+            if self._es_duplicada(fmd, propias):
+                return "Esa huella ya está registrada para este operador."
+        return None
 
     def _es_duplicada(self, fmd, lista):
         for otra in lista:

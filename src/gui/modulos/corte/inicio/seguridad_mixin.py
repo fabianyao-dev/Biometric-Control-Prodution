@@ -72,13 +72,17 @@ class SeguridadMixin:
 
         La torre pasa de ambar a ROJA cuando el paro lleva mas de
         `PRIMERA_PIEZA_TIMEOUT_S` (la "tolerancia de paro" del .env). El
-        ancla se toma en cuanto hay un paro real con la maquina DETENIDA,
-        sin importar su origen (PARO manual, auto-paro por inactividad,
-        modo PARO o Mantenimiento); al volver a la marcha se rearma para
-        que la alarma suene en el SIGUIENTE paro.
+        ancla se toma en cuanto hay un paro real, sin importar su origen
+        (PARO manual, auto-paro por inactividad, modo PARO, Mantenimiento o
+        Primera pieza); se rearma cuando el paro se RESUELVE, para que la
+        alarma suene en el SIGUIENTE paro.
+
+        OJO: la maquina puede seguir EN MARCHA durante el paro (zona con
+        'maquina encendida', Mantenimiento o Primera pieza). El ancla NO se
+        borra por eso: si se borrara, la tolerancia no venceria nunca en
+        esos paros y la roja + buzzer no llegarian a activarse.
         """
-        if (self.sesion_id is None or not self._paro_real_abierto()
-                or self._maquina_en_marcha()):
+        if self.sesion_id is None or not self._paro_real_abierto():
             self._paro_inicio_momento = None
             return
         if self._paro_inicio_momento is None:
@@ -156,14 +160,60 @@ class SeguridadMixin:
                 return restante
         return None
 
-    def _verificar_rafaga_arranque(self):
-        """Detecta una corrida no autorizada en Primera pieza o Mantenimiento.
+    def _conteo_paro_suspendido(self):
+        """True si el paro actual excluye los cortes del total (Primera
+        pieza, Mantenimiento o MODO PARO con zona 'maquina encendida')."""
+        return bool(
+            self._primera_pieza
+            or self._modo_mantenimiento
+            or (self._modo_paro and self._modo_paro_maquina_encendida)
+        )
 
-        Con el conteo suspendido, si dentro de SEGURO_RAFAGA_SEGUNDOS entran
-        mas de SEGURO_RAFAGA_CORTES cortes excluidos, suena una alarma y
-        pregunta al operador si la maquina ya empezo a correr; al confirmar
-        y autorizar por huella (doble en Mantenimiento), lo hecho durante el
-        modo pasa al conteo.
+    def _total_fisico(self):
+        """Contador fisico monotono de cortes: totales + excluidos.
+
+        Sirve para detectar rafagas tanto con el conteo normal como con el
+        suspendido. `incorporar_excluidos()` mueve cortes de excluidos a
+        totales sin alterar la suma, asi que el contador no retrocede al
+        confirmar una corrida.
+        """
+        return (int(self.controlador.cortes_totales())
+                + int(self.controlador.cortes_excluidos()))
+
+    def _pulso_buzzer_plc(self):
+        """Pulso del buzzer fisico de la torre (Q6). Nunca rompe la UI."""
+        try:
+            if hasattr(self.controlador, "pulso_alarma"):
+                self.controlador.pulso_alarma()
+        except Exception:  # noqa: BLE001 - sin buzzer no debe fallar nada
+            log.debug("pulso_alarma fallo", exc_info=True)
+
+    def _etiqueta_paro_actual(self):
+        """Nombre legible del paro/modo activo para los mensajes del seguro."""
+        if self._modo_mantenimiento:
+            return "Mantenimiento"
+        if self._primera_pieza:
+            return "Primera pieza"
+        if self._modo_paro:
+            return "MODO PARO"
+        return "PARO"
+
+    def _rearmar_rafaga(self):
+        """Limpia la ventana del seguro anti-corrida al salir de un paro."""
+        self._muestras_rafaga.clear()
+        self._ultimo_total_fisico = None
+        self._rafaga_en_curso = False
+        self._excluidos_previos_rafaga = 0
+
+    def _verificar_rafaga_arranque(self):
+        """Detecta una corrida no autorizada durante CUALQUIER paro real.
+
+        Con el conteo normal o suspendido, si dentro de
+        SEGURO_RAFAGA_SEGUNDOS entran mas de SEGURO_RAFAGA_CORTES cortes
+        fisicos (totales + excluidos), suena el buzzer de la torre y pregunta
+        al operador si la maquina ya empezo a correr; al confirmar y
+        autorizar por huella (doble en Mantenimiento), los cortes de la
+        ventana pasan al conteo y el paro se resuelve.
         """
         ventana = config.SEGURO_RAFAGA_SEGUNDOS
         umbral = config.SEGURO_RAFAGA_CORTES
@@ -176,29 +226,28 @@ class SeguridadMixin:
         # folio arranca al confirmar). En MANTENIMIENTO nunca se suprime.
         if (self._primera_pieza and self._trabajo is None
                 and self._tiene_permiso_iniciar_primera_pieza()):
-            self._muestras_rafaga.clear()
-            self._ultimo_excluidos = 0
-            self._rafaga_en_curso = False
-            self._excluidos_previos_rafaga = 0
+            self._rearmar_rafaga()
             return
-        if ((not self._primera_pieza and not self._modo_mantenimiento)
-                or self._en_paro
-                or self.sesion_id is None or not self._maquina_en_marcha()):
-            self._muestras_rafaga.clear()
-            self._ultimo_excluidos = 0
-            self._rafaga_en_curso = False
-            self._excluidos_previos_rafaga = 0
+        # Solo vigila paros REALES: paro manual/automatico, MODO PARO,
+        # Mantenimiento y Primera pieza. La espera de trabajo no es un paro
+        # que resolver y no debe disparar la alarma.
+        if not self._paro_real_abierto() or self.sesion_id is None:
+            self._rearmar_rafaga()
             return
         if self._modal_abierto:
             return  # Otro modal en curso; evaluar al cerrarse.
-        excluidos = self.controlador.cortes_excluidos()
-        delta = excluidos - self._ultimo_excluidos
-        self._ultimo_excluidos = excluidos
+        actual = self._total_fisico()
+        if self._ultimo_total_fisico is None:
+            self._ultimo_total_fisico = actual
+            return
+        delta = actual - self._ultimo_total_fisico
+        self._ultimo_total_fisico = actual
         ahora = time.time()
         if delta > 0:
             self._muestras_rafaga.append((ahora, delta))
         elif delta < 0:
-            # Reinicio de temporales (reentrada al modo): baseline nuevo.
+            # Reinicio del contador fisico (inicio de sesion o cambio de
+            # modalidad de conteo): baseline nuevo.
             self._muestras_rafaga.clear()
         limite = ahora - ventana
         while self._muestras_rafaga and self._muestras_rafaga[0][0] < limite:
@@ -210,14 +259,21 @@ class SeguridadMixin:
         if self._rafaga_en_curso:
             return  # Ya se pregunto por esta rafaga; no insistir.
         self._rafaga_en_curso = True
-        # Lo excluido antes de la ventana son piezas de prueba: al confirmar
+        # Lo cortado ANTES de la ventana son piezas de prueba: al confirmar
         # la corrida solo se incorporan los de la ventana en adelante
         # (incluidos los que ocurran mientras el modal esta abierto).
-        self._excluidos_previos_rafaga = excluidos - en_ventana
-        modo = "Mantenimiento" if self._modo_mantenimiento else "Primera pieza"
+        if self._conteo_paro_suspendido():
+            self._excluidos_previos_rafaga = max(
+                int(self.controlador.cortes_excluidos()) - en_ventana, 0
+            )
+        else:
+            self._excluidos_previos_rafaga = 0
+        etiqueta = self._etiqueta_paro_actual()
         log.warning("Rafaga en %s: %s cortes en %s s "
                     "(%s previos quedan como prueba)",
-                    modo, en_ventana, ventana, self._excluidos_previos_rafaga)
+                    etiqueta, en_ventana, ventana,
+                    self._excluidos_previos_rafaga)
+        self._pulso_buzzer_plc()
         self._sonar_alarma()
         self._preguntar_corrida(en_ventana, ventana)
 
@@ -241,7 +297,7 @@ class SeguridadMixin:
 
     def _preguntar_corrida(self, n_cortes, ventana):
         """Modal '¿Ya empezo a correr?' del seguro anti-corrida."""
-        modo = "Mantenimiento" if self._modo_mantenimiento else "Primera pieza"
+        modo = self._etiqueta_paro_actual()
         self._modal_abierto = True
         try:
             caja = QMessageBox(self.controller)
@@ -271,27 +327,44 @@ class SeguridadMixin:
         """Autorizacion por huella para contar la corrida detectada.
 
         En Mantenimiento PRIMERO el personal de mantenimiento y LUEGO el
-        operador; en Primera pieza solo el operador."""
+        operador; en Primera pieza y en el PARO/MODO PARO solo el operador
+        (dueno de la sesion o Supervisor/Admin)."""
         if self._modo_mantenimiento:
             self._pedir_huella_mantenimiento(
                 self._corrida_mantenimiento_paso_operador,
                 titulo="REANUDACION MANTENIMIENTO"
             )
             return
-        modal = HuellaModal(
-            self.controller,
-            self.biometrico,
-            titulo="CONFIRMAR CORRIDA",
-            mensaje="Coloca tu huella para contar estos cortes como "
-                    "produccion de la sesion.",
-            validador=self._validar_autorizacion_paro,
-            on_autenticado=self._corrida_confirmada,
-            on_cancelar=lambda: self._estado(
-                "Confirmacion cancelada; el modo se mantiene activo.",
-                "info",
-            ),
-            mostrar_cancelar=True,
-        )
+        if self._primera_pieza:
+            modal = HuellaModal(
+                self.controller,
+                self.biometrico,
+                titulo="CONFIRMAR CORRIDA",
+                mensaje="Coloca tu huella para contar estos cortes como "
+                        "produccion de la sesion.",
+                validador=self._validar_autorizacion_paro,
+                on_autenticado=self._corrida_confirmada,
+                on_cancelar=lambda: self._estado(
+                    "Confirmacion cancelada; el modo se mantiene activo.",
+                    "info",
+                ),
+                mostrar_cancelar=True,
+            )
+        else:
+            modal = HuellaModal(
+                self.controller,
+                self.biometrico,
+                titulo="CONFIRMAR CORRIDA",
+                mensaje="Coloca tu huella para contar estos cortes como "
+                        "produccion de la sesion y salir del paro.",
+                validador=self._validar_autorizacion_paro,
+                on_autenticado=self._corrida_confirmada_paro,
+                on_cancelar=lambda: self._estado(
+                    "Confirmacion cancelada; el paro se mantiene abierto.",
+                    "info",
+                ),
+                mostrar_cancelar=True,
+            )
         modal.exec()
 
     def _corrida_confirmada(self, id_operador, nombre, causa_id=None):
@@ -318,29 +391,112 @@ class SeguridadMixin:
                  "(%s previos descartados como prueba)",
                  nombre, n_excluidos, self._excluidos_previos_rafaga)
 
+    def _corrida_confirmada_paro(self, id_operador, nombre, causa_id=None):
+        """Corrida confirmada en un PARO/MODO PARO: incorpora los cortes de
+        la ventana (si el conteo estaba suspendido) y resuelve el paro.
+
+        - MODO PARO: se cierra con su causa/zona y, si la maquina estaba
+          detenida, se enciende (mismo camino que 'SALIR DE PARO').
+        - Paro aun NO autorizado (defensivo): se cierra sin causa y se
+          reanuda la produccion.
+        En un PARO normal el conteo no estaba suspendido: los cortes ya
+        estan en el total de la sesion.
+        """
+        suspendido = self._conteo_paro_suspendido()
+        a_incorporar = 0
+        if suspendido:
+            a_incorporar = max(
+                self.controlador.cortes_excluidos()
+                - self._excluidos_previos_rafaga,
+                0,
+            )
+            self.controlador.incorporar_excluidos(a_incorporar)
+        etiqueta = self._etiqueta_paro_actual()
+        if self._modo_paro:
+            self._modo_paro_finalizado(id_operador, nombre)
+        else:
+            if self.paro_id is not None:
+                finalizar_paro(self.paro_id, None, id_operador)
+            self.paro_id = None
+            self._en_paro = False
+            self._paro_idle_triggado = False
+            self._paro_inicio_momento = None
+            self._ultimo_color_rojo = None
+            self.controlador.retomar_conteo()
+            self.controlador.reprisar_maquina()
+            self.controlador.reiniciar_gracia_inactividad()
+            self._refrescar_estado_maquina()
+        self._refrescar_labels_cortes()
+        if suspendido:
+            detalle = f"{a_incorporar} cortes incorporados al conteo. "
+        else:
+            detalle = "Los cortes ya estaban en el total de la sesion. "
+        self._estado(
+            f"Corrida confirmada por {nombre}: {detalle}"
+            "Paro resuelto; la maquina continua en marcha.",
+            "exito",
+        )
+        log.info("Corrida en %s confirmada por %s: %s cortes incorporados "
+                 "(%s previos descartados como prueba)",
+                 etiqueta, nombre, a_incorporar,
+                 self._excluidos_previos_rafaga)
+
     def _estado_torre(self):
         """Decide el estado de la torre (funcion pura, testable).
 
         - Sin sesion: apagada.
-        - Maquina en marcha: VERDE, o AMBAR si hay un modo que suspende la
-          produccion (Primera pieza, Mantenimiento o PARO con la maquina
-          encendida por zona).
-        - Maquina detenida con un paro real: AMBAR dentro de la tolerancia y
-          ROJA (mas la alarma de Q6) al vencerla.
-        - Maquina detenida sin paro real (espera de trabajo, Primera pieza
-          con la maquina apagada): AMBAR. No se pone roja porque no hay
-          paro que resolver y no debe estar sonando entre trabajos.
+        - El modal de autorizacion del paro sigue abierto (causa/zona o
+          huella): ROJA + alarma desde el primer instante, sin pasar por el
+          ambar ni esperar la tolerancia.
+        - Hay un paro pendiente por resolver y ya vencio la tolerancia: ROJA
+          (mas la alarma de Q6). OJO: esto NO depende de que la maquina este
+          detenida. Hay paros en los que la maquina DEBE seguir en marcha
+          (zona con 'maquina encendida', Mantenimiento, Primera pieza): la
+          roja avisa de que el paro lleva demasiado tiempo abierto, no de
+          que la maquina este parada.
+        - Maquina en marcha sin paro vencido: VERDE, o AMBAR si hay un modo
+          que suspende la produccion (Primera pieza, Mantenimiento o PARO
+          con la maquina encendida por zona).
+        - Maquina detenida sin paro real (espera de trabajo): AMBAR. No se
+          pone roja porque no hay paro que resolver y no debe estar sonando
+          entre trabajos.
         """
         if not getattr(self, "sesion_id", None):
             return (False, False, False)
+        # El modal de autorizacion del paro fuerza ROJA + buzzer mientras el
+        # operador elige la causa y autoriza con huella. Se marca ANTES del
+        # primer refresco del paro para que la torre pase de verde a rojo
+        # directo (sin un ambar transitorio).
+        if getattr(self, "_paro_autorizacion_pendiente", False):
+            return (False, False, True)
+        # La roja se decide DESPUES: un paro vencido sigue siendo un paro
+        # vencido aunque la maquina haya quedado encendida (zona con
+        # 'maquina encendida', Mantenimiento o Primera pieza).
+        if self._paro_real_abierto() and self._tolerancia_paro_vencida():
+            return (False, False, True)
         if self._maquina_en_marcha():
             if (self._modo_mantenimiento or self._modo_paro
                     or self._primera_pieza):
                 return (False, True, False)
             return (True, False, False)
-        if self._paro_real_abierto() and self._tolerancia_paro_vencida():
-            return (False, False, True)
         return (False, True, False)
+
+    def _rearmar_buzzer_si_paro_vencido(self):
+        """Vuelve a sonar si el paro autorizado sigue fuera de tolerancia.
+
+        El aviso de Q6 solo se dispara al ENTRAR en rojo. Si la torre ya
+        estaba roja cuando se autorizo (la tolerancia vencio con el modal
+        abierto), no hay transicion nueva y el operador no oiria el segundo
+        aviso. Aqui se rearma UNA vez, sin tocar el ancla de la tolerancia.
+        """
+        if not self._tolerancia_paro_vencida():
+            return
+        if getattr(self, "_ultimo_color_rojo", None) != "rojo":
+            # Todavia no estaba roja: la transicion de `_actualizar_torre`
+            # dispara el pulso por si sola. Solo se fuerza la evaluacion.
+            self._actualizar_torre()
+            return
+        self._pulso_buzzer_plc()
 
     def _tolerancia_paro_vencida(self):
         """True si el paro lleva mas de `PRIMERA_PIEZA_TIMEOUT_S`.

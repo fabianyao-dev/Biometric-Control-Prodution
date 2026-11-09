@@ -188,10 +188,19 @@ class ParoMixin:
         self._en_paro = True
         # Ancla de la torre: el paro arranca aqui aunque el operador tarde en
         # autorizarlo (pasada la tolerancia se enciende la roja y la alarma).
+        # En el auto-paro por inactividad `inicio_hace_s` retrasa el ancla al
+        # ultimo corte/arranque real, para que la tolerancia no empiece a
+        # contar recien cuando salta el modal. Autorizar NUNCA la reinicia.
         if self._paro_inicio_momento is None:
             self._paro_inicio_momento = time.time()
+            if inicio_hace_s:
+                self._paro_inicio_momento -= float(inicio_hace_s)
         self.paro_id = iniciar_paro(self.sesion_id, self._folio_activo(),
                                     inicio_hace_s=inicio_hace_s)
+        # El modal de autorizacion se abre justo despues: marcar el aviso
+        # ANTES del refresco para que la torre pase de verde a rojo directo,
+        # sin un ambar transitorio.
+        self._paro_autorizacion_pendiente = True
         self._refrescar_estado_maquina()
         log.info("Paro %s registrado (%s)", self.paro_id, motivo)
         self._estado("Maquina en PARO. Indica el motivo y autoriza.", "procesando")
@@ -200,6 +209,10 @@ class ParoMixin:
     def _abrir_paro_autorizacion(self):
         causas = listar_causas_paro(activas_solo=True)
         if not causas:
+            # Sin modal no hay autorizacion pendiente: liberar la torre para
+            # que vuelva a la regla normal (paro sin autorizar).
+            self._paro_autorizacion_pendiente = False
+            self._actualizar_torre()
             caja = QMessageBox(self.controller)
             caja.setWindowTitle("Sin causas")
             caja.setText("No hay causas de paro configuradas. Ve a Administracion.")
@@ -235,6 +248,11 @@ class ParoMixin:
                     titulo="AUTORIZACION", zona_maquina=zona_maquina,
                 )
 
+        # Torre ROJA + buzzer mientras el operador elige la causa y autoriza
+        # con huella. Al cerrar el flujo (autorizado o no) se libera y vuelve
+        # la regla normal: ambar si la tolerancia no vencio, rojo si ya vencio.
+        self._paro_autorizacion_pendiente = True
+        self._actualizar_torre()
         self._modal_abierto = True
         try:
             modal = HuellaModal(
@@ -256,6 +274,8 @@ class ParoMixin:
             modal.exec()
         finally:
             self._modal_abierto = False
+            self._paro_autorizacion_pendiente = False
+            self._actualizar_torre()
 
     def _pedir_huella_reanudacion(self, causa_id=None, zona_id=None,
                                   causa_desc=None, zona_nombre=None,
@@ -347,7 +367,10 @@ class ParoMixin:
         self._paro_idle_triggado = False
         # El ancla de la torre ya la fijo `_pausar_maquina` (o la fija
         # `_actualizar_tolerancia_paro` en el siguiente ciclo): autorizar el
-        # paro NO reinicia la tolerancia ni rearma la alarma.
+        # paro NO reinicia la tolerancia. Lo unico que se hace aqui es VOLVER
+        # A SONAR si la tolerancia ya vencio mientras el modal estaba abierto
+        # (la torre ya estaba roja y no habria transicion nueva).
+        self._rearmar_buzzer_si_paro_vencido()
         if zona_maquina:
             self.controlador.reprisar_maquina()
             self.controlador.suspender_conteo()
@@ -396,11 +419,15 @@ class ParoMixin:
         """True si hay un paro registrado que la torre debe vigilar.
 
         Cubre el PARO antes y despues de autorizarlo (`_en_paro` /
-        `_modo_paro`) y el modo Mantenimiento: son paros que alguien tiene
-        que resolver. NO cubre la espera de trabajo ni Primera pieza con la
-        maquina apagada, donde no hay paro, solo la maquina esperando el
-        siguiente folio.
+        `_modo_paro`), el modo Mantenimiento y el modo Primera pieza: son
+        paros que alguien tiene que resolver (cada uno con su propio cierre
+        y su autorizacion) y por los que la torre debe escalate a roja +
+        alarma al vencer la tolerancia, INDEPENDIENTEMENTE de si la maquina
+        quedo encendida (zona con 'maquina encendida', Mantenimiento o
+        Primera pieza). NO cubre la espera de trabajo (paro implicito entre
+        trabajos): ahi no hay nada que resolver y no debe estar sonando la
+        alarma entre trabajos.
         """
         return bool(self._en_paro or self._modo_paro
-                    or self._modo_mantenimiento)
+                    or self._modo_mantenimiento or self._primera_pieza)
 

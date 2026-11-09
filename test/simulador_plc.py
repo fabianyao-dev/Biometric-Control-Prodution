@@ -31,6 +31,15 @@ Uso:
     venv\\Scripts\\python test\\simulador_plc.py --velocidad 0     # solo cortes manuales (Enter)
     venv\\Scripts\\python test\\simulador_plc.py --inicial 500     # arrancar con 500 cortes
 
+Para apuntar la APP a este emulador (en otra terminal, PowerShell):
+    $env:PLC_HOST="127.0.0.1"
+    $env:PLC_PORT="5020"          # el mismo puerto que --port del emulador
+    $env:PLC_CMD_MODE="registro"
+    $env:PLC_SIMULACION="0"
+    $env:PLC_COUNTER_REGISTER="20"
+    $env:PLC_COUNTER_WORDS="1"
+    venv\\Scripts\\python main.py
+
 Comandos en la consola del simulador:
     Enter o +      +1 corte manual (incrementa O1 y pulsa O2)
     c              correr contador automatico
@@ -55,10 +64,12 @@ from pyModbusTCP.server import DataBank, ModbusServer
 
 from src import config
 
-sys.stdout.reconfigure(encoding="utf-8")
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, OSError):  # consola/IDE que no permite reconfigurar
+    pass
 
 J_BASE = 16   # J1..J4 (dirs 16, 17, 18, 19)
-O_BASE = 20   # O1..O4 (dirs 20, 21, 22, 23)
 MAX_CONTADOR_16 = 65535
 
 
@@ -81,15 +92,23 @@ class BancoZelioPLC(DataBank):
         self._acumulado = 0.0
         self._auto = self._velocidad_objetivo > 0
 
-        # Estado del PLC
+        # Estado del PLC. `_estado_lock` protege SOLO las variables propias
+        # del emulador. OJO: nunca envolver una llamada a DataBank
+        # (`set_holding_registers`/`get_holding_registers`) con
+        # `_h_regs_lock`: esos metodos ya toman ese Lock por dentro y no es
+        # reentrante, asi que el emulador se quedaba bloqueado en el primer
+        # corte (el servidor dejaba de responder y la app lo veia caido).
+        self._estado_lock = threading.RLock()
         self._maquina_marcha = False
         self._ultimo_heartbeat = None
         self._hb_valor = 0
         self._j1_previo = 0
+        self._pulso_gen = 0
 
         # Inicializar palabras J (16..19) y O (20..23) en 0
         self.set_holding_registers(J_BASE, [0, 0, 0, 0])
-        self.set_holding_registers(O_BASE, [self._contador, 0, 0, 0])
+        self.set_holding_registers(self._dir_contador,
+                                   [self._contador, 0, 0, 0])
 
         self._stop = threading.Event()
         self._th_contador = None
@@ -103,21 +122,28 @@ class BancoZelioPLC(DataBank):
     def sumar_cortes(self, cantidad=1):
         if cantidad <= 0:
             return
-        with self._h_regs_lock:
+        with self._estado_lock:
             self._contador = (self._contador + cantidad) & MAX_CONTADOR_16
-            # O1: contador, O2: pulso de corte activo
-            self.set_holding_registers(O_BASE, [self._contador, 1])
+            self._pulso_gen += 1
+            generacion = self._pulso_gen
+            contador = self._contador
+        # O1: contador, O2: pulso de corte activo.
+        self.set_holding_registers(self._dir_contador, [contador, 1])
 
         _log(
             f"[{_marca()}] +{cantidad} corte(s) -> "
             f"O1 (contador) = {self._contador} | O2 = 1 (pulso)"
         )
 
-        # Apagar el pulso O2 tras 150 ms para simular el comportamiento real del PLC
+        # Apagar el pulso O2 tras 150 ms para simular el comportamiento real
+        # del PLC. Si entretanto llega otro corte, el pulso nuevo manda y este
+        # hilo no lo apaga (por eso se guarda la generacion).
         def _apagar_pulso():
             time.sleep(0.15)
-            with self._h_regs_lock:
-                self.set_holding_registers(O_BASE + 1, [0])
+            with self._estado_lock:
+                if generacion != self._pulso_gen:
+                    return
+                self.set_holding_registers(self._dir_contador + 1, [0])
 
         threading.Thread(target=_apagar_pulso, daemon=True).start()
 
@@ -131,50 +157,65 @@ class BancoZelioPLC(DataBank):
             dt = ahora - prev
             prev = ahora
 
-            if self._auto:
-                self._acumulado += self._velocidad_objetivo * dt
-                if self._acumulado >= 1.0:
-                    cortes = int(self._acumulado)
-                    self._acumulado -= cortes
-                    self.sumar_cortes(cortes)
+            with self._estado_lock:
+                auto = self._auto
+                cortes = 0
+                if auto:
+                    self._acumulado += self._velocidad_objetivo * dt
+                    if self._acumulado >= 1.0:
+                        cortes = int(self._acumulado)
+                        self._acumulado -= cortes
+            if cortes:
+                self.sumar_cortes(cortes)
 
             # Reporte periodico en consola
             if ahora >= prox_reporte:
                 prox_reporte = ahora + 5.0
-                estado = "CORRIENDO" if self._auto else "PAUSADO"
-                maquina = "EN MARCHA" if self._maquina_marcha else "DETENIDA (PARO)"
+                with self._estado_lock:
+                    estado = "CORRIENDO" if self._auto else "PAUSADO"
+                    maquina = ("EN MARCHA" if self._maquina_marcha
+                               else "DETENIDA (PARO)")
+                    contador = self._contador
                 _log(
-                    f"[{_marca()}] [ZELIO] Contador O1: {self._contador} "
+                    f"[{_marca()}] [ZELIO] Contador O1: {contador} "
                     f"({estado}) | Maquina: {maquina}"
                 )
 
     def reanudar_contador(self):
-        self._auto = True
-        self._acumulado = 0.0
-        _log(f"[{_marca()}] Contador automatico: CORRIENDO ({self._velocidad_objetivo} cortes/seg)")
+        with self._estado_lock:
+            self._auto = True
+            self._acumulado = 0.0
+            velocidad = self._velocidad_objetivo
+        _log(f"[{_marca()}] Contador automatico: CORRIENDO ({velocidad} cortes/seg)")
 
     def pausar_contador(self):
-        self._auto = False
+        with self._estado_lock:
+            self._auto = False
         _log(f"[{_marca()}] Contador automatico: PAUSADO")
 
     def cambiar_velocidad(self, velocidad):
-        self._velocidad_objetivo = max(0.0, float(velocidad))
-        if self._velocidad_objetivo > 0:
+        with self._estado_lock:
+            self._velocidad_objetivo = max(0.0, float(velocidad))
+            nueva = self._velocidad_objetivo
+        if nueva > 0:
             self.reanudar_contador()
         else:
             self.pausar_contador()
-        _log(f"[{_marca()}] Velocidad ajustada: {self._velocidad_objetivo} cortes/seg")
+        _log(f"[{_marca()}] Velocidad ajustada: {nueva} cortes/seg")
 
     def resetear_contador(self):
-        with self._h_regs_lock:
+        with self._estado_lock:
             self._contador = 0
-            self.set_holding_registers(O_BASE, [0])
+        self.set_holding_registers(self._dir_contador, [0])
         _log(f"[{_marca()}] Contador O1 reiniciado a 0")
 
     def imprimir_estado(self):
-        with self._h_regs_lock:
-            j = self.get_holding_registers(J_BASE, 4) or [0, 0, 0, 0]
-            o = self.get_holding_registers(O_BASE, 4) or [0, 0, 0, 0]
+        j = self.get_holding_registers(J_BASE, 4) or [0, 0, 0, 0]
+        o = self.get_holding_registers(self._dir_contador, 4) or [0, 0, 0, 0]
+        with self._estado_lock:
+            auto = self._auto
+            velocidad = self._velocidad_objetivo
+            marcha = self._maquina_marcha
 
         j1 = j[0]
         start = (j1 >> 0) & 1
@@ -203,16 +244,18 @@ class BancoZelioPLC(DataBank):
         _log(f"       START={start} | PARO={paro} | TORRE=[{torre_txt}]")
         _log(f"    J2 (dir 17) = {j[1]} | J3 (dir 18) = {j[2]}")
         _log(f"    J4 (dir 19) = {j[3]} -> Heartbeat bit0={hb}")
-        _log("  Salidas PLC -> PC (dirs 20-23):")
-        _log(f"    O1 (dir 20, contador) = {o[0]}")
-        _log(f"    O2 (dir 21, pulso)    = {o[1]}")
-        _log(f"    O3 (dir 22) = {o[2]} | O4 (dir 23) = {o[3]}")
+        _log(f"  Salidas PLC -> PC (dirs {self._dir_contador}-"
+             f"{self._dir_contador + 3}):")
+        _log(f"    O1 (dir {self._dir_contador}, contador) = {o[0]}")
+        _log(f"    O2 (dir {self._dir_contador + 1}, pulso)    = {o[1]}")
+        _log(f"    O3 (dir {self._dir_contador + 2}) = {o[2]} | "
+             f"O4 (dir {self._dir_contador + 3}) = {o[3]}")
         _log("  Estado logico:")
         _log(
-            f"    Auto-conteo : {'ACTIVO' if self._auto else 'PAUSADO'} "
-            f"({self._velocidad_objetivo} cortes/seg)"
+            f"    Auto-conteo : {'ACTIVO' if auto else 'PAUSADO'} "
+            f"({velocidad} cortes/seg)"
         )
-        _log(f"    Maquina     : {'EN MARCHA' if self._maquina_marcha else 'DETENIDA'}")
+        _log(f"    Maquina     : {'EN MARCHA' if marcha else 'DETENIDA'}")
         _log("=" * 60)
 
     def detener(self):
@@ -235,14 +278,16 @@ class BancoZelioPLC(DataBank):
             roja = (to_value >> 4) & 1
             alarma = (to_value >> 5) & 1
 
-            if start:
-                cambios.append("PULSO START (Q1)")
-                self._maquina_marcha = True
-            if paro:
-                cambios.append("LATCH PARO (Q2)")
-                self._maquina_marcha = False
-            elif not paro and not start and from_value is not None and ((from_value >> 1) & 1):
-                cambios.append("LIBERAR PARO")
+            with self._estado_lock:
+                if start:
+                    cambios.append("PULSO START (Q1)")
+                    self._maquina_marcha = True
+                if paro:
+                    cambios.append("LATCH PARO (Q2)")
+                    self._maquina_marcha = False
+                elif (not paro and not start and from_value is not None
+                      and ((from_value >> 1) & 1)):
+                    cambios.append("LIBERAR PARO")
 
             luces = []
             if verde:
@@ -263,8 +308,9 @@ class BancoZelioPLC(DataBank):
 
         elif address == J_BASE + 3:  # J4 (dir 19): Heartbeat
             latido = (to_value >> 0) & 1
-            self._ultimo_heartbeat = time.monotonic()
-            self._hb_valor = latido
+            with self._estado_lock:
+                self._ultimo_heartbeat = time.monotonic()
+                self._hb_valor = latido
             # Solo loguear si hay cambio de bit para no saturar consola
             if from_value is None or ((from_value ^ to_value) & 1):
                 _log(f"[{_marca()}] [ESC J4 dir 19] Heartbeat bit0={latido}")

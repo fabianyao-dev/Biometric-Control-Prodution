@@ -23,7 +23,11 @@ def identificar(archivo_fmd):
         print("No hay operadores registrados.")
         return 1
     s = BiometricService()
-    resultado = s.identificar(fmd, [fila[2] for fila in filas])
+    resultado = s.identificar(
+        fmd,
+        [fila[2] for fila in filas],
+        ids=[fila[0] for fila in filas],
+    )
     if resultado:
         idx, score = resultado
         print(f"IDENTIFICADO: {filas[idx][1]} (score {score})")

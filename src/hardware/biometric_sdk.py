@@ -780,13 +780,26 @@ class BiometricSDK:
             return None
         return score.value
 
-    def identificar(self, fmd, lista_fmds, fmd_type=DPFJ_FMD_ANSI_378_2004):
-        """Busca 'fmd' en 'lista_fmds' (1:N). Devuelve (indice, score) del mejor
-        candidato o None si la lista está vacía o falla."""
+    def identificar_candidatos(
+        self,
+        fmd,
+        lista_fmds,
+        umbral=None,
+        max_candidatos=2,
+        fmd_type=DPFJ_FMD_ANSI_378_2004,
+    ):
+        """Busca 'fmd' en 'lista_fmds' (1:N) y devuelve hasta
+        'max_candidatos' pares (indice, score) ordenados de mejor a peor.
+
+        'umbral' es el score maximo de disimilitud aceptado por el SDK; si es
+        None se usa DPFJ_PROBABILITY_ONE (sin filtrar). Lista vacia, fallo del
+        SDK o indices fuera de rango -> lista vacia (nunca indexar a ciegas).
+        """
         if not self.dpfj:
-            return None
+            return []
         if not lista_fmds:
-            return None
+            return []
+        max_candidatos = max(1, int(max_candidatos))
 
         n = len(lista_fmds)
         ptrs = (ctypes.POINTER(ctypes.c_ubyte) * n)()
@@ -800,10 +813,12 @@ class BiometricSDK:
 
         query = (ctypes.c_ubyte * len(fmd)).from_buffer_copy(fmd)
 
-        candidate_cnt = ctypes.c_uint(1)
-        candidates = (DPFJ_CANDIDATE * 1)()
-        candidates[0].size = ctypes.sizeof(DPFJ_CANDIDATE)
+        candidate_cnt = ctypes.c_uint(max_candidatos)
+        candidates = (DPFJ_CANDIDATE * max_candidatos)()
+        for candidato in candidates:
+            candidato.size = ctypes.sizeof(DPFJ_CANDIDATE)
 
+        threshold = DPFJ_PROBABILITY_ONE if umbral is None else int(umbral)
         res = self.dpfj.dpfj_identify(
             ctypes.c_int(fmd_type),
             query,
@@ -813,20 +828,49 @@ class BiometricSDK:
             ctypes.c_uint(n),
             ptrs,
             sizes,
-            ctypes.c_uint(DPFJ_PROBABILITY_ONE),
+            ctypes.c_uint(threshold),
             ctypes.byref(candidate_cnt),
             candidates,
         )
         if res != DPFJ_SUCCESS or candidate_cnt.value == 0:
-            return None
+            return []
 
-        idx = candidates[0].fmd_idx
-        score = self.comparar(fmd, lista_fmds[idx], fmd_type)
-        if score is None:
-            return None
-        log.info("Identificacion: %d candidato(s), mejor = #%d (score %d)",
-         candidate_cnt.value, idx, score)
-        return (idx, score)
+        resultados = []
+        total = min(candidate_cnt.value, max_candidatos)
+        for i in range(total):
+            idx = int(candidates[i].fmd_idx)
+            if not (0 <= idx < n):
+                log.warning(
+                    "dpfj_identify devolvio indice fuera de rango: %d (n=%d)",
+                    idx,
+                    n,
+                )
+                continue
+            score = self.comparar(fmd, lista_fmds[idx], fmd_type)
+            if score is None:
+                continue
+            resultados.append((idx, int(score)))
+
+        resultados.sort(key=lambda par: par[1])
+        if resultados:
+            log.info(
+                "Identificacion: %d candidato(s), mejor = #%d (score %d)",
+                len(resultados),
+                resultados[0][0],
+                resultados[0][1],
+            )
+        return resultados
+
+    def identificar(self, fmd, lista_fmds, fmd_type=DPFJ_FMD_ANSI_378_2004):
+        """Compatibilidad 1:N: devuelve (indice, score) del mejor candidato
+        o None si la lista esta vacia o falla."""
+        resultados = self.identificar_candidatos(
+            fmd,
+            lista_fmds,
+            max_candidatos=1,
+            fmd_type=fmd_type,
+        )
+        return resultados[0] if resultados else None
 
     def cerrar(self):
         if self.h_reader and self.dpfpdd:

@@ -833,6 +833,10 @@ class App(QMainWindow):
         # cleanup() deja el coil PAUSE en paro sostenido si hay enlace, para
         # que la maquina nunca quede cortando sin supervision (7.2.2).
         self.controlador.cleanup()
+        try:
+            self.biometrico.cerrar()
+        except Exception:  # noqa: BLE001 - el cierre no debe bloquear la salida
+            log.error("No se pudo cerrar el lector biometrico.", exc_info=True)
         log.info("Aplicacion cerrada.")
         evento.accept()
 

@@ -3,6 +3,7 @@ import sys
 import threading
 
 from src import config
+from src.domain.biometria import elegir_candidato
 from src.hardware.biometric_sdk import obtener_sdk
 
 log = logging.getLogger(__name__)
@@ -30,7 +31,10 @@ class BiometricService:
 
     def __init__(self):
         self.sdk = obtener_sdk()
-        self._lock_lector = threading.Lock()
+        # RLock: autenticar_operador ya retiene el lock y llama a metodos que
+        # tambien lo toman (capturar_huella, identificar...). Un Lock normal
+        # haria deadlock.
+        self._lock_lector = threading.RLock()
 
     @property
     def disponible(self):
@@ -49,7 +53,8 @@ class BiometricService:
 
     def abrir(self):
         """Prepara el lector. Devuelve True si está listo."""
-        return self.sdk.abrir_lector()
+        with self._lock_lector:
+            return self.sdk.abrir_lector()
 
     def reiniciar_lector(self) -> bool:
         """Reboot por software del lector (cierra handle stale, reinicia
@@ -57,7 +62,8 @@ class BiometricService:
         if not self.disponible:
             return False
         try:
-            return bool(self.sdk.reiniciar_lector())
+            with self._lock_lector:
+                return bool(self.sdk.reiniciar_lector())
         except Exception:  # noqa: BLE001 - nunca debe crashear la UI
             log.error("reiniciar_lector fallo", exc_info=True)
             return False
@@ -65,7 +71,8 @@ class BiometricService:
     def capturar_huella(self, timeout_ms=None):
         """Captura la huella y devuelve dict con 'fmd', 'width', 'height' y
         'dpi', o None si no se capturó nada."""
-        return self._capturar_windows(timeout_ms)
+        with self._lock_lector:
+            return self._capturar_windows(timeout_ms)
 
     def enrollar(self, timeout_ms=None, on_progress=None):
         """Enrola una huella y devuelve dict con 'fmd' (plantilla).
@@ -106,21 +113,60 @@ class BiometricService:
         }
 
     def comparar(self, fmd_a, fmd_b):
-        return self.sdk.comparar(fmd_a, fmd_b)
+        with self._lock_lector:
+            return self.sdk.comparar(fmd_a, fmd_b)
 
-    def identificar(self, fmd, lista_fmds, umbral=None):
+    def identificar(self, fmd, lista_fmds, umbral=None, ids=None):
         """Identifica un FMD contra una lista. Devuelve (indice, score) si hay
-        candidato con score <= umbral, o None si no coincide."""
-        umbral = config.UMBRAL_DISIMILARIDAD if umbral is None else umbral
-        resultado = self.sdk.identificar(fmd, lista_fmds)
-        if not resultado:
-            return None
-        idx, score = resultado
-        if score > umbral:
-            return None
-        return (idx, score)
+        un candidato inequivoco con score <= umbral, o None si no coincide o
+        si dos operadores quedan demasiado cerca (ambiguedad).
 
-    def identificar_en_lector(self, lista_plantillas, timeout_ms=None, on_progress=None):
+        `ids` mapea cada indice de plantilla a su operador; si se omite, cada
+        plantilla se trata como un operador distinto.
+        """
+        if not lista_fmds:
+            return None
+        umbral = config.UMBRAL_DISIMILARIDAD if umbral is None else umbral
+        ids = list(range(len(lista_fmds))) if ids is None else list(ids)
+        if len(ids) != len(lista_fmds):
+            log.error(
+                "identificar: %d plantillas pero %d ids de operador.",
+                len(lista_fmds),
+                len(ids),
+            )
+            return None
+        with self._lock_lector:
+            candidatos = self.sdk.identificar_candidatos(
+                fmd,
+                lista_fmds,
+                umbral=umbral,
+                max_candidatos=2,
+            )
+        return self._decidir_candidato(candidatos, ids, umbral)
+
+    def _decidir_candidato(self, candidatos, ids, umbral):
+        resultado = elegir_candidato(
+            candidatos,
+            ids,
+            umbral,
+            config.MARGEN_AMBIGUEDAD,
+        )
+        if resultado is None and candidatos:
+            log.warning(
+                "Identificacion sin candidato inequivoco: %d candidato(s) "
+                "dentro del umbral %d (posible ambiguedad).",
+                len(candidatos),
+                umbral,
+            )
+        return resultado
+
+    def identificar_en_lector(
+        self,
+        lista_plantillas,
+        timeout_ms=None,
+        on_progress=None,
+        ids=None,
+    ):
         """Captura una huella y la identifica contra las plantillas dadas.
 
         Windows: captura única y compara FMDs -> (indice, score) o None.
@@ -131,19 +177,24 @@ class BiometricService:
                 getattr(self.sdk, "ultimo_error_captura", "")
                 or "No se pudo capturar la huella."
             )
-        return self.identificar(captura["fmd"], lista_plantillas)
+        return self.identificar(captura["fmd"], lista_plantillas, ids=ids)
 
     def autenticar_operador(self, on_progress=None):
         """Captura una huella y devuelve (id_operador, nombre) o None.
 
         Consulta los operadores activos y usa identificar_en_lector(). Util
         para el login y para autorizar la reanudacion de un paro. El
-        threading.Lock garantiza que solo haya una captura a la vez, ya que
+        threading.RLock garantiza que solo haya una captura a la vez, ya que
         el lector es un recurso compartido; al arrancar cada captura avisa
         al lector con un beep para que el operador sepa que debe apoyar
         el dedo.
         """
-        from src.database import listar_fmds, obtener_operador_temporal
+        from src.database import (
+            OPERADOR_TEMPORAL_NOMBRE,
+            listar_fmds,
+            listar_operadores_admin,
+            obtener_operador_temporal,
+        )
 
         # Modo DESARROLLO sin lector: entra directo con el operador temporal,
         # sin intentar usar el lector.
@@ -154,10 +205,33 @@ class BiometricService:
 
         filas = listar_fmds(activos_solo=True)
         if not filas:
-            # Sin usuarios reales: acceso automatico (modo desarrollo).
-            if on_progress:
-                on_progress("Sin operadores registrados; acceso automatico.")
-            return obtener_operador_temporal()
+            # El operador temporal interno no cuenta: si es lo unico que
+            # queda activo, se permite rehacer el alta (evita lockout).
+            activos = [
+                op
+                for op in listar_operadores_admin()
+                if op["activo"] and op["nombre"] != OPERADOR_TEMPORAL_NOMBRE
+            ]
+            if not activos:
+                # Primera instalacion: sin operadores no hay con que
+                # autenticarse. Se deja crear el primer administrador.
+                log.warning(
+                    "Sin operadores reales registrados: acceso automatico de "
+                    "primera instalacion. Registra un administrador con "
+                    "huella cuanto antes."
+                )
+                if on_progress:
+                    on_progress(
+                        "Sin operadores registrados; acceso automatico de "
+                        "primera instalacion."
+                    )
+                return obtener_operador_temporal()
+            # Hay operadores pero ninguno tiene huella: NO se regala acceso
+            # (seria una puerta trasera en produccion).
+            raise RuntimeError(
+                "Hay operadores activos sin huellas registradas. Registra "
+                "una huella desde Administracion antes de iniciar sesion."
+            )
         if not self.disponible:
             # Driver DigitalPersona ausente (maquina sin el SDK instalado).
             raise RuntimeError(
@@ -165,11 +239,16 @@ class BiometricService:
                 "disponible en este equipo."
             )
         plantillas = [fila[2] for fila in filas]
+        ids = [fila[0] for fila in filas]
         with self._lock_lector:
             if on_progress:
                 on_progress("Coloca el dedo en el lector...")
             emitir_beep()
-            resultado = self.identificar_en_lector(plantillas, on_progress=on_progress)
+            resultado = self.identificar_en_lector(
+                plantillas,
+                on_progress=on_progress,
+                ids=ids,
+            )
         if not resultado:
             return None
         idx = resultado[0]

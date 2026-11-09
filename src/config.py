@@ -550,8 +550,6 @@ FMD_FORMAT = 0x001B0001
 CBEFF_ID = 0x00000000
 FINGER_POSITION = 0
 
-UMBRAL_DISIMILARIDAD = 0x04000000
-
 # --- Simulacion (fallback cuando no hay PLC) ---
 # SimulacionController usa estos valores de referencia solo en modo
 # simulacion (sin hardware real).
@@ -578,6 +576,27 @@ def _env_bool(clave, por_defecto=False):
     if valor is None:
         return por_defecto
     return _texto_es_verdadero(valor)
+
+
+# --- Decision biometrica (DigitalPersona) ---
+# El score de comparacion es una DISIMILITUD: 0 = coincidencia perfecta,
+# 0x7FFFFFFF = ninguna coincidencia; la FAR aproximada es score/0x7FFFFFFF.
+# 0x04000000 (2^26) daba FAR ~1/32 (~3.1%): en 1:N con ~20 huellas la
+# probabilidad de falso positivo rondaba el 47%. El criterio del fabricante
+# (ejemplos del SDK U.are.U) es DPFJ_PROBABILITY_ONE/100000, esto es FAR 1e-5.
+# Si en planta hay demasiados falsos rechazos, calibrar con test/test_fmd.py
+# y subir por entorno (p. ej. 214748 = 1e-4).
+UMBRAL_DISIMILARIDAD = _env_int(
+    "BIOMETRICO_UMBRAL_DISIMILARIDAD", 0x7FFFFFFF // 100000
+)
+# Margen minimo entre el mejor candidato y el siguiente de OTRO operador para
+# aceptar la identificacion 1:N. Si dos operadores quedan demasiado cerca se
+# rechaza la lectura (mejor volver a pedir la huella que confundir identidades).
+# Por defecto exige que el segundo candidato de otro operador no entre tambien
+# en el umbral; 0 solo rechaza empates exactos.
+MARGEN_AMBIGUEDAD = _env_int(
+    "BIOMETRICO_MARGEN_AMBIGUEDAD", UMBRAL_DISIMILARIDAD
+)
 
 
 # --- Actualizaciones por red (opcional) ---

@@ -141,11 +141,16 @@ class MantenimientoMixin:
         self._en_paro = False
         self._paro_idle_triggado = False
         self._modo_mantenimiento = True
+        # Si la tolerancia vencio con el modal abierto, la torre ya estaba
+        # roja: re-suena el buzzer al autorizar (autorizar no reinicia ancla).
+        self._rearmar_buzzer_si_paro_vencido()
         self._fijar_switch(False)
         # Baseline nuevo del seguro anti-corrida (descarta muestras de un
-        # modo anterior).
+        # modo anterior y arranca desde el contador fisico actual).
         self._muestras_rafaga.clear()
-        self._ultimo_excluidos = self.controlador.cortes_excluidos()
+        self._ultimo_total_fisico = self._total_fisico()
+        self._rafaga_en_curso = False
+        self._excluidos_previos_rafaga = 0
         self._refrescar_estado_maquina()
         self._estado(
             f"Modo Mantenimiento autorizado por {nombre_operador} y "

@@ -227,14 +227,19 @@ class InicioView(
         # SALIR DE PARO en rojo).
         self._boton_paro_especial = False
         # Torre de luces: momento en que empezo el paro actual (para pasar de
-        # ambar a rojo al vencer PARO_IDLE_TIMEOUT_S) y ultimo color aplicado
-        # (para disparar la alarma solo al ENTRAR en rojo).
+        # ambar a rojo al vencer PRIMERA_PIEZA_TIMEOUT_S), ultimo color
+        # aplicado (para disparar la alarma solo al ENTRAR en rojo) y aviso de
+        # que el modal de autorizacion del paro sigue abierto (fuerza roja
+        # directa, sin ambar, mientras el operador elige causa y autoriza).
         self._paro_inicio_momento = None
         self._ultimo_color_rojo = None
-        # Seguro anti-corrida en Primera pieza: ventana movil de cortes
-        # excluidos para detectar una corrida no autorizada.
+        self._paro_autorizacion_pendiente = False
+        # Seguro anti-corrida (todos los paros reales): ventana movil de
+        # cortes fisicos (totales + excluidos) para detectar una corrida no
+        # autorizada. `_ultimo_total_fisico=None` re-basela al entrar en un
+        # paro, sin falsos positivos por el acumulado de la sesion.
         self._muestras_rafaga = deque()
-        self._ultimo_excluidos = 0
+        self._ultimo_total_fisico = None
         self._rafaga_en_curso = False
         # Cortes excluidos ANTES del inicio de la ventana detectada: son
         # piezas de prueba y NO se incorporan al confirmar la corrida.
