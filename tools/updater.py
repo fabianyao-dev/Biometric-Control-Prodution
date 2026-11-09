@@ -13,6 +13,11 @@ modulos mientras corren. Por eso la app:
 El respaldo permite rollback manual: si la nueva version falla, borrar la
 instalacion nueva y renombrar `<instalar>_backup` a `<instalar>`.
 
+El updater acepta instalar una version anterior (el tab Sistema lista todas
+las publicadas), pero un descenso debe ser deliberado: sin el flag
+`--permitir-descenso` se rechaza con codigo 7. La app lo pasa solo cuando el
+usuario elige explicitamente una version menor a la instalada.
+
 Solo usa stdlib (no PySide6) para arrancar rapido y ser tiny. Se compila
 como ONE-file (tools/updater.spec) y se empaqueta como data de la app.
 
@@ -85,6 +90,31 @@ def leer_version(carpeta):
     return None
 
 
+def _cmp_version(a, b):
+    """Compara versiones 'X.Y.Z' (devuelve <0, 0 o >0)."""
+    def parse(v):
+        partes = []
+        for p in str(v).split("."):
+            try:
+                partes.append(int(p))
+            except ValueError:
+                partes.append(0)
+        return partes or [0]
+
+    va, vb = parse(a), parse(b)
+    for x, y in zip(va, vb):
+        if x != y:
+            return (x > y) - (x < y)
+    return (len(va) > len(vb)) - (len(va) < len(vb))
+
+
+def es_descenso(nueva, actual):
+    """True si `nueva` es anterior a `actual` (instalar una version vieja)."""
+    if not nueva or not actual:
+        return False
+    return _cmp_version(nueva, actual) < 0
+
+
 def extraer_zip(zip_path, destino):
     if os.path.exists(destino):
         shutil.rmtree(destino, ignore_errors=True)
@@ -108,11 +138,27 @@ def renombrar_con_reintentos(origen, destino):
     return False
 
 
-def aplicar(zip_path, version, instalar, relanzar, log_path):
+def aplicar(zip_path, version, instalar, relanzar, log_path,
+            permitir_descenso=False, notas=""):
     log("updater iniciado", log_path)
     if not os.path.exists(os.path.join(instalar, NOMBRE_APP)):
         log(f"ERROR: no hay app en {instalar}", log_path)
         return 1
+
+    # Guardia de version: el updater sirve para subir Y bajar de version
+    # (el tab Sistema lista todas las publicadas), pero un descenso debe ser
+    # deliberado. Sin --permitir-descenso se rechaza para no degradar una
+    # instalacion por un catalogo mal ordenado o un clic equivocado.
+    actual = leer_version(instalar)
+    if notas:
+        log(f"notas de {version}: {notas}", log_path)
+    if actual and version:
+        if es_descenso(version, actual) and not permitir_descenso:
+            log(f"ERROR: {version} es anterior a la instalada {actual}; "
+                "se requiere --permitir-descenso", log_path)
+            return 7
+        sentido = "descenso" if es_descenso(version, actual) else "actualizacion"
+        log(f"{sentido}: {actual} -> {version}", log_path)
 
     pendiente = instalar + "_pending"
     respaldo = instalar + "_backup"
@@ -185,6 +231,10 @@ def main():
     parser.add_argument("--log", default="", help="Ruta del log del updater")
     parser.add_argument("--log-app", default="",
                         help="Log adicional (produccion.log de la app)")
+    parser.add_argument("--permitir-descenso", action="store_true",
+                        help="Permitir instalar una version anterior a la actual")
+    parser.add_argument("--notas", default="",
+                        help="Notas de la version (solo para el log)")
     parser.add_argument("--relanzar", action="store_true", help="Relanzar la app al terminar")
     args = parser.parse_args()
 
@@ -205,7 +255,9 @@ def main():
         # Pequena pausa para que Windows libere los handles de los archivos.
         time.sleep(1)
 
-    codigo = aplicar(args.zip, args.version, args.instalar, args.relanzar, rutas)
+    codigo = aplicar(args.zip, args.version, args.instalar, args.relanzar, rutas,
+                     permitir_descenso=args.permitir_descenso,
+                     notas=args.notas)
     log(f"updater termino con codigo {codigo}", rutas)
     sys.exit(codigo)
 

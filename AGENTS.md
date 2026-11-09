@@ -87,7 +87,7 @@ venv\Scripts\python tools\hacer_version.py <version>
 - Las DLLs del SDK de DigitalPersona (`dpfpdd.dll`, `dpfj.dll`) se toman de `sdk/vendor/dpf/`; el `.spec` las bundlea.
 - Datos persistentes fuera de `dist/` para sobrevivir actualizaciones; `DB_PATH`/`LOG_DIR` se resuelven solos en la carpeta de datos.
 - El updater (`WTSControlUpdater.exe`) se lanza como subproceso con `cwd=config.DIR_DATOS` para evitar bloqueos de archivo. La app lo lleva embebido en `_internal/updater/`, por eso se compila antes.
-- `version.txt` es la fuente de la versión. `tools/hacer_version.py` hace bump, builds, verifica el exe/DLLs/updater y deja `manifest.json` + zip en `release/`.
+- `version.txt` es la fuente de la versión. `tools/hacer_version.py` hace bump, builds, verifica el exe/DLLs/updater y deja `manifest.json`, el zip y `releases.json` (catálogo acumulativo que lista todas las versiones en el tab Sistema) en `release/`. Acepta un comentario de features (`hacer_version.py <version> "texto"` o `--notas`), que se muestra junto a cada versión y permite instalar cualquiera de ellas, incluidas las anteriores (el updater exige `--permitir-descenso` para bajar de versión).
 
 ## Biometría (DigitalPersona)
 

@@ -6,6 +6,13 @@ Automatiza el proceso manual documentado en README (seccion Empaquetado y
 Actualizaciones). Uso desde la raiz del proyecto:
 
     venv\\Scripts\\python tools\\hacer_version.py 1.1.3
+    venv\\Scripts\\python tools\\hacer_version.py 1.1.3 "Corrige la torre y agrega ..."
+    venv\\Scripts\\python tools\\hacer_version.py 1.1.3 --notas "Texto de features"
+
+El comentario es opcional; si se omite y hay consola interactiva, se pide por
+teclado. Se guarda en el manifest y en `release/releases.json` para que el tab
+Sistema lo muestre junto a cada version. Las secuencias `\\n` y `\\t` escritas
+en el comentario se interpretan como salto de linea y tabulacion.
 
 Pasos que ejecuta:
     1. Valida la version y hace bump de version.txt.
@@ -14,9 +21,9 @@ Pasos que ejecuta:
     3. Compila la app onedir (WTSControl.spec -> dist/WTSControl).
     4. Verifica el build: exe presente, version embebida correcta, updater
        embebido y DLLs del SDK de DigitalPersona en _internal.
-    5. Genera manifest.json + WTSControl-<version>.zip (reutiliza
-       tools/hacer_manifest.py).
-    6. Copia ambos a release/.
+    5. Genera manifest.json + WTSControl-<version>.zip (tools/hacer_manifest.py)
+       y agrega/actualiza la entrada en release/releases.json.
+    6. Copia manifest.json + zip a release/.
 
 El servidor de actualizaciones NO se enciende automaticamente: es el
 interruptor del rollout (encender SOLO al publicar) y se deja a decision
@@ -43,6 +50,21 @@ RELEASE = os.path.join(RAIZ, "release")
 # DLLs minimos que _ruta_dll() necesita encontrar en _internal (la cadena
 # completa vive en sdk/vendor/dpf del repo; aqui solo se comprueba la base).
 DLLS_SDK_MINIMOS = ("dpfpdd.dll", "dpfj.dll", "nex_sdk.dll")
+
+
+def interpretar_escapes(texto):
+    """Convierte secuencias escritas en la linea de comandos en texto real.
+
+    En Windows/PowerShell es facil escribir `\\n` literal (PowerShell usa
+    backtick, no backslash). Aqui `\\n` se vuelve un salto de linea y `\\t` una
+    tabulacion, para poder publicar notas de varias lineas sin archivo aparte.
+    """
+    return (
+        str(texto)
+        .replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+    )
 
 
 def paso(numero, descripcion):
@@ -122,8 +144,24 @@ def main():
         description="Pipeline completo de release de WTSControl."
     )
     parser.add_argument("version", help="Version nueva (ej. 1.1.3)")
+    parser.add_argument(
+        "comentario", nargs="?", default="",
+        help="Comentario de los cambios/features (acepta \\n para saltos de linea)",
+    )
+    parser.add_argument(
+        "--notas", dest="notas_opcion", default="",
+        help="Igual que el comentario posicional (util para scripts)",
+    )
     args = parser.parse_args()
     version = args.version.strip()
+
+    if args.notas_opcion and args.comentario:
+        morir("Usa el comentario posicional o --notas, no ambos.")
+    notas = interpretar_escapes(args.notas_opcion or args.comentario or "").strip()
+    if not notas and sys.stdin.isatty():
+        notas = interpretar_escapes(input(
+            "Comentario de la version (features/cambios; Enter para omitir): "
+        )).strip()
 
     validar_version(version)
     if not os.path.isfile(PYINSTALLER):
@@ -144,8 +182,15 @@ def main():
     paso(4, "Verificando build")
     verificar_build(version)
 
-    paso(5, "Generando manifest.json + zip")
-    ejecutar([sys.executable, HACER_MANIFEST, version], "manifest")
+    paso(5, "Generando manifest.json + zip + catalogo")
+    os.makedirs(RELEASE, exist_ok=True)
+    comando_manifest = [
+        sys.executable, HACER_MANIFEST, version,
+        "--catalogo", os.path.join(RELEASE, "releases.json"),
+    ]
+    if notas:
+        comando_manifest.extend(["--notas", notas])
+    ejecutar(comando_manifest, "manifest")
 
     paso(6, "Copiando a release/")
     copiar_a_release("manifest.json")
@@ -154,6 +199,8 @@ def main():
     print()
     print("=" * 60)
     print(f"RELEASE {version} LISTO en release/")
+    if notas:
+        print(f"Notas: {notas.splitlines()[0]}")
     print("=" * 60)
     print("Siguiente paso MANUAL (interruptor del rollout): encender el")
     print("servidor SOLO al publicar:")

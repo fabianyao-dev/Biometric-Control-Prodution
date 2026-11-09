@@ -1,12 +1,14 @@
 """
-update.py - Actualizaciones por red (buscar version + aplicar).
+update.py - Actualizaciones por red (catalogo, descarga + aplicar).
 
 Capa que la GUI usa para:
     - Conocer la version instalada (version.txt empaquetado).
-    - Consultar el servidor HTTP (manifest.json) y saber si hay una version
-      nueva (sin descargar nada).
-    - Descargar y verificar (sha256) el .zip de la nueva version a la carpeta
-      de datos persistente (fuera de la instalacion).
+    - Consultar el catalogo del servidor HTTP (`releases.json`) y listar
+      TODAS las versiones publicadas, con sus notas y su estado frente a la
+      instalada (nueva, instalada o anterior). Si el servidor es viejo y solo
+      publica `manifest.json`, se trata como un catalogo de una sola entrada.
+    - Descargar y verificar (sha256) el .zip de CUALQUIER version elegida a la
+      carpeta de datos persistente (fuera de la instalacion).
     - Preparar el updater interno (WTSControlUpdater.exe) en la carpeta de
       datos y lanzarlo: aplica el intercambio de archivos y relanza la app.
 
@@ -24,6 +26,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 
 from src import config
@@ -31,6 +34,7 @@ from src import config
 log = logging.getLogger(__name__)
 
 NOMBRE_MANIFEST = "manifest.json"
+NOMBRE_CATALOGO = "releases.json"
 NOMBRE_UPDATER = "WTSControlUpdater.exe"
 
 
@@ -72,6 +76,20 @@ def url_manifest():
     return f"{fuente}/{NOMBRE_MANIFEST}"
 
 
+def url_catalogo():
+    """URL del catalogo de releases o None si no hay UPDATE_SOURCE."""
+    fuente = (config.UPDATE_SOURCE or "").strip().rstrip("/")
+    if not fuente:
+        return None
+    return f"{fuente}/{NOMBRE_CATALOGO}"
+
+
+def _leer_json(url, timeout=None):
+    tmo = config.UPDATE_TIMEOUT_S if timeout is None else timeout
+    with urllib.request.urlopen(url, timeout=tmo) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
 def consultar_manifest(timeout=None):
     """Descarga y devuelve el manifest del servidor. Lanza excepcion si no
     hay UPDATE_SOURCE o si el servidor no responde."""
@@ -80,9 +98,18 @@ def consultar_manifest(timeout=None):
         raise RuntimeError(
             "Actualizaciones por red no configuradas (UPDATE_SOURCE vacio)."
         )
-    tmo = config.UPDATE_TIMEOUT_S if timeout is None else timeout
-    with urllib.request.urlopen(url, timeout=tmo) as r:
-        return json.loads(r.read().decode("utf-8"))
+    return _leer_json(url, timeout)
+
+
+def _clave_version(version):
+    """Clave ordenable de una version 'X.Y.Z' (tolera partes no numericas)."""
+    partes = []
+    for parte in str(version).split("."):
+        try:
+            partes.append(int(parte))
+        except ValueError:
+            partes.append(0)
+    return tuple(partes) or (0,)
 
 
 def _cmp_version(a, b):
@@ -103,6 +130,94 @@ def _cmp_version(a, b):
         if x != y:
             return (x > y) - (x < y)
     return (len(va) > len(vb)) - (len(va) < len(vb))
+
+
+def normalizar_actualizaciones(datos):
+    """Convierte la respuesta del servidor en una lista de releases.
+
+    Acepta el catalogo (`{"actualizaciones": [...]}`), una lista suelta o un
+    `manifest.json` de una sola version (servidores viejos). Descarta
+    entradas sin `version`, `zip.archivo` o `zip.sha256`: sin esos datos la
+    app no puede descargar ni verificar el paquete.
+    """
+    if isinstance(datos, list):
+        entradas = datos
+    elif isinstance(datos, dict):
+        entradas = datos.get("actualizaciones")
+        if entradas is None:
+            entradas = datos.get("releases")
+        if entradas is None:
+            entradas = [datos] if datos.get("version") else []
+    else:
+        entradas = []
+
+    resultado = []
+    for entrada in entradas or []:
+        if not isinstance(entrada, dict):
+            continue
+        version = str(entrada.get("version") or "").strip()
+        if not version:
+            continue
+        info_zip = entrada.get("zip")
+        if not isinstance(info_zip, dict):
+            info_zip = {}
+        archivo = str(info_zip.get("archivo") or "").strip()
+        sha256 = str(info_zip.get("sha256") or "").strip()
+        if not archivo or not sha256:
+            log.warning("Actualizacion %s ignorada: falta zip o sha256.", version)
+            continue
+        resultado.append({
+            "version": version,
+            "published_at": str(entrada.get("published_at") or ""),
+            "notas": str(entrada.get("notas") or entrada.get("comentario") or "").strip(),
+            "zip": {
+                "archivo": archivo,
+                "sha256": sha256,
+                "size": info_zip.get("size"),
+            },
+        })
+    return resultado
+
+
+def ordenar_actualizaciones(actualizaciones):
+    """Ordena de la version mas nueva a la mas vieja."""
+    return sorted(
+        actualizaciones or [],
+        key=lambda entrada: _clave_version(entrada.get("version", "")),
+        reverse=True,
+    )
+
+
+def consultar_catalogo(timeout=None):
+    """Devuelve la lista de actualizaciones publicadas, de nueva a vieja.
+
+    Usa `releases.json`. Si el servidor no lo tiene (instalacion vieja que
+    solo publica `manifest.json`), cae al manifest como una sola entrada.
+    """
+    url = url_catalogo()
+    if not url:
+        raise RuntimeError(
+            "Actualizaciones por red no configuradas (UPDATE_SOURCE vacio)."
+        )
+    try:
+        datos = _leer_json(url, timeout)
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        log.info("El servidor no publica %s; usando manifest.json.", NOMBRE_CATALOGO)
+        datos = consultar_manifest(timeout)
+    return ordenar_actualizaciones(normalizar_actualizaciones(datos))
+
+
+def clasificar_version(version, instalada=None):
+    """Estado de `version` frente a la instalada: nueva, instalada o anterior."""
+    instalada = version_instalada() if instalada is None else str(instalada)
+    comparacion = _cmp_version(version, instalada)
+    if comparacion > 0:
+        return "nueva"
+    if comparacion < 0:
+        return "anterior"
+    return "instalada"
 
 
 def hay_version_nueva(manifest) -> bool:
@@ -193,10 +308,16 @@ def preparar_updater():
     return destino
 
 
-def lanzar_updater(ruta_updater, zip_path, version, relanzar=True):
+def lanzar_updater(ruta_updater, zip_path, version, relanzar=True,
+                   permitir_descenso=False, notas=""):
     """Lanza el updater en proceso separado (no bloquea la GUI) y devuelve
     el subprocess. La app debe cerrarse justo despues (controlador.cleanup +
-    close): el updater espera a que termine para reemplazar archivos."""
+    close): el updater espera a que termine para reemplazar archivos.
+
+    `permitir_descenso` autoriza instalar una version MENOR a la actual (el
+    updater la rechaza por defecto para evitar un descenso accidental).
+    `notas` viaja al log del updater para dejar rastro de que se instalo.
+    """
     args = [
         ruta_updater,
         "--zip", zip_path,
@@ -205,6 +326,11 @@ def lanzar_updater(ruta_updater, zip_path, version, relanzar=True):
         "--pid", str(os.getpid()),
         "--log-app", os.path.join(config.LOG_DIR, "produccion.log"),
     ]
+    if permitir_descenso:
+        args.append("--permitir-descenso")
+    notas = " ".join(str(notas or "").split())
+    if notas:
+        args.extend(["--notas", notas])
     if relanzar:
         args.append("--relanzar")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)

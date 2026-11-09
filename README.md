@@ -309,9 +309,9 @@ venv\Scripts\pyinstaller --noconfirm WTSControl.spec      # luego la app (empaqu
 ```
 
 > Para publicar una versión completa (bump + builds + verificación + manifest +
-> zip + copia a `release/`), usa el pipeline automatizado:
-> `venv\Scripts\python tools\hacer_version.py <version>` (ver
-> [Actualizaciones](#actualizaciones)).
+> catálogo + zip + copia a `release/`), usa el pipeline automatizado:
+> `venv\Scripts\python tools\hacer_version.py <version> "notas de los features"`
+> (ver [Actualizaciones](#actualizaciones)).
 
 El resultado queda en `dist\WTSControl\` (`WTSControl.exe` + `_internal\`).
 Copiar la **carpeta completa** a la PC de producción.
@@ -362,29 +362,48 @@ en **Administración → Sistema**.
 ### Cómo funciona
 
 1. **Servidor de actualizaciones** (`tools\servidor_actualizaciones.py`): un
-   HTTP estático (solo stdlib, sin instalación) que sirve `manifest.json` + el
-   `.zip`. Corre en cualquier PC de la planta (una PC que esté encendida al
-   momento de publicar). **Se enciende solo cuando se publica una versión** —
-   con el servidor apagado las máquinas corren la versión que ya tienen.
-2. **Manifest** (`tools\hacer_manifest.py`): tras compilar, genera
-   `manifest.json` (`version`, `published_at` — fecha/hora de publicación —,
-   `zip` con sha256, y el sha256 de cada archivo) y `WTSControl-<version>.zip`.
-3. **Cliente**: el botón consulta el manifest, muestra *Instalada / Disponible /
-   Publicada* y, al pulsar "Aplicar ahora", la app descarga el `.zip`, **verifica
-   su sha256**, lanza el **updater interno** (`WTSControlUpdater.exe`, va dentro
-   del paquete) y se cierra. El updater espera a que la app salga (Windows
-   bloquea los archivos en ejecución), reemplaza la instalación con respaldo
-   (`<instalar>_backup`) y **relanza la app**.
+   HTTP estático (solo stdlib, sin instalación) que sirve `releases.json`, el
+   `manifest.json` y los `.zip`. Corre en cualquier PC de la planta (una PC que
+   esté encendida al momento de publicar). **Se enciende solo cuando se publica
+   una versión** — con el servidor apagado las máquinas corren la versión que ya
+   tienen.
+2. **Catálogo + manifest** (`tools\hacer_manifest.py`): tras compilar, genera
+   `manifest.json` (`version`, `published_at`, `notas` — comentario de los
+   features de esa versión —, `zip` con sha256/tamaño y el sha256 de cada
+   archivo), `WTSControl-<version>.zip` y actualiza `releases.json` (acumula
+   todas las versiones publicadas, ordenadas de nueva a vieja).
+3. **Cliente**: el botón **"Buscar actualizaciones"** consulta `releases.json`
+   y muestra una tabla con **todas** las versiones publicadas, su fecha, sus
+   notas y su estado frente a la instalada (*Nueva*, *Instalada* o *Anterior*).
+   Se puede seleccionar e instalar **cualquiera** de ellas (incluida una
+   anterior, con aviso de descenso). Al instalar, la app descarga el `.zip`,
+   **verifica su sha256**, lanza el **updater interno**
+   (`WTSControlUpdater.exe`, va dentro del paquete) y se cierra. El updater
+   espera a que la app salga (Windows bloquea los archivos en ejecución),
+   reemplaza la instalación con respaldo (`<instalar>_backup`) y **relanza la
+   app**. Si el servidor es viejo y no publica `releases.json`, el cliente cae
+   a `manifest.json` y lista solo esa versión.
 
 ### Publicar una versión (servidor encendido)
 
 Todo el pipeline en un solo comando — bump de `version.txt`, build del
 updater, build de la app, verificación del build (exe, versión embebida,
-updater embebido, DLLs del SDK), manifest + zip y copia a `release/`:
+updater embebido, DLLs del SDK), manifest + zip + catálogo y copia a
+`release/`. El comentario de features es opcional:
 
 ```bash
-venv\Scripts\python tools\hacer_version.py 1.1.0
+venv\Scripts\python tools\hacer_version.py 1.1.0 "Corrige la torre de luces y agrega ..."
+# o bien:
+venv\Scripts\python tools\hacer_version.py 1.1.0 --notas "Texto de los cambios"
+
+# Notas de varias lineas: escribe \n (barra invertida + n) en el texto
+venv\Scripts\python tools\hacer_version.py 1.1.0 --notas "Corrige la torre\nAgrega el catalogo de versiones"
 ```
+
+Si se omite y hay consola interactiva, el script lo pide por teclado. Las
+secuencias `\n` y `\t` se interpretan como salto de linea y tabulacion. El
+comentario queda en el manifest y en `release\releases.json`, y es lo que el
+tab Sistema muestra en la columna **Notas** (y completo en el tooltip).
 
 El servidor **no** se enciende automáticamente: es el interruptor de seguridad
 del rollout.
@@ -404,8 +423,8 @@ echo 1.1.0 > version.txt
 venv\Scripts\pyinstaller --noconfirm tools\updater.spec
 venv\Scripts\pyinstaller --noconfirm WTSControl.spec
 
-# 3. Generar manifest + zip
-venv\Scripts\python tools\hacer_manifest.py 1.1.0
+# 3. Generar manifest + zip + catalogo
+venv\Scripts\python tools\hacer_manifest.py 1.1.0 --notas "Cambios de la version" --catalogo release\releases.json
 
 # 4. Copiar a la carpeta servida (release/)
 copy dist\manifest.json release\
@@ -413,9 +432,10 @@ copy dist\WTSControl-1.1.0.zip release\
 ```
 
 En cada fanless, un rol con `actualizar_app` entra a **Administración →
-Sistema** y pulsa **"Buscar actualización"** → **"Aplicar ahora"**. La app se
-cierra, se actualiza sola y se reabre. En la PC de desarrollo (modo Python) el
-botón avisa que la actualización solo se aplica en el paquete `.exe`.
+Sistema**, pulsa **"Buscar actualizaciones"**, elige la versión en la tabla y
+pulsa **"Instalar versión seleccionada"**. La app se cierra, se actualiza sola
+y se reabre. En la PC de desarrollo (modo Python) el botón avisa que la
+actualización solo se aplica en el paquete `.exe`.
 
 ### Configuración
 
@@ -465,8 +485,8 @@ sdk/vendor/dpf/               DLLs de DigitalPersona empaquetados (SDK 3.2.0.89)
 assets/                       Logo, ícono y MSI del driver USB del lector
 tools/
 ├── updater.py + updater.spec Updater interno (ONE-file, stdlib): swap con respaldo
-├── hacer_version.py          Pipeline completo de release en un comando
-├── hacer_manifest.py         Genera manifest.json + WTSControl-<version>.zip
+├── hacer_version.py          Pipeline completo de release en un comando (+ notas)
+├── hacer_manifest.py         Genera manifest.json + zip y actualiza releases.json
 └── servidor_actualizaciones.py  HTTP estático de actualizaciones (stdlib)
 src/
 ├── config.py                 Config central (.env en dev, config.json en producción)

@@ -17,6 +17,7 @@ queue.Queue() drenada en el hilo principal (QTimer).
 import logging
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -208,6 +209,13 @@ class App(QMainWindow):
                 "Export automatico activo (cada_hora=%s, dir=%s)",
                 self._export_prog.cada_hora, self._export_prog.dir_auto,
             )
+
+        # Timer ligero para mantener el estado del boton Salir actualizado
+        # (habilitado solo si la maquina esta detenida y no hay trabajo abierto).
+        self._timer_salir = QTimer(self)
+        self._timer_salir.setInterval(500)
+        self._timer_salir.timeout.connect(self._refrescar_boton_salir)
+        self._timer_salir.start()
 
         # Siempre en pantalla completa; desactivar con BIOMETRICO_KIOSKO=0.
         self.kiosko = os.environ.get("BIOMETRICO_KIOSKO") != "0"
@@ -547,6 +555,51 @@ class App(QMainWindow):
         self._refrescar_boton_salir()
         sv.addWidget(self.btn_salir)
 
+        # Desplegable de salida (solo admin / mantenimiento): se abre DESDE el
+        # boton Salir, no como ventana aparte.
+        #   - "Apagar"  : apaga la computadora.
+        #   - "Windows" : cierra solo la ventana de la aplicacion.
+        # Popup de salida (solo admin / mantenimiento): dos burbujas flotando
+        # al costado derecho del SIDEBAR, sin fondo propio (solo los botones).
+        self.popup_salir = QWidget(
+            self,
+            Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint,
+        )
+        self.popup_salir.setAttribute(Qt.WA_TranslucentBackground, True)
+        lay = QVBoxLayout(self.popup_salir)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+
+        self.btn_popup_apagar = QPushButton("Apagar", self.popup_salir)
+        self.btn_popup_apagar.setObjectName("SalirBoton")
+        self.btn_popup_apagar.clicked.connect(self._apagar_computadora)
+        lay.addWidget(self.btn_popup_apagar)
+
+        self.btn_popup_windows = QPushButton("Windows", self.popup_salir)
+        self.btn_popup_windows.setObjectName("SalirBoton")
+        self.btn_popup_windows.clicked.connect(self._cerrar_aplicacion)
+        lay.addWidget(self.btn_popup_windows)
+
+        self.popup_salir.setStyleSheet(
+            "QPushButton#SalirBoton {"
+            "  background: #ffffff;"
+            "  color: #1f2937;"
+            "  border: 1px solid #cbd5e1;"
+            "  border-radius: 10px;"
+            "  padding: 12px 24px;"
+            "  font-size: 14px;"
+            "  text-align: left;"
+            "  min-width: 120px;"
+            "}"
+            "QPushButton#SalirBoton:hover {"
+            "  background: #f8fafc;"
+            "  border-color: #94a3b8;"
+            "}"
+            "QPushButton#SalirBoton:pressed {"
+            "  background: #e2e8f0;"
+            "}"
+        )
+
         # Se inserta antes del contenido para quedar a la izquierda.
         self._cuerpo_layout.insertWidget(0, self.sidebar)
         # El sidebar arranca OCULTO; se despliega con la hamburguesa.
@@ -815,7 +868,96 @@ class App(QMainWindow):
     # ------------------------------------------------------------------
 
     def _salir(self):
-        log.info("Cerrando aplicacion ...")
+        """Boton Salir del sidebar.
+
+        - Operador (o sin sesion): apaga la computadora directamente.
+        - Admin / mantenimiento: abre un desplegable desde el boton Salir con
+          "Apagar" (apaga la PC) y "Windows" (cierra solo la app).
+        """
+        rol = (self._rol_header or "").strip().lower()
+        es_admin_o_mantenimiento = rol in ("admin", "mantenimiento")
+        if es_admin_o_mantenimiento:
+            self._abrir_menu_salir()
+            return
+        # Operador o sin sesion: apagar la computadora.
+        self._apagar_computadora()
+
+    def _abrir_menu_salir(self):
+        """Despliega el popup de salida (dos burbujas) pegado al borde derecho
+        del sidebar, a la altura del boton Salir, sin salirse de la ventana."""
+        # Borde derecho del sidebar, a la altura del boton Salir.
+        origen = self.sidebar.mapToGlobal(self.sidebar.rect().topRight())
+        y = self.btn_salir.mapToGlobal(self.btn_salir.rect().topRight()).y()
+        punto = origen.__class__(origen.x(), y)
+        self.popup_salir.adjustSize()
+        ancho = self.popup_salir.width()
+        alto = self.popup_salir.height()
+        # Limite derecho de la ventana para no salirse.
+        limite = self.mapToGlobal(self.rect().bottomRight()).x()
+        x = punto.x()
+        if x + ancho > limite:
+            x = limite - ancho
+        # Limite inferior para no salirse por abajo.
+        limite_y = self.mapToGlobal(self.rect().bottomRight()).y()
+        if y + alto > limite_y:
+            y = limite_y - alto
+        self.popup_salir.move(x, y)
+        self.popup_salir.show()
+
+    def _refrescar_boton_salir(self):
+        """Icono de Salir (qtawesome) y habilitado/deshabilitado segun el
+        estado de la planta.
+
+        Se deshabilita (sin ocultar) si la maquina esta EN MARCHA o hay un
+        trabajo ABIERTO. Se habilita solo con la maquina detenida y sin
+        trabajo (paro sin maquina en marcha).
+        """
+        self.btn_salir.setIcon(
+            qta.icon("mdi6.exit-to-app", color=style.color("texto_sec"))
+        )
+        self.btn_salir.setToolTip("Cerrar la aplicacion")
+
+        habilitado = True
+        motivo = None
+        vista_inicio = self.vistas.get("inicio")
+        if vista_inicio is not None:
+            iv = vista_inicio.vista_actual()
+            if iv is not None:
+                try:
+                    en_marcha = not iv.controlador.maquina_detenida()
+                except Exception:  # noqa: BLE001 - nunca debe tumbar la app
+                    en_marcha = False
+                trabajo_abierto = getattr(iv, "_trabajo", None) is not None
+                if en_marcha:
+                    habilitado = False
+                    motivo = "La maquina esta en marcha."
+                elif trabajo_abierto:
+                    habilitado = False
+                    motivo = "Hay un trabajo abierto."
+        self.btn_salir.setEnabled(habilitado)
+        if motivo:
+            self.btn_salir.setToolTip(
+                f"No se puede cerrar: {motivo}"
+            )
+
+    def _apagar_computadora(self):
+        """Apaga la computadora (Windows) inmediatamente."""
+        self.popup_salir.close()
+        try:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            subprocess.Popen(
+                ["shutdown", "/s", "/t", "0"],
+                startupinfo=startupinfo,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            log.info("Apagando la computadora ...")
+        except Exception:  # noqa: BLE001 - no debe tumbar la app
+            log.error("No se pudo apagar la computadora", exc_info=True)
+
+    def _cerrar_aplicacion(self):
+        """Cierra solo la ventana de la aplicacion (desencadena closeEvent)."""
+        self.popup_salir.close()
         self.close()
 
     def closeEvent(self, evento):
