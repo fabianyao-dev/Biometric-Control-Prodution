@@ -499,3 +499,429 @@ def exportar_dia(fecha: str, ruta_destino: str):
     }
     log.info("Export día %s -> %s (%s)", fecha, ruta_destino, stats)
     return True, f"Día {fecha}: {len(filas_sesion)} sesiones, {len(filas_paro)} paros, {len(filas_trabajo)} trabajos.", stats
+
+
+# ---------------------------------------------------------------------------
+# Export comparativo de DOS rangos de fechas (mismo boton de Exportar de
+# Sesiones). Cada rango se exporta con las mismas hojas y el mismo criterio
+# de paros productivos que exportar_dia, pero en un solo libro con sufijos
+# "A" y "B" para comparar turno contra turno, semana contra semana, etc.
+# ---------------------------------------------------------------------------
+
+def _rango_valido(fecha_inicio: str, fecha_fin: str) -> bool:
+    try:
+        di = datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
+        df = datetime.strptime(fecha_fin, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return False
+    return di <= df
+
+
+def _recolectar_rango(fecha_inicio: str, fecha_fin: str):
+    """Recolecta filas de sesiones/paros/trabajos y cruces de un rango.
+
+    Devuelve un dict con las mismas claves que `exportar_dia` acumula en sus
+    listas locales, para poder reusar el armado de hojas.
+    """
+    from src.database import (
+        listar_sesiones_en_rango,
+        listar_trabajos_de_sesion,
+        obtener_paros_de_sesion,
+        paros_de_segmento,
+    )
+
+    filas_sesion, filas_paro, filas_trabajo = [], [], []
+    por_operador = defaultdict(lambda: {"cortes": 0, "min_paro": 0.0, "paros": 0})
+    por_causa = defaultdict(lambda: {"paros": 0, "min": 0.0})
+    por_zona = defaultdict(lambda: {"paros": 0, "min": 0.0})
+    por_folio = {}
+    paros_por_folio = {}
+    matriz_op_causa = defaultdict(lambda: defaultdict(float))
+
+    sesiones = listar_sesiones_en_rango(fecha_inicio, fecha_fin)
+    for s in sesiones:
+        sid = s["id"]
+        operador = s["nombre"]
+        paros = obtener_paros_de_sesion(sid)
+        trabajos = listar_trabajos_de_sesion(sid)
+        for p in paros:
+            dur = _min_entre(p["inicio_paro"], p["fin_paro"])
+            causa = p["descripcion"] or "(sin causa registrada)"
+            zona = p["zona"] or "(sin zona)"
+            folio = p["folio"]
+            productivo = _cuenta_como_paro(p["descripcion"])
+            if folio is not None and productivo:
+                keyf = (folio, p["num_part"] or "")
+                agf = paros_por_folio.setdefault(keyf, {"paros": 0, "min": 0.0})
+                agf["paros"] += 1
+                if dur is not None:
+                    agf["min"] += dur
+            filas_paro.append([
+                sid, operador,
+                folio if folio is not None else SIN_TRABAJO,
+                p["num_part"] or "",
+                causa, zona,
+                p["inicio_paro"] or "",
+                p["fin_paro"] or "En curso",
+                dur if dur is not None else 0.0,
+                p["autorizador"] or (
+                    "Sin autorizar" if not p["fin_paro"] else "(sin registro)"
+                ),
+            ])
+            if not productivo:
+                continue
+            if dur is not None:
+                por_causa[causa]["paros"] += 1
+                por_causa[causa]["min"] += dur
+                por_zona[zona]["paros"] += 1
+                por_zona[zona]["min"] += dur
+                por_operador[operador]["min_paro"] += dur
+                por_operador[operador]["paros"] += 1
+                matriz_op_causa[operador][causa] += dur
+            else:
+                por_operador[operador]["paros"] += 1
+                por_causa[causa]["paros"] += 1
+                por_zona[zona]["paros"] += 1
+        por_operador[operador]["cortes"] += s["total_cortes"] or 0
+        filas_sesion.append([
+            sid, operador,
+            s["fecha_inicio"] or "",
+            s["fecha_fin"] or "En curso",
+            s["total_cortes"] or 0,
+            s["estado"] or "",
+            s["minutos"] or 0.0,
+            s["num_paros"] or 0,
+        ])
+        for t in trabajos:
+            meta = t["cantidad_total"] or 0
+            det_seg = t["cantidad_sesion"] or 0
+            conf_seg = t["confirmados"] or 0
+            avance = round(conf_seg / meta, 4) if meta else 0.0
+            seg_ini = t["fecha_inicio"] or ""
+            seg_fin = t["fecha_fin"]
+            estado_seg = t["estado_segmento"] or (
+                "En curso" if seg_fin is None else t["estado"]
+            )
+            filas_trabajo.append([
+                sid, operador, t["folio"], t["num_part"] or "",
+                meta, det_seg, conf_seg, det_seg - conf_seg,
+                avance, seg_ini, seg_fin or "En curso",
+                MODALIDAD_NOMBRE.get(t["modalidad"], t["modalidad"]),
+                estado_seg, 0, 0.0,
+            ])
+            key = (t["folio"], t["num_part"] or "")
+            agg = por_folio.setdefault(key, {"cortado": 0, "conf": 0})
+            agg["cortado"] += t["cantidad_sesion"] or 0
+            agg["conf"] += conf_seg
+        vistos = set()
+        base_filas = len(filas_trabajo) - len(trabajos)
+        for i in range(base_filas, len(filas_trabajo)):
+            f = filas_trabajo[i]
+            ini_seg = f[9]
+            fin_seg = None if f[10] == "En curso" else f[10]
+            for p in paros_de_segmento(sid, ini_seg, fin_seg):
+                if p["id"] in vistos or not _cuenta_como_paro(p["descripcion"]):
+                    continue
+                vistos.add(p["id"])
+                f[13] += 1
+                if p["duracion_min"] is not None:
+                    f[14] += p["duracion_min"]
+            f[14] = round(f[14], 1)
+
+    return {
+        "sesiones": filas_sesion,
+        "paros": filas_paro,
+        "trabajos": filas_trabajo,
+        "por_operador": por_operador,
+        "por_causa": por_causa,
+        "por_zona": por_zona,
+        "por_folio": por_folio,
+        "paros_por_folio": paros_por_folio,
+        "matriz_op_causa": matriz_op_causa,
+    }
+
+
+def _hoja_sesiones(wb, filas, tabcolor="1F4E78", nombre="Sesiones", tabla_nombre="TblSesiones"):
+    ws = wb.create_sheet(nombre)
+    ws.sheet_properties.tabColor = tabcolor
+    enc = ["ID", "Operador", "Inicio", "Fin", "Cortes", "Estado", "Min", "Paros"]
+    _formato_base(wb, ws, enc, [8, 28, 19, 19, 10, 12, 10, 8])
+    for f in filas:
+        ws.append(f)
+    for r in range(2, 2 + len(filas)):
+        ws.cell(row=r, column=7).number_format = "0.0"
+    _tabla(ws, f"A1:H{1 + len(filas)}", tabla_nombre, len(filas))
+    return ws
+
+
+def _hoja_paros(wb, filas, tabcolor="C00000", nombre="Paros", tabla_nombre="TblParos"):
+    ws = wb.create_sheet(nombre)
+    ws.sheet_properties.tabColor = tabcolor
+    enc = ["Sesión", "Operador", "Folio", "Parte", "Causa", "Zona",
+           "Inicio", "Fin", "Duración min", "Autorizó"]
+    _formato_base(wb, ws, enc, [9, 24, 14, 14, 30, 16, 19, 19, 13, 22])
+    for f in filas:
+        ws.append(f)
+    for r in range(2, 2 + len(filas)):
+        ws.cell(row=r, column=9).number_format = "0.0"
+    _tabla(ws, f"A1:J{1 + len(filas)}", tabla_nombre, len(filas))
+    return ws
+
+
+def _hoja_trabajos(wb, filas, tabcolor="548235", nombre="Trabajos", tabla_nombre="TblTrabajos"):
+    ws = wb.create_sheet(nombre)
+    ws.sheet_properties.tabColor = tabcolor
+    enc = ["Sesión", "Operador", "Folio", "Parte", "Meta",
+           "Detectados", "Confirmados", "Diferencia",
+           "Avance %", "Inicio", "Fin", "Modalidad", "Estado",
+           "Nº paros", "Min paro"]
+    _formato_base(wb, ws, enc,
+                  [9, 24, 12, 14, 10, 12, 12, 12, 10, 19, 19, 16, 10, 10, 10])
+    for f in filas:
+        ws.append(f)
+    for r in range(2, 2 + len(filas)):
+        ws.cell(row=r, column=9).number_format = "0%"
+        ws.cell(row=r, column=15).number_format = "0.0"
+    _tabla(ws, f"A1:O{1 + len(filas)}", tabla_nombre, len(filas))
+    return ws
+
+
+def _hoja_cruces(wb, datos, tabcolor="7030A0", nombre="Cruces"):
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    ws = wb.create_sheet(nombre)
+    ws.sheet_properties.tabColor = tabcolor
+    fila = 1
+
+    def bloque(titulo, encabezados, filas_datos, anchos):
+        nonlocal fila
+        ws.cell(row=fila, column=1, value=titulo).font = Font(bold=True, size=12)
+        fila += 1
+        for j, h in enumerate(encabezados, start=1):
+            c = ws.cell(row=fila, column=j, value=h)
+            c.fill = PatternFill("solid", fgColor=AZUL_CABECERA)
+            c.font = Font(bold=True, color="FFFFFF")
+            c.alignment = Alignment(horizontal="center")
+        for j, a in enumerate(anchos, start=1):
+            letra = get_column_letter(j)
+            ws.column_dimensions[letra].width = max(
+                ws.column_dimensions[letra].width or 0, a
+            )
+        fila += 1
+        inicio = fila
+        for reg in filas_datos:
+            for j, v in enumerate(reg, start=1):
+                ws.cell(row=fila, column=j, value=v)
+            fila += 1
+        fila += 1
+        return inicio
+
+    bloque("Por operador", ["Operador", "Cortes", "Paros", "Min paro"],
+           [[op, v["cortes"], v["paros"], round(v["min_paro"], 1)]
+            for op, v in sorted(datos["por_operador"].items())],
+           [26, 12, 10, 12])
+    bloque("Por causa", ["Causa", "Paros", "Min"],
+           [[c, v["paros"], round(v["min"], 1)]
+            for c, v in sorted(datos["por_causa"].items(),
+                               key=lambda kv: -kv[1]["min"])],
+           [32, 10, 12])
+    bloque("Por zona", ["Zona", "Paros", "Min"],
+           [[z, v["paros"], round(v["min"], 1)]
+            for z, v in sorted(datos["por_zona"].items(),
+                               key=lambda kv: -kv[1]["min"])],
+           [24, 10, 12])
+    claves_folio = sorted(set(datos["por_folio"]) | set(datos["paros_por_folio"]))
+    bloque("Por folio", ["Folio", "Parte", "Cortado", "Confirmados",
+                         "Paros", "Min paro"],
+           [[folio, parte,
+             datos["por_folio"].get((folio, parte), {}).get("cortado", 0),
+             datos["por_folio"].get((folio, parte), {}).get("conf", 0),
+             datos["paros_por_folio"].get((folio, parte), {}).get("paros", 0),
+             round(datos["paros_por_folio"].get((folio, parte), {}).get("min", 0.0), 1)]
+            for (folio, parte) in claves_folio],
+           [12, 16, 13, 13, 10, 12])
+    ws.freeze_panes = "A2"
+    return ws
+
+
+def _hoja_resumen_comparativo(wb, res_a, res_b, etiqueta_a, etiqueta_b,
+                              fecha_inicio_a, fecha_fin_a,
+                              fecha_inicio_b, fecha_fin_b):
+    """Hoja Resumen con KPIs de ambos rangos lado a lado y la diferencia."""
+    from openpyxl.styles import Font, PatternFill
+
+    ws = wb.create_sheet("Resumen", 0)
+    ws.sheet_properties.tabColor = "FFC000"
+    ws.column_dimensions["A"].width = 30
+    ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 16
+    ws.column_dimensions["D"].width = 12
+
+    ws["A1"] = "Reporte comparativo"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"] = f"{etiqueta_a}: {fecha_inicio_a} al {fecha_fin_a}"
+    ws["B2"] = etiqueta_a
+    ws["C2"] = etiqueta_b
+    ws["D2"] = "Diferencia (B - A)"
+    for col in ("B", "C", "D"):
+        ws[f"{col}2"].font = Font(bold=True)
+
+    def kpis(datos):
+        """Lista de (etiqueta, valor numerico) de un rango."""
+        sesiones = len(datos["sesiones"])
+        cortes = sum(f[4] for f in datos["sesiones"])
+        min_prod = sum(f[6] for f in datos["sesiones"])
+        min_paro = sum(v["min_paro"] for v in datos["por_operador"].values())
+        n_paros = sum(v["paros"] for v in datos["por_operador"].values())
+        disp = (1 - min_paro / min_prod) if min_prod else 0
+        return [
+            ("Sesiones", sesiones),
+            ("Cortes totales", cortes),
+            ("Min producción", round(min_prod, 1)),
+            ("Min paro", round(min_paro, 1)),
+            ("Disponibilidad", round(disp, 4)),
+            ("Nº paros", n_paros),
+            ("Segmentos folio×sesión", len(datos["trabajos"])),
+        ]
+
+    ka, kb = kpis(res_a), kpis(res_b)
+    fila = 3
+    for i, ((etq_a, v_a), (etq_b, v_b)) in enumerate(zip(ka, kb)):
+        assert etq_a == etq_b
+        ws.cell(row=fila, column=1, value=etq_a).font = Font(bold=True)
+        ws.cell(row=fila, column=2, value=v_a)
+        ws.cell(row=fila, column=3, value=v_b)
+        ws.cell(row=fila, column=4, value=round(v_b - v_a, 4))
+        fila += 1
+
+    # Top causas de cada rango (informativo, debajo de los KPIs).
+    fila += 1
+    ws.cell(row=fila, column=1, value="Top 5 causas (A)").font = Font(bold=True, size=12)
+    ws.cell(row=fila, column=3, value="Top 5 causas (B)").font = Font(bold=True, size=12)
+    fila += 1
+    for j, h in enumerate(["Causa", "Min", "Causa", "Min"], start=1):
+        c = ws.cell(row=fila, column=j, value=h)
+        c.fill = PatternFill("solid", fgColor=AZUL_CABECERA)
+        c.font = Font(bold=True, color="FFFFFF")
+    fila += 1
+    top_a = sorted(res_a["por_causa"].items(), key=lambda kv: -kv[1]["min"])[:5]
+    top_b = sorted(res_b["por_causa"].items(), key=lambda kv: -kv[1]["min"])[:5]
+    for i in range(5):
+        ca = top_a[i] if i < len(top_a) else ("", {"min": 0.0, "paros": 0})
+        cb = top_b[i] if i < len(top_b) else ("", {"min": 0.0, "paros": 0})
+        ws.cell(row=fila, column=1, value=ca[0])
+        ws.cell(row=fila, column=2, value=round(ca[1]["min"], 1))
+        ws.cell(row=fila, column=3, value=cb[0])
+        ws.cell(row=fila, column=4, value=round(cb[1]["min"], 1))
+        fila += 1
+
+    ws.freeze_panes = "A2"
+    return ws
+
+
+def exportar_rango_comparativo(fecha_inicio_a: str, fecha_fin_a: str,
+                               fecha_inicio_b: str, fecha_fin_b: str,
+                               ruta_destino: str,
+                               etiqueta_a: str = "Rango A",
+                               etiqueta_b: str = "Rango B"):
+    """Exporta DOS rangos de fechas en un solo .xlsx para compararlos.
+
+    Cada rango se recolecta con el mismo criterio que `exportar_dia` (paros
+    productivos excluyendo espera de trabajo y corte de luz) y se vuelca en
+    hojas con sufijo A / B, mas una hoja Resumen con KPIs lado a lado y su
+    diferencia.
+
+    Devuelve (ok, mensaje, stats). Si algun rango esta vacio, avisa sin
+    generar archivo (Excel no abre un libro sin datos utiles).
+    """
+    from openpyxl import Workbook
+
+    for finicio, ffin, nom in (
+        (fecha_inicio_a, fecha_fin_a, "A"),
+        (fecha_inicio_b, fecha_fin_b, "B"),
+    ):
+        if not _rango_valido(finicio, ffin):
+            msg = (
+                f"Rango {nom} invalido: '{finicio}' al '{ffin}'. "
+                "Usa YYYY-MM-DD y fin >= inicio."
+            )
+            return False, msg, {}
+
+    if not str(ruta_destino).lower().endswith(".xlsx"):
+        ruta_destino = str(ruta_destino) + ".xlsx"
+
+    res_a = _recolectar_rango(fecha_inicio_a, fecha_fin_a)
+    res_b = _recolectar_rango(fecha_inicio_b, fecha_fin_b)
+
+    if not res_a["sesiones"] and not res_b["sesiones"]:
+        return False, (
+            "No hay sesiones en ninguno de los dos rangos."
+        ), {}
+
+    wb = Workbook()
+    _hoja_resumen_comparativo(
+        wb, res_a, res_b, etiqueta_a, etiqueta_b,
+        fecha_inicio_a, fecha_fin_a, fecha_inicio_b, fecha_fin_b,
+    )
+
+    suf_a = f" {etiqueta_a}".replace(" ", "_") if etiqueta_a != "Rango A" else " A"
+    suf_b = f" {etiqueta_b}".replace(" ", "_") if etiqueta_b != "Rango B" else " B"
+
+    _hoja_sesiones(
+        wb, res_a["sesiones"], nombre=f"Sesiones{suf_a}",
+        tabla_nombre=f"TblSesiones{suf_a}",
+    )
+    _hoja_sesiones(
+        wb, res_b["sesiones"], nombre=f"Sesiones{suf_b}",
+        tabla_nombre=f"TblSesiones{suf_b}",
+    )
+    _hoja_paros(
+        wb, res_a["paros"], nombre=f"Paros{suf_a}",
+        tabla_nombre=f"TblParos{suf_a}",
+    )
+    _hoja_paros(
+        wb, res_b["paros"], nombre=f"Paros{suf_b}",
+        tabla_nombre=f"TblParos{suf_b}",
+    )
+    _hoja_trabajos(
+        wb, res_a["trabajos"], nombre=f"Trabajos{suf_a}",
+        tabla_nombre=f"TblTrabajos{suf_a}",
+    )
+    _hoja_trabajos(
+        wb, res_b["trabajos"], nombre=f"Trabajos{suf_b}",
+        tabla_nombre=f"TblTrabajos{suf_b}",
+    )
+    _hoja_cruces(wb, res_a, nombre=f"Cruces{suf_a}")
+    _hoja_cruces(wb, res_b, nombre=f"Cruces{suf_b}")
+
+    try:
+        wb.save(ruta_destino)
+    except PermissionError:
+        log.warning("Excel bloqueado por otro proceso: %s", ruta_destino)
+        return False, (
+            "No se pudo guardar: el archivo está abierto en Excel u otro "
+            "programa. Ciérralo o elige otro nombre."
+        ), {}
+    except OSError as e:
+        log.error("No se pudo guardar Excel en %s: %s", ruta_destino, e)
+        return False, f"No se pudo guardar: {e}", {}
+
+    stats = {
+        "rango_a": f"{fecha_inicio_a} al {fecha_fin_a}",
+        "rango_b": f"{fecha_inicio_b} al {fecha_fin_b}",
+        "sesiones_a": len(res_a["sesiones"]),
+        "paros_a": len(res_a["paros"]),
+        "trabajos_a": len(res_a["trabajos"]),
+        "sesiones_b": len(res_b["sesiones"]),
+        "paros_b": len(res_b["paros"]),
+        "trabajos_b": len(res_b["trabajos"]),
+    }
+    log.info(
+        "Export comparativo %s vs %s -> %s", fecha_inicio_a, fecha_inicio_b,
+        ruta_destino, stats,
+    )
+    return True, (
+        f"Comparativo: {etiqueta_a} ({len(res_a['sesiones'])} sesiones) vs "
+        f"{etiqueta_b} ({len(res_b['sesiones'])} sesiones)."
+    ), stats

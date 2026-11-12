@@ -2200,6 +2200,36 @@ def listar_sesiones():
     return rows
 
 
+def listar_sesiones_en_rango(fecha_inicio: str, fecha_fin: str):
+    """Sesiones cuya fecha_inicio cae entre `fecha_inicio` y `fecha_fin`
+    (ambas inclusive, 'YYYY-MM-DD'), con operador, duracion en minutos y
+    numero de paros PRODUCTIVOS (mismo criterio que `listar_sesiones_por_fecha`:
+    excluye `CAUSAS_NO_PRODUCTIVAS`: espera de trabajo y corte de luz).
+
+    Si `fecha_inicio` es posterior a `fecha_fin` devuelve lista vacia. Es la
+    base del export comparativo de dos rangos de fechas.
+    """
+    conn = obtener_conexion()
+    ahora = ahora_local()
+    rows = conn.execute(
+        "SELECT s.id, o.nombre, s.fecha_inicio, s.fecha_fin, s.total_cortes, "
+        "       s.estado, "
+        "       ROUND(COALESCE((julianday(s.fecha_fin)-julianday(s.fecha_inicio))*1440, "
+        "                      (julianday(?)-julianday(s.fecha_inicio))*1440), 1) "
+        "       AS minutos, "
+        "       (SELECT COUNT(*) FROM paros_produccion p "
+        "        WHERE p.sesion_id=s.id AND " + _SQL_EXCLUYE_NO_PRODUCTIVAS + ") "
+        "       AS num_paros "
+        "FROM sesiones_produccion s "
+        "JOIN operadores o ON o.id=s.operador_id "
+        "WHERE date(s.fecha_inicio) BETWEEN date(?) AND date(?) "
+        "ORDER BY s.id",
+        (ahora, fecha_inicio, fecha_fin),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Reportes
 # ---------------------------------------------------------------------------

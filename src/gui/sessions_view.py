@@ -12,14 +12,19 @@ import logging
 from PySide6.QtCore import QDate, QStandardPaths, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCalendarWidget,
+    QDateEdit,
     QDialog,
     QFileDialog,
-    QHeaderView,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -33,7 +38,7 @@ from src.database import (
     listar_trabajos_de_sesion,
     obtener_paros_de_sesion,
 )
-from src.reportes.export_dia import exportar_dia
+from src.reportes.export_dia import exportar_dia, exportar_rango_comparativo
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +69,7 @@ class SessionsView(QWidget):
         self.btn_exportar = QPushButton("Exportar", self)
         self.btn_exportar.setObjectName("Success")
         self.btn_exportar.setIcon(qta.icon("mdi6.file-excel", color="white"))
-        self.btn_exportar.clicked.connect(self._exportar_dia)
+        self.btn_exportar.clicked.connect(self._exportar)
         self.btn_exportar.raise_()
         self._posicionar_export()
 
@@ -257,6 +262,193 @@ class SessionsView(QWidget):
 
     def _limpiar_paros(self):
         self.tree_paros.setRowCount(0)
+
+    # ------------------------------------------------------------------
+    # Export: un dia o comparativo de dos rangos (mismo boton)
+    # ------------------------------------------------------------------
+
+    def _exportar(self):
+        """Despacha el mismo boton Exportar: 'Un dia' o 'Comparativo'."""
+        tipo = self._pedir_tipo_export()
+        if not tipo:
+            return
+        if tipo == "dia":
+            self._exportar_dia()
+        else:
+            self._exportar_comparativo()
+
+    def _pedir_tipo_export(self):
+        """Pregunta si se exporta un solo día o un comparativo de dos rangos.
+
+        Devuelve "dia", "comparativo" o None si cancela.
+        """
+        dialogo = QDialog(self)
+        dialogo.setWindowTitle("Exportar")
+        lay = QVBoxLayout(dialogo)
+        lay.addWidget(QLabel("¿Qué deseas exportar?", dialogo))
+
+        grupo = QButtonGroup(dialogo)
+        rb_dia = QRadioButton("Un día (sesiones de una fecha)", dialogo)
+        rb_comp = QRadioButton("Comparativo (dos rangos de fechas)", dialogo)
+        rb_dia.setChecked(True)
+        grupo.addButton(rb_dia)
+        grupo.addButton(rb_comp)
+        lay.addWidget(rb_dia)
+        lay.addWidget(rb_comp)
+
+        fila = QHBoxLayout()
+        fila.addStretch(1)
+        btn_ok = QPushButton("Aceptar", dialogo)
+        btn_ok.setObjectName("Success")
+        btn_ok.clicked.connect(dialogo.accept)
+        btn_no = QPushButton("Cancelar", dialogo)
+        btn_no.clicked.connect(dialogo.reject)
+        fila.addWidget(btn_ok)
+        fila.addWidget(btn_no)
+        lay.addLayout(fila)
+
+        if dialogo.exec() != QDialog.Accepted:
+            return None
+        return "comparativo" if rb_comp.isChecked() else "dia"
+
+    def _pedir_rango_export(self):
+        """Dialogo de dos rangos de fechas + etiquetas.
+
+        Devuelve dict con inicio_a, fin_a, inicio_b, fin_b, etiqueta_a,
+        etiqueta_b, o None si cancela.
+        """
+        dialogo = QDialog(self)
+        dialogo.setWindowTitle("Exportar comparativo")
+        lay = QVBoxLayout(dialogo)
+        lay.addWidget(QLabel("Define los dos rangos a comparar:", dialogo))
+
+        grid = QGridLayout()
+        hoy = QDate.currentDate()
+        ayer = hoy.addDays(-1)
+
+        gb_a = QGroupBox("Rango A", dialogo)
+        gl_a = QGridLayout(gb_a)
+        ini_a = QDateEdit(dialogo)
+        ini_a.setCalendarPopup(True)
+        ini_a.setDate(ayer)
+        fin_a = QDateEdit(dialogo)
+        fin_a.setCalendarPopup(True)
+        fin_a.setDate(hoy)
+        etq_a = QLineEdit("Rango A", dialogo)
+        gl_a.addWidget(QLabel("Desde:"), 0, 0)
+        gl_a.addWidget(ini_a, 0, 1)
+        gl_a.addWidget(QLabel("Hasta:"), 1, 0)
+        gl_a.addWidget(fin_a, 1, 1)
+        gl_a.addWidget(QLabel("Etiqueta:"), 2, 0)
+        gl_a.addWidget(etq_a, 2, 1)
+
+        gb_b = QGroupBox("Rango B", dialogo)
+        gl_b = QGridLayout(gb_b)
+        ini_b = QDateEdit(dialogo)
+        ini_b.setCalendarPopup(True)
+        ini_b.setDate(ayer.addDays(-7))
+        fin_b = QDateEdit(dialogo)
+        fin_b.setCalendarPopup(True)
+        fin_b.setDate(ayer)
+        etq_b = QLineEdit("Rango B", dialogo)
+        gl_b.addWidget(QLabel("Desde:"), 0, 0)
+        gl_b.addWidget(ini_b, 0, 1)
+        gl_b.addWidget(QLabel("Hasta:"), 1, 0)
+        gl_b.addWidget(fin_b, 1, 1)
+        gl_b.addWidget(QLabel("Etiqueta:"), 2, 0)
+        gl_b.addWidget(etq_b, 2, 1)
+
+        grid.addWidget(gb_a, 0, 0)
+        grid.addWidget(gb_b, 0, 1)
+        lay.addLayout(grid)
+
+        fila = QHBoxLayout()
+        fila.addStretch(1)
+        btn_ok = QPushButton("Aceptar", dialogo)
+        btn_ok.setObjectName("Success")
+        btn_ok.clicked.connect(dialogo.accept)
+        btn_no = QPushButton("Cancelar", dialogo)
+        btn_no.clicked.connect(dialogo.reject)
+        fila.addWidget(btn_ok)
+        fila.addWidget(btn_no)
+        lay.addLayout(fila)
+
+        if dialogo.exec() != QDialog.Accepted:
+            return None
+
+        def qdate_fecha(qd):
+            return qd.toString("yyyy-MM-dd")
+
+        return {
+            "inicio_a": qdate_fecha(ini_a.date()),
+            "fin_a": qdate_fecha(fin_a.date()),
+            "inicio_b": qdate_fecha(ini_b.date()),
+            "fin_b": qdate_fecha(fin_b.date()),
+            "etiqueta_a": etq_a.text().strip() or "Rango A",
+            "etiqueta_b": etq_b.text().strip() or "Rango B",
+        }
+
+    def _exportar_comparativo(self):
+        from src import config
+
+        datos = self._pedir_rango_export()
+        if not datos:
+            return
+        # Carpeta inicial: la ultima donde se guardo (persistida en
+        # config.json como el tema); si no hay o ya no existe, Documentos.
+        base = config.leer_config("export_dir", "") or ""
+        import os
+
+        if not base or not os.path.isdir(base):
+            base = QStandardPaths.writableLocation(
+                QStandardPaths.DocumentsLocation
+            ) or ""
+        destino_ini = (
+            os.path.join(
+                base,
+                f"Comparativo_{datos['inicio_a']}_al_{datos['inicio_b']}.xlsx",
+            )
+            if base
+            else f"Comparativo_{datos['inicio_a']}_al_{datos['inicio_b']}.xlsx"
+        )
+        ruta, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportar comparativo a Excel",
+            destino_ini,
+            "Excel (*.xlsx)",
+        )
+        if not ruta:
+            return
+        ok, mensaje, _stats = exportar_rango_comparativo(
+            datos["inicio_a"],
+            datos["fin_a"],
+            datos["inicio_b"],
+            datos["fin_b"],
+            ruta,
+            etiqueta_a=datos["etiqueta_a"],
+            etiqueta_b=datos["etiqueta_b"],
+        )
+        if ok:
+            try:
+                config.guardar_config("export_dir", os.path.dirname(ruta))
+            except Exception:  # noqa: BLE001 - no debe opacar el exito
+                log.warning("No se pudo guardar export_dir", exc_info=True)
+        caja = QMessageBox(self)
+        caja.setWindowTitle("Exportar comparativo" if ok else "Sin datos")
+        caja.setText(mensaje)
+        caja.setIcon(
+            QMessageBox.Information if ok else QMessageBox.Warning
+        )
+        caja.addButton("Aceptar", QMessageBox.AcceptRole)
+        caja.exec()
+        if not ok:
+            log.info(
+                "Export comparativo sin generar: %s", mensaje
+            )
+        else:
+            log.info(
+                "Export comparativo guardado en %s", ruta
+            )
 
     # ------------------------------------------------------------------
     # Export por dia
