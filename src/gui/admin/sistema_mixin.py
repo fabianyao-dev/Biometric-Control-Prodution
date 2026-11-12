@@ -430,5 +430,8 @@ class SistemaMixin:
         self._lbl_actualizar(f"Aplicando versión {version}...", "procesando")
         # El updater ya corre en proceso separado: cierra la app para que
         # libere sus archivos (el updater espera a que este proceso salga).
-        self.controller._salir()
+        # Usar close() (closeEvent) en lugar de _salir() para no apagar la
+        # computadora: _salir() apaga la PC si el rol es operador; aqui
+        # solo queremos cerrar la ventana y dejar que el updater trabaje.
+        self.close()
 

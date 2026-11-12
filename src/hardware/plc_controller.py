@@ -150,8 +150,6 @@ class PLCController:
         self._tower_red_bit = int(cfg.get("tower_red_bit", 4))
         self._tower_alarm_bit = int(cfg.get("tower_alarm_bit", 5))
         self._tower_hb_bit = int(cfg.get("tower_heartbeat_bit", 0))
-        self._tower_alarm_on_ms = int(cfg.get("tower_alarm_pulso_on_ms", 500))
-        self._tower_alarm_off_ms = int(cfg.get("tower_alarm_pulso_off_ms", 500))
         self._tower_alarm_duracion_s = float(cfg.get("tower_alarm_duracion_s", 3))
         self._tower_hb_ms = int(cfg.get("tower_heartbeat_ms", 2000))
         # Estado actual de la torre

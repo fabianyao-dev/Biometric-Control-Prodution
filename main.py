@@ -45,11 +45,13 @@ configurar_logging()
 
 from src import config
 from src.database import (
+    cerrar_sesion,
     init_db,
     listar_fmds,
     obtener_conexion,
     obtener_rol_operador,
     rol_tiene_permiso_operador,
+    sesion_activa_actual,
 )
 from src.gui.admin.view import AdminView
 from src.gui.componentes.huella_modal import HuellaModal
@@ -941,8 +943,54 @@ class App(QMainWindow):
             )
 
     def _apagar_computadora(self):
-        """Apaga la computadora (Windows) inmediatamente."""
+        """Cierra la sesion activa (si la hay) y apaga la computadora."""
         self.popup_salir.close()
+        try:
+            # Cierra la sesion activa antes de apagar, para no dejarla
+            # 'Activa' huérfana (como tras un corte de luz).
+            vista_inicio = self.vistas.get("inicio")
+            if vista_inicio is not None:
+                iv = vista_inicio.vista_actual()
+                if iv is not None and getattr(iv, "sesion_id", None) is not None:
+                    try:
+                        total = iv.controlador.cortes_totales()
+                    except Exception:  # noqa: BLE001
+                        total = 0
+                    cerrar_sesion(iv.sesion_id, total)
+                    log.info(
+                        "Sesion %s cerrada antes de apagar la PC.", iv.sesion_id
+                    )
+            else:
+                # Fallback sin vista: cerrar cualquier sesion Activa en BD.
+                sesion_id = sesion_activa_actual()
+                if sesion_id is not None:
+                    try:
+                        total = self.controlador.cortes_totales()
+                    except Exception:  # noqa: BLE001
+                        total = 0
+                    cerrar_sesion(sesion_id, total)
+                    log.info(
+                        "Sesion %s cerrada antes de apagar la PC.", sesion_id
+                    )
+        except Exception:  # noqa: BLE001 - no debe tumbar el apagado
+            log.error("No se pudo cerrar la sesion antes de apagar", exc_info=True)
+
+        # Cierre ordenado antes de apagar: reporte del dia, HAL y lector
+        # biometrico. Si algo falla, igual se apaga la PC: no bloqueamos el
+        # apagado por un fallo de cierre.
+        try:
+            self._exportar_antes_de_salir()
+        except Exception:  # noqa: BLE001 - no debe tumbar el apagado
+            log.error("Export antes de apagar fallo", exc_info=True)
+        try:
+            self.controlador.cleanup()
+        except Exception:  # noqa: BLE001 - no debe tumbar el apagado
+            log.error("cleanup del controlador fallo", exc_info=True)
+        try:
+            self.biometrico.cerrar()
+        except Exception:  # noqa: BLE001 - no debe tumbar el apagado
+            log.error("cerrar lector biometrico fallo", exc_info=True)
+
         try:
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
