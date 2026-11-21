@@ -234,6 +234,9 @@ class InicioView(
         self._paro_inicio_momento = None
         self._ultimo_color_rojo = None
         self._paro_autorizacion_pendiente = False
+        # Momento del ultimo pulso de buzzer periodico para paro vencido
+        # (torre roja ya encendida; solo se repite el buzzer cada minuto).
+        self._ultimo_buzzer_paro_vencido = 0.0
         # Seguro anti-corrida (todos los paros reales): ventana movil de
         # cortes fisicos (totales + excluidos) para detectar una corrida no
         # autorizada. `_ultimo_total_fisico=None` re-basela al entrar en un
@@ -244,6 +247,11 @@ class InicioView(
         # Cortes excluidos ANTES del inicio de la ventana detectada: son
         # piezas de prueba y NO se incorporan al confirmar la corrida.
         self._excluidos_previos_rafaga = 0
+        # Espera de corrida (seguro anti-corrida): antes de parar la maquina
+        # se espera a que no se detecten cortes durante al menos
+        # SEGURO_PARO_SEGUNDOS (3 s). Timer y bandera para controlarlo.
+        self._timer_espera_corrida = None
+        self._espera_corrida_parado = False
         # Trabajo abierto (fila de la tabla `trabajos`, folio unico) y el
         # valor de cortes_totales() al asignarlo: los cortes del trabajo se
         # calculan como total - baseline. Con folio re-escanado y Abierto, el
@@ -484,6 +492,7 @@ class InicioView(
         self._refrescar_estado_maquina()
         self._verificar_inactividad()
         self._verificar_timeout_primera_pieza()
+        self._verificar_buzzer_periodico_paro_vencido()
         QTimer.singleShot(config.REFRESCO_CONTADOR_MS, self._refrescar_contador)
 
     def _refrescar_labels_cortes(self):

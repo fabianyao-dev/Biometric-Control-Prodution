@@ -223,6 +223,10 @@ class App(QMainWindow):
         self.kiosko = os.environ.get("BIOMETRICO_KIOSKO") != "0"
         if self.kiosko:
             log.info("Modo kiosco activado")
+        # Marca de cierre por actualizacion: si es True, closeEvent salta el
+        # guard de maquina en marcha y permite cerrar la app para que el
+        # updater reemplace los archivos y relance la app.
+        self._actualizando = False
 
     # ------------------------------------------------------------------
     # Header + hamburguesa
@@ -1012,10 +1016,14 @@ class App(QMainWindow):
         # Shutdown seguro: guard de seguridad + liberacion del HAL. El guard
         # vive AQUI (no en _salir) para cubrir tambien Alt+F4 y el cierre del
         # sistema: con la maquina EN MARCHA la ventana no se cierra.
-        vista = self.vistas.get("inicio")
-        if vista is not None and not vista.aplicacion_puede_cerrarse():
-            evento.ignore()
-            return
+        # Si se cierra por actualizacion (_actualizando=True), se salta el
+        # guard para que el updater pueda reemplazar los archivos y relanzar
+        # la app.
+        if not getattr(self, "_actualizando", False):
+            vista = self.vistas.get("inicio")
+            if vista is not None and not vista.aplicacion_puede_cerrarse():
+                evento.ignore()
+                return
         # Ultima oportunidad del reporte del dia: a partir de aqui ya no hay
         # ticks ni senales (la PC se va a apagar), asi que lo que falte se
         # genera ahora, con la app todavia viva.

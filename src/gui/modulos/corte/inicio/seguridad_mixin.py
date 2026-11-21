@@ -296,10 +296,19 @@ class SeguridadMixin:
         threading.Thread(target=_sonar, daemon=True).start()
 
     def _preguntar_corrida(self, n_cortes, ventana):
-        """Modal '¿Ya empezo a correr?' del seguro anti-corrida."""
+        """Modal '¿Ya empezo a correr?' del seguro anti-corrida.
+
+        Se muestra el modal inmediatamente y se espera a que la maquina deje
+        de detectar cortes durante al menos SEGURO_PARO_SEGUNDOS (3 s)
+        antes de pararla en el PLC. Se vuelve a encender al responder (Sí o
+        No).
+        """
         modo = self._etiqueta_paro_actual()
         self._modal_abierto = True
         try:
+            # Iniciar la espera de 3 s sin cortes antes de parar. El modal
+            # se muestra al mismo tiempo para no bloquear al operador.
+            self._iniciar_espera_paro_corrida()
             caja = QMessageBox(self.controller)
             caja.setWindowTitle("Posible corrida sin conteo")
             caja.setIcon(QMessageBox.Warning)
@@ -322,6 +331,73 @@ class SeguridadMixin:
                 )
         finally:
             self._modal_abierto = False
+            # Detener el temporizador de espera (si aun corre) y volver a
+            # encender la maquina al responder (Sí o No).
+            self._detener_espera_paro_corrida()
+            try:
+                self.controlador.reprisar_maquina()
+                self.controlador.reiniciar_gracia_inactividad()
+                self._refrescar_estado_maquina()
+            except Exception:  # noqa: BLE001
+                log.debug("reprisar_maquina fallo al cerrar modal de corrida",
+                          exc_info=True)
+
+    def _iniciar_espera_paro_corrida(self):
+        """Espera a que no se detecten cortes durante al menos
+        SEGURO_PARO_SEGUNDOS (3 s) y entonces para la maquina en el PLC.
+
+        No bloquea la GUI: usa un QTimer que revisa periodicamente.
+        """
+        if self._timer_espera_corrida is None:
+            self._timer_espera_corrida = QTimer()
+            self._timer_espera_corrida.setInterval(
+                config.REFRESCO_CONTADOR_MS
+            )
+            self._timer_espera_corrida.timeout.connect(
+                self._verificar_espera_paro_corrida
+            )
+        self._espera_corrida_parado = False
+        self._timer_espera_corrida.start()
+
+    def _verificar_espera_paro_corrida(self):
+        """Callback del timer de espera de corrida.
+
+        Cuando `segundos_sin_corte() >= SEGURO_PARO_SEGUNDOS` (la maquina lleva
+        al menos 3 s sin cortar), se para en el PLC y se detiene el timer.
+        """
+        if not self._timer_espera_corrida or self._espera_corrida_parado:
+            return
+        try:
+            sin_corte = self.controlador.segundos_sin_corte()
+        except Exception:  # noqa: BLE001
+            return
+        if sin_corte is None or sin_corte < config.SEGURO_PARO_SEGUNDOS:
+            log.info(
+                "Espera corrida: %.1f s sin cortes, se esperan %.0f s antes "
+                "de parar", sin_corte, config.SEGURO_PARO_SEGUNDOS
+            )
+            return  # Todavia hay cortes recientes: seguir esperando.
+        # Ya pasaron al menos 3 s sin cortes: parar la maquina en el PLC.
+        try:
+            self.controlador.maquina_pausada()
+            log.info(
+                "Maquina parada por espera de corrida: %.1f s sin cortes",
+                sin_corte,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("maquina_pausada fallo en espera de corrida",
+                      exc_info=True)
+        self._espera_corrida_parado = True
+        self._timer_espera_corrida.stop()
+        self._estado(
+            "Maquina detenida: no se detectan cortes. Responda el modal.",
+            "procesando",
+        )
+
+    def _detener_espera_paro_corrida(self):
+        """Detiene el temporizador de espera de corrida si aun esta activo."""
+        if self._timer_espera_corrida is not None:
+            self._timer_espera_corrida.stop()
 
     def _abrir_huella_corrida(self):
         """Autorizacion por huella para contar la corrida detectada.
@@ -423,17 +499,24 @@ class SeguridadMixin:
             self._paro_inicio_momento = None
             self._ultimo_color_rojo = None
             self.controlador.retomar_conteo()
+        self._refrescar_labels_cortes()
+        # Volver a encender la maquina tras resolver la corrida (ya se detuvo
+        # al mostrar el modal de pregunta; aquí se asegura el encendido para
+        # quien llame este metodo directamente).
+        try:
             self.controlador.reprisar_maquina()
             self.controlador.reiniciar_gracia_inactividad()
             self._refrescar_estado_maquina()
-        self._refrescar_labels_cortes()
+        except Exception:  # noqa: BLE001
+            log.debug("reprisar_maquina fallo al finalizar corrida de paro",
+                      exc_info=True)
         if suspendido:
             detalle = f"{a_incorporar} cortes incorporados al conteo. "
         else:
             detalle = "Los cortes ya estaban en el total de la sesion. "
         self._estado(
             f"Corrida confirmada por {nombre}: {detalle}"
-            "Paro resuelto; la maquina continua en marcha.",
+            "Paro resuelto; la maquina esta en marcha.",
             "exito",
         )
         log.info("Corrida en %s confirmada por %s: %s cortes incorporados "
@@ -497,6 +580,22 @@ class SeguridadMixin:
             self._actualizar_torre()
             return
         self._pulso_buzzer_plc()
+
+    def _verificar_buzzer_periodico_paro_vencido(self):
+        """Suena el buzzer cada minuto mientras el paro siga vencido.
+
+        La torre ya esta ROJA (la luz permanece encendida); solo se repite
+        el pulso de alarma (Q6) para que el operador no se acostumbre al
+        silencio. No toca el ancla de la tolerancia.
+        """
+        if not (self._paro_real_abierto() and self._tolerancia_paro_vencida()):
+            return
+        ahora = time.time()
+        if ahora - self._ultimo_buzzer_paro_vencido < 60.0:
+            return
+        self._pulso_buzzer_plc()
+        self._ultimo_buzzer_paro_vencido = ahora
+        log.info("Buzzer periodico de paro vencido (torre roja mantenida).")
 
     def _tolerancia_paro_vencida(self):
         """True si el paro lleva mas de `PRIMERA_PIEZA_TIMEOUT_S`.

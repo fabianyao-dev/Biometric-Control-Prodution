@@ -227,25 +227,19 @@ class ParoMixin:
         # modal que pide la huella de reanudacion/autorizacion.
         def _on_confirmado(causa_id, causa_desc, zona_id, zona_nombre,
                            zona_maquina=False):
+            # Al confirmar la causa (y la zona) se entra DIRECTAMENTE al modo
+            # correspondiente: YA NO se pide huella al confirmar la causa del
+            # paro (ni del mantenimiento). La huella solo se pide al
+            # FINALIZAR el paro o el mantenimiento (SALIR DE PARO /
+            # SALIR DE MANTENIMIENTO).
             if self._es_causa_mantenimiento(causa_id):
-                # Flujo Mantenimiento: PRIMERO huella del personal de
-                # mantenimiento y LUEGO la reanudacion del operador.
-                self._pedir_huella_mantenimiento(
-                    lambda id_mant, nombre_mant, causa=None:
-                        self._mantenimiento_entrada_paso_operador(
-                            id_mant, nombre_mant, causa_id, zona_id,
-                            causa_desc, zona_nombre
-                        )
+                self._entrar_modo_mantenimiento_directo(
+                    causa_id, zona_id, causa_desc, zona_nombre
                 )
             else:
-                # Los DOS modales del paro llevan SIEMPRE el mismo titulo,
-                # haya zona o no: 1) 'AUTORIZACION DEL PARO' (elegir causa y
-                # zona), 2) 'AUTORIZACION' (la huella que autoriza). Antes
-                # el 2º decia 'REANUDACION' con zona y 'AUTORIZAR
-                # REANUDACION' sin ella, que no describian lo que hace.
-                self._pedir_huella_reanudacion(
+                self._entrar_modo_paro_directo(
                     causa_id, zona_id, causa_desc, zona_nombre,
-                    titulo="AUTORIZACION", zona_maquina=zona_maquina,
+                    zona_maquina=zona_maquina,
                 )
 
         # Torre ROJA + buzzer mientras el operador elige la causa y autoriza
@@ -276,6 +270,75 @@ class ParoMixin:
             self._modal_abierto = False
             self._paro_autorizacion_pendiente = False
             self._actualizar_torre()
+
+    def _entrar_modo_paro_directo(self, causa_id, zona_id, causa_desc,
+                                  zona_nombre, zona_maquina=False):
+        """Entra al MODO PARO SIN pedir huella al confirmar la causa.
+
+        El operador de la sesion activa el paro directamente. La huella se
+        pide solo al finalizar (SALIR DE PARO).
+        """
+        self._modo_paro = True
+        self._modo_paro_causa_id = causa_id
+        self._modo_paro_causa_desc = (
+            causa_desc or self._causa_descripcion(causa_id) or "(sin causa)"
+        )
+        self._modo_paro_zona_id = zona_id
+        self._modo_paro_maquina_encendida = bool(zona_maquina)
+        self._en_paro = True
+        self._paro_idle_triggado = False
+        self._rearmar_buzzer_si_paro_vencido()
+        if zona_maquina:
+            self.controlador.reprisar_maquina()
+            self.controlador.suspender_conteo()
+        self._refrescar_estado_maquina()
+        zona_nom = zona_nombre or (str(zona_id) if zona_id is not None else None)
+        if zona_maquina:
+            self._estado(
+                f"Paro activado ({self._modo_paro_causa_desc}). Zona "
+                f"'{zona_nom}' deja la maquina en marcha; los cortes NO "
+                "cuentan. Pulsa SALIR DE PARO al terminar.",
+                "procesando",
+            )
+        else:
+            self._estado(
+                f"Paro activado ({self._modo_paro_causa_desc}). "
+                "Maquina detenida. Pulsa SALIR DE PARO al terminar.",
+                "procesando",
+            )
+        log.info("Paro %s activado por %s en la sesion %s (causa %s, zona "
+                 "%s, maquina %s)", self.paro_id, self.operador_nombre,
+                 self.sesion_id, causa_id, zona_id,
+                 "en marcha" if zona_maquina else "detenida")
+
+    def _entrar_modo_mantenimiento_directo(self, causa_id, zona_id,
+                                           causa_desc, zona_nombre):
+        """Entra al MODO MANTENIMIENTO SIN pedir huella al confirmar la causa.
+
+        El modo se activa directamente. La huella (mantenimiento + operador)
+        se pide solo al finalizar (SALIR DE MANTENIMIENTO).
+        """
+        self.controlador.reprisar_maquina()
+        self.controlador.suspender_conteo()
+        self._mantenimiento_zona_id = zona_id
+        self._en_paro = False
+        self._paro_idle_triggado = False
+        self._modo_mantenimiento = True
+        self._rearmar_buzzer_si_paro_vencido()
+        self._fijar_switch(False)
+        self._muestras_rafaga.clear()
+        self._ultimo_total_fisico = self._total_fisico()
+        self._rafaga_en_curso = False
+        self._excluidos_previos_rafaga = 0
+        self._refrescar_estado_maquina()
+        self._estado(
+            "Modo Mantenimiento activado. La maquina sigue en marcha; los "
+            "cortes NO cuentan. Pulsa SALIR DE MANTENIMIENTO al terminar.",
+            "procesando",
+        )
+        log.info("Modo Mantenimiento activado (paro %s) en la sesion %s "
+                 "por %s", self.paro_id, self.sesion_id,
+                 self.operador_nombre)
 
     def _pedir_huella_reanudacion(self, causa_id=None, zona_id=None,
                                   causa_desc=None, zona_nombre=None,

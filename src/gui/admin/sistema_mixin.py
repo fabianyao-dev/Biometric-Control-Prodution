@@ -357,8 +357,8 @@ class SistemaMixin:
             f"Versión seleccionada: {version}\n"
             f"Publicada: {publicada}\n\n"
             f"Notas:\n{notas}{aviso}\n\n"
-            "La aplicación se cerrará y reabrirá automáticamente para aplicar "
-            "la actualización."
+            "La GUI de corte se ocultará y la aplicación se quedará abierta "
+            "mientras se aplica la actualización en segundo plano."
         )
         caja.setIcon(
             QMessageBox.Warning if estado == "anterior" else QMessageBox.Information
@@ -428,10 +428,11 @@ class SistemaMixin:
             self._set_botones_habilitados(True)
             return
         self._lbl_actualizar(f"Aplicando versión {version}...", "procesando")
-        # El updater ya corre en proceso separado: cierra la app para que
-        # libere sus archivos (el updater espera a que este proceso salga).
-        # Usar close() (closeEvent) en lugar de _salir() para no apagar la
-        # computadora: _salir() apaga la PC si el rol es operador; aqui
-        # solo queremos cerrar la ventana y dejar que el updater trabaje.
+        # El updater ya corre en proceso separado. Se cierra toda la
+        # aplicacion para que libere sus archivos (el updater espera a que
+        # termine este proceso para reemplazar archivos y relanzar la app).
+        # Se marca _actualizando para que closeEvent salte el guard de
+        # maquina en marcha y permita el cierre durante la actualizacion.
+        self.controller._actualizando = True
         self.close()
 
