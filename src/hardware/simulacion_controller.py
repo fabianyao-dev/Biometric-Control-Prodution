@@ -208,7 +208,13 @@ class SimulacionController:
         log.info("[SIM] Torre: verde=%s ambar=%s roja=%s", verde, ambar, roja)
 
     def pulso_alarma(self):
-        log.info("[SIM] Torre ALARMA (3s discontinuos)")
+        log.info("[SIM] Torre ALARMA (indefinida hasta detener_alarma).")
+
+    def activar_alarma(self):
+        log.info("[SIM] Torre ALARMA activada (indefinida).")
+
+    def detener_alarma(self):
+        log.info("[SIM] Torre ALARMA detenida.")
 
     def cleanup(self):
         """Resetea el estado. Idempotente."""
@@ -218,6 +224,7 @@ class SimulacionController:
         self._maquina_en_marcha = False
         try:
             self.establecer_torre(False, False, False)
+            self.detener_alarma()
         except Exception:
             pass
         log.info("SimulacionController liberado")

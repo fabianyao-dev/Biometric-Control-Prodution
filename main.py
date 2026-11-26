@@ -946,12 +946,11 @@ class App(QMainWindow):
                 f"No se puede cerrar: {motivo}"
             )
 
-    def _apagar_computadora(self):
-        """Cierra la sesion activa (si la hay) y apaga la computadora."""
-        self.popup_salir.close()
+    def _cerrar_sesion_activa(self):
+        """Cierra la sesion activa (si la hay) antes de salir, para no
+        dejarla 'Activa' huorfana (como tras un corte de luz o un cierre
+        por la X / Alt+F4 / modo Windows). Nunca debe bloquear el cierre."""
         try:
-            # Cierra la sesion activa antes de apagar, para no dejarla
-            # 'Activa' huérfana (como tras un corte de luz).
             vista_inicio = self.vistas.get("inicio")
             if vista_inicio is not None:
                 iv = vista_inicio.vista_actual()
@@ -961,23 +960,24 @@ class App(QMainWindow):
                     except Exception:  # noqa: BLE001
                         total = 0
                     cerrar_sesion(iv.sesion_id, total)
-                    log.info(
-                        "Sesion %s cerrada antes de apagar la PC.", iv.sesion_id
-                    )
-            else:
-                # Fallback sin vista: cerrar cualquier sesion Activa en BD.
-                sesion_id = sesion_activa_actual()
-                if sesion_id is not None:
-                    try:
-                        total = self.controlador.cortes_totales()
-                    except Exception:  # noqa: BLE001
-                        total = 0
-                    cerrar_sesion(sesion_id, total)
-                    log.info(
-                        "Sesion %s cerrada antes de apagar la PC.", sesion_id
-                    )
-        except Exception:  # noqa: BLE001 - no debe tumbar el apagado
-            log.error("No se pudo cerrar la sesion antes de apagar", exc_info=True)
+                    log.info("Sesion %s cerrada antes de salir.", iv.sesion_id)
+                    return
+            # Fallback sin vista: cerrar cualquier sesion Activa en BD.
+            sesion_id = sesion_activa_actual()
+            if sesion_id is not None:
+                try:
+                    total = self.controlador.cortes_totales()
+                except Exception:  # noqa: BLE001
+                    total = 0
+                cerrar_sesion(sesion_id, total)
+                log.info("Sesion %s cerrada antes de salir.", sesion_id)
+        except Exception:  # noqa: BLE001 - nunca debe bloquear el cierre
+            log.error("No se pudo cerrar la sesion antes de salir", exc_info=True)
+
+    def _apagar_computadora(self):
+        """Cierra la sesion activa (si la hay) y apaga la computadora."""
+        self.popup_salir.close()
+        self._cerrar_sesion_activa()
 
         # Cierre ordenado antes de apagar: reporte del dia, HAL y lector
         # biometrico. Si algo falla, igual se apaga la PC: no bloqueamos el
@@ -1024,6 +1024,10 @@ class App(QMainWindow):
             if vista is not None and not vista.aplicacion_puede_cerrarse():
                 evento.ignore()
                 return
+        # Cierra la sesion activa (si la hay) para no dejarla 'Activa'
+        # al cerrar por la X, Alt+F4 o el modo Windows del admin.
+        self._cerrar_sesion_activa()
+
         # Ultima oportunidad del reporte del dia: a partir de aqui ya no hay
         # ticks ni senales (la PC se va a apagar), asi que lo que falte se
         # genera ahora, con la app todavia viva.

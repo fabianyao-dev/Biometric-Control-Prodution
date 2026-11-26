@@ -500,40 +500,54 @@ def test_torre_no_relatchea_el_paro_con_la_palabra_vieja(monkeypatch):
     assert ctrl._reg_j[ctrl._tower_register] & 0b10 == 0
 
 
-def test_alarma_parpadea_y_termina(monkeypatch):
-    """Al entrar en rojo la alarma se enciende y se apaga (discontinua) y
-    deja de sonar al cumplirse la duracion."""
-    ctrl, cliente = _controlador(monkeypatch, tower_alarm_duracion_s=0.3)
+def test_alarma_parpadea_indefinido_hasta_detener(monkeypatch):
+    """La alarma se enciende y parpadea indefinidamente; solo se apaga con
+    detener_alarma()."""
+    ctrl, cliente = _controlador(monkeypatch)
     ctrl._conectar()
     ctrl.establecer_torre(False, False, True)
     cliente.escrituras.clear()
 
-    ctrl.pulso_alarma()
+    ctrl.activar_alarma()
     ctrl._gestionar_alarma()
-    # Primer tick: alarma ENCENDIDA junto con la roja.
+    # Primer tick: alarma ENCENDIDA junto con la roja (bit 5 = 32).
     assert cliente.escrituras[-1] == ("registro", 16, 0b11_0010)
 
     ctrl._gestionar_alarma()
-    # Segundo tick: alarma APAGADA (la roja sigue).
+    # Segundo tick: alarma APAGADA (la roja sigue, bit 5 = 0).
     assert cliente.escrituras[-1] == ("registro", 16, 0b1_0010)
 
-    time.sleep(0.35)
-    ctrl._gestionar_alarma()
+    # Sigue activa: no se apaga sola.
+    assert ctrl._torre_alarma_activa is True
 
+    ctrl.detener_alarma()
+    ctrl._gestionar_alarma()
+    # Tras detener: alarma apagada y bandera desactivada.
     assert ctrl._torre_alarma_activa is False
     assert cliente.escrituras[-1] == ("registro", 16, 0b1_0010)
 
 
 def test_pulso_alarma_es_idempotente(monkeypatch):
-    """Mientras la ventana siga abierta no se reinicia el parpadeo."""
+    """Mientras la alarma este activa, llamar pulso_alarma() no la reinicia."""
     ctrl, cliente = _controlador(monkeypatch)
     ctrl._conectar()
 
     ctrl.pulso_alarma()
-    fin = ctrl._alarma_fin
     ctrl.pulso_alarma()
 
-    assert ctrl._alarma_fin == fin
+    assert ctrl._torre_alarma_activa is True
+
+
+def test_detener_alarma_sin_activar_es_noop(monkeypatch):
+    """detener_alarma() sin haber activado no hace nada."""
+    ctrl, cliente = _controlador(monkeypatch)
+    ctrl._conectar()
+    cliente.escrituras.clear()
+
+    ctrl.detener_alarma()
+
+    assert cliente.escrituras == []
+    assert ctrl._torre_alarma_activa is False
 
 
 def test_heartbeat_conmuta_el_bit_de_j4(monkeypatch):

@@ -122,6 +122,12 @@ class _ControladorTorre:
     def pulso_alarma(self):
         self.torre.append("ALARMA")
 
+    def activar_alarma(self):
+        self.torre.append("ALARMA_ACTIVADA")
+
+    def detener_alarma(self):
+        self.torre.append("ALARMA_DETENIDA")
+
     def cortes_totales(self):
         return self.cortes
 
@@ -386,7 +392,7 @@ def test_alarma_suena_al_entrar_en_rojo_desde_el_modo_paro(tol_60):
         _paro_inicio_momento=time.time() - 120,
     )
     vista._actualizar_torre()
-    assert vista.controlador.torre[-1] == "ALARMA"
+    assert vista.controlador.torre[-1] == "ALARMA_ACTIVADA"
 
 
 def test_actualizar_torre_dispara_la_alarma_solo_al_entrar_en_rojo(tol_60):
@@ -398,7 +404,7 @@ def test_actualizar_torre_dispara_la_alarma_solo_al_entrar_en_rojo(tol_60):
     vista._actualizar_torre()
     vista._actualizar_torre()
 
-    assert vista.controlador.torre.count("ALARMA") == 1
+    assert vista.controlador.torre.count("ALARMA_ACTIVADA") == 1
 
     # Al salir del rojo se rearma: la siguiente entrada vuelve a sonar.
     vista._en_paro = False
@@ -409,7 +415,7 @@ def test_actualizar_torre_dispara_la_alarma_solo_al_entrar_en_rojo(tol_60):
     vista._en_paro = True
     vista.controlador.detenida = True
     vista._actualizar_torre()
-    assert vista.controlador.torre.count("ALARMA") == 2
+    assert vista.controlador.torre.count("ALARMA_ACTIVADA") == 2
 
 
 def test_actualizar_torre_aplica_el_color_decidido():
@@ -442,7 +448,7 @@ def test_actualizar_torre_dispara_alarma_al_abrir_modal_de_paro():
     )
     vista._actualizar_torre()
     vista._actualizar_torre()
-    assert vista.controlador.torre.count("ALARMA") == 1
+    assert vista.controlador.torre.count("ALARMA_ACTIVADA") == 1
 
 
 def test_torre_ambar_al_autorizar_el_paro():
@@ -482,62 +488,75 @@ def test_torre_roja_directa_al_abrir_el_modal_de_paro(tol_60):
     assert vista._estado_torre() == (False, False, True)
 
 
-def test_autorizar_tarde_rearma_el_buzzer(tol_60):
-    """Si la tolerancia vencio con el modal abierto, autorizar vuelve a sonar."""
+def test_alarma_sonada_indefinido_mi_estado_torre_roja(tol_60):
+    """Con paro abierto y tolerancia vencida, la alarma debe estar sonando."""
     vista = _vista_torre(
         detenida=True, _en_paro=True, _modo_paro=True,
         _paro_autorizacion_pendiente=True,
         _paro_inicio_momento=time.time() - 120,
         _ultimo_color_rojo="rojo",
     )
-    vista.paro_id = 5
-    pulsos = []
-    vista._pulso_buzzer_plc = lambda: pulsos.append(1)
-    vista._refrescar_estado_maquina = lambda: None
-    vista._estado = lambda *args, **kwargs: None
-    vista._causa_descripcion = lambda causa_id: None
-
-    vista._autorizado_autenticado(7, "Ana", causa_id=1)
-
-    assert pulsos == [1]
+    vista._actualizar_torre()
+    # La alarma esta activada (indefinida) porque hay paro vencido.
+    assert vista._alarma_sonando is True
+    assert "ALARMA_ACTIVADA" in vista.controlador.torre
     assert vista._estado_torre() == (False, False, True)
 
 
-def test_autorizar_a_tiempo_no_rearma_el_buzzer(tol_60):
+def test_alarma_sigue_sonando_despues_de_autorizar_tarde(tol_60):
+    """Autorizar con tolerancia vencida: la alarma sigue sonando (no se para)."""
+    vista = _vista_torre(
+        detenida=True, _en_paro=True, _modo_paro=True,
+        _paro_autorizacion_pendiente=True,
+        _paro_inicio_momento=time.time() - 120,
+        _ultimo_color_rojo="rojo",
+    )
+    vista._actualizar_torre()
+    assert vista._alarma_sonando is True
+
+    vista.paro_id = 5
+    vista._causa_descripcion = lambda causa_id: None
+    vista._refrescar_estado_maquina = lambda: None
+    vista._estado = lambda *args, **kwargs: None
+    vista._autorizado_autenticado(7, "Ana", causa_id=1)
+
+    # Tras autorizar, el paro sigue abierto y vencido: la alarma sigue sonando.
+    assert vista._alarma_sonando is True
+    assert vista._estado_torre() == (False, False, True)
+
+
+def test_alarma_sonando_por_autorizacion_pendiente_aun_sin_vencer(tol_60):
+    """Aunque la tolerancia no haya vencido, el modal de paro abierto
+    mantiene la alarma sonando."""
     vista = _vista_torre(
         detenida=True, _en_paro=True, _modo_paro=True,
         _paro_autorizacion_pendiente=True,
         _paro_inicio_momento=time.time(),
         _ultimo_color_rojo="rojo",
     )
-    vista.paro_id = 5
-    pulsos = []
-    vista._pulso_buzzer_plc = lambda: pulsos.append(1)
-    vista._refrescar_estado_maquina = lambda: None
-    vista._estado = lambda *args, **kwargs: None
-    vista._causa_descripcion = lambda causa_id: None
-
-    vista._autorizado_autenticado(7, "Ana", causa_id=1)
-
-    assert pulsos == []
+    vista._actualizar_torre()
+    assert vista._alarma_sonando is True
+    assert vista._estado_torre() == (False, False, True)
 
 
-def test_mantenimiento_iniciado_rearma_el_buzzer_si_vencio(tol_60):
+def test_mantenimiento_iniciado_alarma_sigue_sonando_si_vencio(tol_60):
+    """Modo paro con tolerancia vencida: al entrar a Mantenimiento la alarma
+    sigue sonando (no se detiene ni se reinicia)."""
     vista = _vista_torre(detenida=False)
     vista.paro_id = 5
     vista._modo_paro = True
     vista._paro_inicio_momento = time.time() - 120
     vista._ultimo_color_rojo = "rojo"
-    pulsos = []
-    vista._pulso_buzzer_plc = lambda: pulsos.append(1)
+    vista._actualizar_torre()
+    assert vista._alarma_sonando is True
+
     vista._fijar_switch = lambda *args, **kwargs: None
     vista._refrescar_estado_maquina = lambda: None
     vista._estado = lambda *args, **kwargs: None
-
     vista._modo_mantenimiento_iniciado(7, "Ana", 8, "Mant", 1, None)
 
     assert vista._modo_mantenimiento is True
-    assert pulsos == [1]
+    assert vista._alarma_sonando is True
 
 
 # ----------------------------------------------------------------------

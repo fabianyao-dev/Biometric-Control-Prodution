@@ -157,6 +157,7 @@ class ParoMixin:
         self._paro_idle_triggado = False
         self._paro_inicio_momento = None
         self._ultimo_color_rojo = None
+        self._paro_es_manual = None
         try:
             if hasattr(self.controlador, "establecer_torre"):
                 self.controlador.establecer_torre(False, False, False)
@@ -186,6 +187,9 @@ class ParoMixin:
     def _pausar_maquina(self, motivo="manual", inicio_hace_s=None):
         self.controlador.maquina_pausada()
         self._en_paro = True
+        # Rastrear si es paro manual para decidir si suena la alarma
+        # durante el modal de autorizacion.
+        self._paro_es_manual = (motivo == "manual")
         # Ancla de la torre: el paro arranca aqui aunque el operador tarde en
         # autorizarlo (pasada la tolerancia se enciende la roja y la alarma).
         # En el auto-paro por inactividad `inicio_hace_s` retrasa el ancla al
@@ -477,6 +481,14 @@ class ParoMixin:
             if causa["id"] == causa_id:
                 return str(causa["descripcion"])
         return None
+
+    def _es_causa_comida(self, causa_id) -> bool:
+        """True si la causa del paro es 'comida' (no suena alarma)."""
+        return (causa_id is not None
+                and causa_id == self._causa_comida_id())
+
+    def _causa_comida_id(self):
+        return self._causa_id("comida")
 
     def _paro_real_abierto(self):
         """True si hay un paro registrado que la torre debe vigilar.

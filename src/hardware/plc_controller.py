@@ -150,7 +150,6 @@ class PLCController:
         self._tower_red_bit = int(cfg.get("tower_red_bit", 4))
         self._tower_alarm_bit = int(cfg.get("tower_alarm_bit", 5))
         self._tower_hb_bit = int(cfg.get("tower_heartbeat_bit", 0))
-        self._tower_alarm_duracion_s = float(cfg.get("tower_alarm_duracion_s", 3))
         self._tower_hb_ms = int(cfg.get("tower_heartbeat_ms", 2000))
         # Estado actual de la torre
         self._torre_verde = False
@@ -160,8 +159,6 @@ class PLCController:
         self._alarma_encendida = False
         self._heartbeat_estado = False
         self._ultimo_hb = time.time()
-        self._alarma_inicio = 0.0
-        self._alarma_fin = 0.0
         # Exclusion de cortes (modo "Primera pieza"): con el conteo
         # suspendido los deltas van a `_cortes_excluidos`, NO a `_cortes`.
         # Viven solo en memoria y se pierden al retomar (piezas de prueba/
@@ -363,7 +360,7 @@ class PLCController:
         self._torre_roja = None
         self._torre_alarma_activa = False
         self._alarma_encendida = False
-        self._alarma_fin = 0.0
+        self._heartbeat_estado = False
         # La palabra de la torre es la MISMA que la de los comandos (dir 16):
         # NO se puede borrar del cache, o la siguiente escritura perderia el
         # latch de PARO y la maquina quedaria habilitada. Se limpian solo los
@@ -799,36 +796,41 @@ class PLCController:
             self._escribir_bit_torre(cliente, self._tower_alarm_bit,
                                      self._alarma_encendida)
 
-    def pulso_alarma(self):
-        """Arranca la alarma discontinua (solo al ENTRAR en rojo).
+    def activar_alarma(self):
+        """Activa la alarma/buzzer de la torre (Q6) de forma INDEFINIDA.
 
-        El parpadeo lo ejecuta `_gestionar_alarma()` desde el hilo de
-        polling; aqui solo se abre la ventana de tiempo. Es idempotente
-        mientras la ventana siga abierta.
+        Se mantiene parpadeando hasta que se llame a detener_alarma().
+        Idempotente.
         """
         if self._torre_alarma_activa:
             return
         self._torre_alarma_activa = True
-        self._alarma_inicio = time.time()
-        self._alarma_fin = self._alarma_inicio + self._tower_alarm_duracion_s
         self._alarma_encendida = False
-        log.info("Torre: alarma discontinua durante %.1f s.",
-                 self._tower_alarm_duracion_s)
+        log.info("Torre: alarma activada (indefinida).")
 
-    def _gestionar_alarma(self):
-        """Parpadea el bit de alarma mientras dure la ventana.
-
-        Conmutar en cada tick (en vez de calcular la fase) garantiza que la
-        senal sea DISCONTINUA aunque el sondeo no caiga exacto: con
-        `_poll_ms` de 500 ms el resultado es 500 ms encendida / 500 ms
-        apagada, que es justo el requisito.
-        """
+    def detener_alarma(self):
+        """Detiene la alarma/buzzer de la torre (Q6) y apaga el bit."""
         if not self._torre_alarma_activa:
             return
-        if time.time() >= self._alarma_fin:
-            self._torre_alarma_activa = False
-            self._escribir_alarma(False)
-            log.info("Torre: fin de la alarma.")
+        self._torre_alarma_activa = False
+        self._escribir_alarma(False)
+        self._alarma_encendida = False
+        log.info("Torre: alarma detenida.")
+
+    def pulso_alarma(self):
+        """Compatibilidad: activa la alarma indefinida (antes era una ventana finita).
+
+        Usar `activar_alarma()` / `detener_alarma()` en codigo nuevo.
+        """
+        self.activar_alarma()
+
+    def _gestionar_alarma(self):
+        """Parpadea el bit de alarma mientras `torre_alarma_activa` sea True.
+
+        Ahora es indefinido: no se apaga solo tras una duracion finita. Solo
+        se detiene cuando se llama a `detener_alarma()`.
+        """
+        if not self._torre_alarma_activa:
             return
         self._escribir_alarma(not self._alarma_encendida)
 
@@ -894,6 +896,8 @@ class PLCController:
                 self._apagar_torre_bajo(cliente)
                 self._escribir_registro_torre(cliente, self._tower_hb_register,
                                               0)
+            # La alarma/buzzer nunca debe quedar sonando al cerrar la app.
+            self.detener_alarma()
             self._maquina_en_marcha = False
             self._desconectar()
         log.info("PLCController detenido (hilo de polling finalizado).")

@@ -565,37 +565,18 @@ class SeguridadMixin:
         return (False, True, False)
 
     def _rearmar_buzzer_si_paro_vencido(self):
-        """Vuelve a sonar si el paro autorizado sigue fuera de tolerancia.
+        """Forza la evaluacion de la torre y la alarma (ahora suena indefinido).
 
-        El aviso de Q6 solo se dispara al ENTRAR en rojo. Si la torre ya
-        estaba roja cuando se autorizo (la tolerancia vencio con el modal
-        abierto), no hay transicion nueva y el operador no oiria el segundo
-        aviso. Aqui se rearma UNA vez, sin tocar el ancla de la tolerancia.
+        Se conserva por compatibilidad con llamadas existentes en
+        paro_mixin y mantenimiento_mixin. `_actualizar_torre()` ya activa
+        o detiene la alarma segun el estado actual.
         """
-        if not self._tolerancia_paro_vencida():
-            return
-        if getattr(self, "_ultimo_color_rojo", None) != "rojo":
-            # Todavia no estaba roja: la transicion de `_actualizar_torre`
-            # dispara el pulso por si sola. Solo se fuerza la evaluacion.
-            self._actualizar_torre()
-            return
-        self._pulso_buzzer_plc()
+        self._actualizar_torre()
 
     def _verificar_buzzer_periodico_paro_vencido(self):
-        """Suena el buzzer cada minuto mientras el paro siga vencido.
-
-        La torre ya esta ROJA (la luz permanece encendida); solo se repite
-        el pulso de alarma (Q6) para que el operador no se acostumbre al
-        silencio. No toca el ancla de la tolerancia.
-        """
-        if not (self._paro_real_abierto() and self._tolerancia_paro_vencida()):
-            return
-        ahora = time.time()
-        if ahora - self._ultimo_buzzer_paro_vencido < 60.0:
-            return
-        self._pulso_buzzer_plc()
-        self._ultimo_buzzer_paro_vencido = ahora
-        log.info("Buzzer periodico de paro vencido (torre roja mantenida).")
+        """Ya no necesario: la alarma suena indefinidamente mientras el paro
+        siga vencido. Solo se refresca el estado de la torre por si cambio."""
+        self._actualizar_torre()
 
     def _tolerancia_paro_vencida(self):
         """True si el paro lleva mas de `PRIMERA_PIEZA_TIMEOUT_S`.
@@ -619,6 +600,35 @@ class SeguridadMixin:
             return False
         return desde >= timeout
 
+    def _alarma_debe_sonar(self):
+        """True si la alarma/buzzer de la torre (Q6) debe estar sonando ahora.
+
+        Suena INDEFINIDAMENTE hasta que el operador resuelva la situacion:
+        - Modal de seleccion de causa del paro:
+          * Paro MANUAL: NO suena durante el modal (ya no hay paso de
+            autorizacion por huella, solo se elige la causa).
+          * Los demas paros (automatico, modo PARO, Mantenimiento, Primera
+            pieza): suenan desde el primer instante.
+        - Paro real abierto con la tolerancia de paro ya vencida (despues de
+          salir del modal), EXCEPTO si la causa es 'comida'.
+        """
+        if getattr(self, "_paro_autorizacion_pendiente", False):
+            if getattr(self, "_paro_es_manual", False):
+                if not self._tolerancia_paro_vencida():
+                    return False  # paro manual en seleccion de causa y sin vencer
+                # Ya vencio: si la causa ya es comida, tampoco suena.
+                causa_id = getattr(self, "_modo_paro_causa_id", None)
+                if self._es_causa_comida(causa_id):
+                    return False
+                return True
+            return True  # otros paros suenan desde el modal
+        if self._paro_real_abierto() and self._tolerancia_paro_vencida():
+            causa_id = getattr(self, "_modo_paro_causa_id", None)
+            if self._es_causa_comida(causa_id):
+                return False  # paro por comida: nunca suena alarma
+            return True
+        return False
+
     def _actualizar_torre(self):
         v, a, r = self._estado_torre()
         ctrl = getattr(self, "controlador", None)
@@ -629,11 +639,23 @@ class SeguridadMixin:
                 ctrl.establecer_torre(v, a, r)
         except Exception:
             log.debug("establecer_torre fallo", exc_info=True)
-        if r and getattr(self, "_ultimo_color_rojo", None) != "rojo":
+
+        # Alarma/buzzer: suena indefinidamente hasta resolver la situacion.
+        debe_sonar = self._alarma_debe_sonar()
+        if debe_sonar and not getattr(self, "_alarma_sonando", False):
             try:
-                if hasattr(ctrl, "pulso_alarma"):
-                    ctrl.pulso_alarma()
+                if hasattr(ctrl, "activar_alarma"):
+                    ctrl.activar_alarma()
+                self._alarma_sonando = True
             except Exception:
-                log.debug("pulso_alarma fallo", exc_info=True)
+                log.debug("activar_alarma fallo", exc_info=True)
+        elif not debe_sonar and getattr(self, "_alarma_sonando", False):
+            try:
+                if hasattr(ctrl, "detener_alarma"):
+                    ctrl.detener_alarma()
+                self._alarma_sonando = False
+            except Exception:
+                log.debug("detener_alarma fallo", exc_info=True)
+
         self._ultimo_color_rojo = "rojo" if r else None
 
