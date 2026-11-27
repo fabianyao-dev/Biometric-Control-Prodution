@@ -435,4 +435,9 @@ class SistemaMixin:
         # maquina en marcha y permita el cierre durante la actualizacion.
         self.controller._actualizando = True
         self.close()
+        # Asegurar que el proceso de la app termine por completo (no solo la
+        # ventana GUI) para que el updater pueda reemplazar los archivos y
+        # luego relanzar la app sola.
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance().quit()
 

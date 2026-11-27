@@ -180,14 +180,6 @@ class SeguridadMixin:
         return (int(self.controlador.cortes_totales())
                 + int(self.controlador.cortes_excluidos()))
 
-    def _pulso_buzzer_plc(self):
-        """Pulso del buzzer fisico de la torre (Q6). Nunca rompe la UI."""
-        try:
-            if hasattr(self.controlador, "pulso_alarma"):
-                self.controlador.pulso_alarma()
-        except Exception:  # noqa: BLE001 - sin buzzer no debe fallar nada
-            log.debug("pulso_alarma fallo", exc_info=True)
-
     def _etiqueta_paro_actual(self):
         """Nombre legible del paro/modo activo para los mensajes del seguro."""
         if self._modo_mantenimiento:
@@ -273,7 +265,13 @@ class SeguridadMixin:
                     "(%s previos quedan como prueba)",
                     etiqueta, en_ventana, ventana,
                     self._excluidos_previos_rafaga)
-        self._pulso_buzzer_plc()
+        ctrl = getattr(self, "controlador", None)
+        if ctrl is not None and hasattr(ctrl, "activar_alarma"):
+            try:
+                ctrl.activar_alarma()
+            except Exception:  # noqa: BLE001
+                log.debug("activar_alarma fallo", exc_info=True)
+        self._alarma_sonando = True
         self._sonar_alarma()
         self._preguntar_corrida(en_ventana, ventana)
 
@@ -640,22 +638,30 @@ class SeguridadMixin:
         except Exception:
             log.debug("establecer_torre fallo", exc_info=True)
 
-        # Alarma/buzzer: suena indefinidamente hasta resolver la situacion.
+        # Alarma/buzzer: en paro vencido suena PULSO cada minuto (no
+        # indefinido). Cada pulso dura unos segundos y se apaga solo;
+        # el siguiente pulso se dispara al cumplir 60 s si el paro sigue
+        # vencido. Cuando ya no debe sonar, se detiene la alarma.
         debe_sonar = self._alarma_debe_sonar()
-        if debe_sonar and not getattr(self, "_alarma_sonando", False):
-            try:
-                if hasattr(ctrl, "activar_alarma"):
-                    ctrl.activar_alarma()
-                self._alarma_sonando = True
-            except Exception:
-                log.debug("activar_alarma fallo", exc_info=True)
-        elif not debe_sonar and getattr(self, "_alarma_sonando", False):
+        ahora = time.time()
+        ultimo = getattr(self, "_ultimo_pulso_alarma", None)
+        if debe_sonar:
+            if ultimo is None or (ahora - ultimo) >= 60:
+                try:
+                    if hasattr(ctrl, "pulso_alarma"):
+                        ctrl.pulso_alarma()
+                    self._ultimo_pulso_alarma = ahora
+                except Exception:
+                    log.debug("pulso_alarma fallo", exc_info=True)
+            self._alarma_sonando = True
+        elif getattr(self, "_alarma_sonando", False):
             try:
                 if hasattr(ctrl, "detener_alarma"):
                     ctrl.detener_alarma()
-                self._alarma_sonando = False
             except Exception:
                 log.debug("detener_alarma fallo", exc_info=True)
+            self._alarma_sonando = False
+            self._ultimo_pulso_alarma = None
 
         self._ultimo_color_rojo = "rojo" if r else None
 

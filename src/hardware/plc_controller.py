@@ -817,12 +817,12 @@ class PLCController:
         self._alarma_encendida = False
         log.info("Torre: alarma detenida.")
 
-    def pulso_alarma(self):
-        """Compatibilidad: activa la alarma indefinida (antes era una ventana finita).
-
-        Usar `activar_alarma()` / `detener_alarma()` en codigo nuevo.
-        """
+    def pulso_alarma(self, duracion_s=3):
+        """Activa la alarma/buzzer de la torre (Q6) por un pulso breve y luego
+        la apaga. Se usa para el buzzer periodico en paro vencido (cada minuto
+        mientras el paro siga vencido). No se queda sonando continuamente."""
         self.activar_alarma()
+        threading.Timer(duracion_s, self.detener_alarma).start()
 
     def _gestionar_alarma(self):
         """Parpadea el bit de alarma mientras `torre_alarma_activa` sea True.
